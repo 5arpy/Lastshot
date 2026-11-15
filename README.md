@@ -23,6 +23,8 @@
 
 **Sharing that fits Discord.** Every clip has a **Shrink & copy** button. It makes a copy small enough for Discord (10 MB by default) and puts it on your clipboard: switch to Discord and press **Ctrl+V**. You can also drag a clip straight out of Lastshot into Discord or a folder. If Discord changes its limit, or you have Nitro, change the number in **Settings › Sharing**. You don't need to wait for an app update.
 
+**A simple editor.** Cut out the boring parts, crop to 9:16 for TikTok or Shorts (or 1:1, 4:3), and join several clips into one. Plain trims stay lossless and instant; edits re-encode once at full quality on your GPU. The original clip is never changed.
+
 **Clips you can find again.** Search, sort, star and tag clips, trim them without re-encoding, split them, and grab frames as pictures. Starred clips are never auto-deleted.
 
 **Simple by default.** Home, Clips, Settings. Each settings section has its own **Advanced** button for the extra knobs, so you only see them when you want them.

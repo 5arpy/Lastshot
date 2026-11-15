@@ -2,7 +2,7 @@
 
 All notable changes to **Lastshot** (and, before 1.7.1, to **ClipFlow**, which Lastshot is forked from) are documented here. The project follows [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.8.0] - 2026-11-15
 
 ### Added
 

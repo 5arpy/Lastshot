@@ -7,7 +7,7 @@ All notable changes to **Lastshot** (and, before 1.7.1, to **ClipFlow**, which L
 ### Added
 
 - **Record one window or app.** Home's *Record screen* has *Full screen* and *Window / app*; Studio has *What to record*. Pick any open window from a searchable list. Lastshot records just that window (Windows Graphics Capture, no yellow border on Windows 11), even when it is covered by other windows, and finds the app again if its window is re-created. Instant replay follows the same choice.
-- **Mouse pointer in recordings.** Full-screen recordings and replays now show the mouse pointer (drawn on the GPU at no measurable cost; the text cursor gets an outline so it shows on any background). Turn it off in Studio or Settings › Capture with *Mouse pointer*. Window recordings follow the same setting.
+- **Mouse pointer in recordings.** Full-screen recordings and replays now show the mouse pointer (drawn on the GPU at no measurable cost; the text cursor gets an outline so it shows on any background). Turn it off with *Mouse pointer* in Studio or Settings › Instant replay. Window recordings follow the same setting.
 - **Whose sound.** *PC sound* can now be *Everything*, *Only one app* (just the game) or *Everything except one app* (leave out Discord), in Studio and Settings › Sound. The sound follows the app when it starts or restarts. Needs Windows 10 (2004) or newer.
 
 ### Fixed

@@ -90,6 +90,8 @@ features = [
     "Win32_System_WinRT_Direct3D11",
     "Win32_System_WinRT_Graphics_Capture",
     "Win32_Graphics_Direct3D_Fxc",
+    # COM callbacks (per-app sound activation).
+    "implement",
 ]
 
 [target.'cfg(windows)'.dependencies]

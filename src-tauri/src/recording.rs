@@ -43,6 +43,34 @@ pub struct Area {
 }
 /// Serialises start/stop so a double hotkey press cannot race.
 static BUSY: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+/// A settings change needs the engine restarted. Whoever takes BUSY first
+/// does it (the restart task, or a recording that starts right away), so a
+/// recording never runs on the old engine and is never cut off by the restart.
+static RESTART_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Restarts the running engine with the current settings, in the background
+/// but ordered with recording start/stop.
+pub(crate) fn restart_engine_soon(app: &AppHandle) {
+    RESTART_PENDING.store(true, Ordering::Release);
+    let h = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = BUSY.lock();
+        if !RESTART_PENDING.swap(false, Ordering::AcqRel) {
+            return; // a recording start already did it
+        }
+        let state = h.state::<AppState>();
+        let engine = Arc::clone(&state.engine);
+        if !engine.is_running() || engine.recording_status().is_some() {
+            return;
+        }
+        let cfg = state.settings.read().to_recorder_config();
+        engine.stop();
+        if let Err(e) = engine.start(cfg) {
+            log::warn!("[lastshot] restart with new settings: {e}");
+        }
+        let _ = h.emit(EVT_BUFFER_STATE, engine.stats());
+    });
+}
 
 /// Everything the control bar and the Home page show.
 #[derive(Clone, Serialize)]
@@ -139,6 +167,7 @@ pub async fn set_source(app: &AppHandle, source: crate::media::CaptureSource) ->
         let h = app.clone();
         tauri::async_runtime::spawn_blocking(move || {
             let _guard = BUSY.lock();
+            RESTART_PENDING.store(false, Ordering::Release);
             engine.stop();
             let r = engine.start(cfg).map(|_| ()).map_err(|e| e.to_string());
             let _ = h.emit(EVT_BUFFER_STATE, engine.stats());
@@ -182,6 +211,10 @@ pub async fn start_with(app: &AppHandle, area: Option<Area>) -> Result<Recording
     let h = app.clone();
     let status = tauri::async_runtime::spawn_blocking(move || {
         let _guard = BUSY.lock();
+        // Settings changed a moment ago: restart now, before recording.
+        if RESTART_PENDING.swap(false, Ordering::AcqRel) && engine.is_running() {
+            engine.stop();
+        }
         if !engine.is_running() {
             engine.start(cfg).map_err(|e| e.to_string())?;
             let _ = h.emit(EVT_BUFFER_STATE, engine.stats());

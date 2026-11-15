@@ -178,6 +178,12 @@ export type CaptureSource =
   | { kind: "display" }
   | { kind: "window"; hwnd: number; exe: string; title: string };
 
+/** Whose sound the PC-sound track records. */
+export type AppAudio =
+  | { kind: "all" }
+  | { kind: "only"; exe: string }
+  | { kind: "except"; exe: string };
+
 /** A window that can be recorded on its own. */
 export interface WindowInfo {
   hwnd: number;
@@ -287,6 +293,8 @@ export interface AppSettings {
   studioLayers: "recording" | "always" | "off";
   /** What the engine captures: the monitor above, or one window / app. */
   captureSource: CaptureSource;
+  /** PC sound: everything, only one app, or everything except one app. */
+  appAudio: AppAudio;
   /** "Open with Lastshot" on MP4 files in Explorer. */
   explorerOpenWith: boolean;
   /** Screenshot folder; empty = `<save location>\Screenshots`. */

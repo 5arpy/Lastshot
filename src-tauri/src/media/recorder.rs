@@ -155,6 +155,9 @@ pub struct RecorderConfig {
     /// What to capture: the whole monitor (default) or one window / app.
     #[serde(default)]
     pub source: CaptureSource,
+    /// Whose sound the PC-sound track records.
+    #[serde(default)]
+    pub app_audio: crate::media::procaudio::AppAudio,
 }
 
 /// The picture the engine records (instant replay and recordings alike).
@@ -189,6 +192,7 @@ impl Default for RecorderConfig {
             output_dir: default_output_dir(),
             output_subfolder: None,
             source: CaptureSource::Display,
+            app_audio: Default::default(),
         }
     }
 }
@@ -939,6 +943,7 @@ impl CaptureEngine {
                 Ordering::Release,
             );
             *self.mic_device.write() = cfg.mic_device_id.clone();
+            *crate::media::audio::APP_AUDIO.write() = cfg.app_audio.clone();
             match crate::media::audio::AudioCapture::start(
                 cfg.capture_system_audio,
                 cfg.capture_microphone,
@@ -1051,7 +1056,11 @@ impl CaptureEngine {
             let kf = ring.keyframe_at_or_before(generation, newest).unwrap_or(newest);
             (generation, kf)
         };
-        let with_audio = self.shared.ring.lock().has_audio();
+        // A running audio thread always delivers (silence until a device
+        // or the chosen app has sound), so it decides, not whether packets
+        // happen to be in the ring yet: a recording started right after the
+        // engine used to get no sound track at all.
+        let with_audio = self.shared.ring.lock().has_audio() || self.audio.lock().is_some();
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }

@@ -711,6 +711,7 @@ pub struct SettingsPatch {
     pub codec: Option<Codec>,
     pub monitor_index: Option<u32>,
     pub capture_source: Option<crate::media::CaptureSource>,
+    pub app_audio: Option<crate::media::procaudio::AppAudio>,
     pub capture_system_audio: Option<bool>,
     pub capture_microphone: Option<bool>,
     pub output_dir: Option<String>,
@@ -856,12 +857,16 @@ pub fn update_settings(
     if let Some(v) = patch.monitor_index {
         s.monitor_index = v;
     }
-    let source_changed = patch.capture_source.as_ref().map(|v| *v != s.capture_source).unwrap_or(false);
+    let source_changed = patch.capture_source.as_ref().map(|v| *v != s.capture_source).unwrap_or(false)
+        || patch.app_audio.as_ref().map(|v| *v != s.app_audio).unwrap_or(false);
     if source_changed && state.engine.recording_status().is_some() {
         return Err("Stop the recording before changing what to record.".into());
     }
     if let Some(v) = patch.capture_source.clone() {
         s.capture_source = v;
+    }
+    if let Some(v) = patch.app_audio.clone() {
+        s.app_audio = v;
     }
     if let Some(v) = patch.capture_system_audio {
         s.capture_system_audio = v;
@@ -1020,20 +1025,7 @@ pub fn update_settings(
     // A new source takes effect at once: restart a running engine with it
     // (off the main thread; the replay buffer starts over).
     if source_changed && state.engine.is_running() {
-        let engine = std::sync::Arc::clone(&state.engine);
-        let cfg = s.to_recorder_config();
-        let h = app.clone();
-        tauri::async_runtime::spawn(async move {
-            let _ = tauri::async_runtime::spawn_blocking(move || {
-                engine.stop();
-                let r = engine.start(cfg);
-                if let Err(e) = &r {
-                    log::warn!("[lastshot] restart with new source: {e}");
-                }
-                let _ = h.emit(EVT_BUFFER_STATE, engine.stats());
-            })
-            .await;
-        });
+        crate::recording::restart_engine_soon(&app);
     }
     // After the write: the bar reads the new mode and hotkey.
     if patch.studio_layers.is_some() || patch.monitor_index.is_some() {

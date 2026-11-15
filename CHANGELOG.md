@@ -2,6 +2,18 @@
 
 All notable changes to **Lastshot** (and, before 1.7.1, to **ClipFlow**, which Lastshot is forked from) are documented here. The project follows [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Record one window or app.** Home's *Record screen* has *Full screen* and *Window / app*; Studio has *What to record*. Pick any open window from a searchable list. Lastshot records just that window (Windows Graphics Capture, no yellow border on Windows 11), even when it is covered by other windows, and finds the app again if its window is re-created. Instant replay follows the same choice.
+- **Whose sound.** *PC sound* can now be *Everything*, *Only one app* (just the game) or *Everything except one app* (leave out Discord), in Studio and Settings › Sound. The sound follows the app when it starts or restarts. Needs Windows 10 (2004) or newer.
+
+### Fixed
+
+- A recording started right after Lastshot started (or right after a settings change) could have no sound at all. It now always gets its sound track, from the first frame.
+- Changing what to record and pressing *Record* straight away could record with the old setting and then cut the recording short.
+
 ## [1.9.0] - 2026-11-15
 
 ### Added

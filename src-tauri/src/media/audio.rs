@@ -25,6 +25,11 @@ use super::recorder::{
 
 use serde::{Deserialize, Serialize};
 
+/// Whose sound the system-audio track records; set by the engine before
+/// audio starts and read every time the endpoint is (re)opened.
+pub static APP_AUDIO: parking_lot::RwLock<super::procaudio::AppAudio> =
+    parking_lot::RwLock::new(super::procaudio::AppAudio::All);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioDevice {
@@ -198,9 +203,59 @@ mod imp {
         pub(super) bits: u32,
         pub(super) resample_phase: f64,
         pub(super) temp_stereo: Vec<f32>,
+        /// Per-app sound: the process this stream follows (0 = none, i.e.
+        /// plain loopback). Re-checked every second so the stream follows
+        /// the app when it restarts or starts after the recording.
+        pub(super) target_pid: u32,
+    }
+
+    /// The pid per-app sound should follow right now (0 = none).
+    pub(super) fn wanted_pid() -> u32 {
+        use super::super::procaudio::{self, AppAudio};
+        match &*super::APP_AUDIO.read() {
+            AppAudio::All => 0,
+            AppAudio::Only { exe } | AppAudio::Except { exe } => procaudio::pids_of(exe).first().copied().unwrap_or(0),
+        }
     }
 
     pub(super) unsafe fn open_endpoint(loopback: bool, device_id: Option<&str>) -> windows::core::Result<Endpoint> {
+        if loopback {
+            use super::super::procaudio::{self, AppAudio};
+            let mode = super::APP_AUDIO.read().clone();
+            let target = match &mode {
+                AppAudio::All => None,
+                AppAudio::Only { exe } => Some((exe.clone(), true)),
+                AppAudio::Except { exe } => Some((exe.clone(), false)),
+            };
+            if let Some((exe, include)) = target {
+                match procaudio::pids_of(&exe).first() {
+                    Some(&pid) => {
+                        let (client, capture) = procaudio::open(pid, include)?;
+                        return Ok(Endpoint {
+                            client,
+                            capture,
+                            channels: 2,
+                            rate: 48_000,
+                            float: true,
+                            bits: 32,
+                            resample_phase: 0.0,
+                            temp_stereo: Vec::new(),
+                            target_pid: pid,
+                        });
+                    }
+                    // "Only <app>" while the app is not running: no sound
+                    // yet (the audio thread retries and picks it up).
+                    None if include => {
+                        return Err(windows::core::Error::new(
+                            windows::core::HRESULT(0x8007_0490u32 as i32),
+                            format!("{exe} is not running"),
+                        ));
+                    }
+                    // "Everything except <app>" with the app closed: everything.
+                    None => {}
+                }
+            }
+        }
         let enumerator: IMMDeviceEnumerator =
             CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
         let device = if loopback {
@@ -266,6 +321,7 @@ mod imp {
             bits,
             resample_phase: 0.0,
             temp_stereo: Vec::new(),
+            target_pid: 0,
         })
     }
 
@@ -565,7 +621,8 @@ mod imp {
             let mut loopback: Option<Endpoint> = None;
             let mut microphone: Option<Endpoint> = None;
             let mut encoder: Option<AacEncoder> = None;
-            let mut last_attempt = std::time::Instant::now();
+            // First attempt right away (not after a second).
+            let mut last_attempt = std::time::Instant::now() - std::time::Duration::from_secs(2);
             let mut current_mic_id = mic_device.read().clone();
 
             // AAC-LC frames are 1024 samples per channel; feed the MFT in exact multiples.
@@ -595,6 +652,16 @@ mod imp {
                 // (Re)open endpoints every second if closed or invalidated.
                 if last_attempt.elapsed() >= std::time::Duration::from_secs(1) {
                     last_attempt = std::time::Instant::now();
+                    // Per-app sound: the app (re)started or closed -> reopen
+                    // so the stream follows it (or stops leaking it).
+                    if !matches!(*super::APP_AUDIO.read(), super::super::procaudio::AppAudio::All) {
+                        if let Some(ep) = loopback.as_ref() {
+                            if wanted_pid() != ep.target_pid {
+                                let _ = ep.client.Stop();
+                                loopback = None;
+                            }
+                        }
+                    }
                     if system && loopback.is_none() {
                         match open_reported(true, None, &status) {
                             Ok(Some(ep)) => loopback = Some(ep),
@@ -609,11 +676,16 @@ mod imp {
                             Err(()) => {}
                         }
                     }
-                    if encoder.is_none() && (loopback.is_some() || microphone.is_some()) {
+                    // The encoder runs whenever sound is wanted, even before a
+                    // device opens (it then writes silence): recordings always
+                    // get a sound track that starts with the video.
+                    if encoder.is_none() && (system || mic) {
                         match AacEncoder::new() {
                             Ok(e) => {
                                 encoder = Some(e);
-                                *status.lock() = None;
+                                if loopback.is_some() || microphone.is_some() {
+                                    *status.lock() = None;
+                                }
                             }
                             Err(e) => {
                                 *status.lock() =
@@ -624,7 +696,7 @@ mod imp {
                     }
                 }
 
-                if loopback.is_none() && microphone.is_none() {
+                if loopback.is_none() && microphone.is_none() && encoder.is_none() {
                     // Nothing captured yet (device busy). Keep next_pts tracking live wall-clock
                     // so when devices arrive, audio does not start at t=0.
                     next_pts = clock.now_hns();

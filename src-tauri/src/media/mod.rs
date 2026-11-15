@@ -4,6 +4,7 @@ pub mod audio;
 pub mod compose;
 pub mod compositor;
 pub mod library;
+pub mod procaudio;
 pub mod recorder;
 pub mod shrink;
 pub mod wincap;

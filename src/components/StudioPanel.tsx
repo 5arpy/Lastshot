@@ -7,6 +7,7 @@ import { LayerView, useRecordingSeconds } from "./StudioLayers";
 import { clockTime } from "./ControlBar";
 import { cn } from "../utils/cn";
 import SourcePicker, { sourceLabel } from "./SourcePicker";
+import AppAudioPicker from "./AppAudioPicker";
 
 /**
  * Studio: recording with layers on top, OBS-style. Pictures, text, a webcam,
@@ -408,6 +409,16 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
             <label className="flex items-center gap-2">
               <input type="checkbox" checked={settings.captureSystemAudio} onChange={(e) => onPatch({ captureSystemAudio: e.target.checked })} /> PC sound
             </label>
+            {settings.captureSystemAudio && (
+              <div title={rec ? "Stop the recording to change this" : "Record only the game, or leave out a voice chat"}>
+                <AppAudioPicker
+                  value={settings.appAudio}
+                  disabled={!!rec}
+                  windowExe={settings.captureSource?.kind === "window" ? settings.captureSource.exe : undefined}
+                  onChange={(v) => onPatch({ appAudio: v })}
+                />
+              </div>
+            )}
             <label className="flex items-center gap-2">
               <input type="checkbox" checked={settings.captureMicrophone} onChange={(e) => onPatch({ captureMicrophone: e.target.checked })} /> Microphone
             </label>

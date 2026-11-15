@@ -12,6 +12,7 @@ import { formatBytes } from "../lib/format";
 import { isIntegratedAdapter } from "../lib/gpu";
 import { cn } from "../utils/cn";
 import { Choice, Row, Section, Toggle } from "./ui";
+import AppAudioPicker from "./AppAudioPicker";
 import { screenshotsDir, shownPath } from "../lib/pathDisplay";
 import { getTheme, onThemeChange, setTheme, type ThemeChoice } from "../lib/theme";
 
@@ -559,6 +560,19 @@ export default function SettingsPanel({
             onClick={() => onChange({ captureSystemAudio: !settings.captureSystemAudio })}
           />
         </Row>
+        {settings.captureSystemAudio && (
+          <Row
+            label="Whose sound"
+            hint="Only the game, or everything except a voice chat like Discord. Needs Windows 10 (2004) or newer."
+          >
+            <AppAudioPicker
+              value={settings.appAudio}
+              windowExe={settings.captureSource?.kind === "window" ? settings.captureSource.exe : undefined}
+              onChange={(v) => onChange({ appAudio: v })}
+              className="flex flex-wrap items-center justify-end gap-1.5 text-[12px]"
+            />
+          </Row>
+        )}
         {settings.captureSystemAudio && (
           <Row label={`PC sound volume: ${settings.gameVolume}%`}>
             <input

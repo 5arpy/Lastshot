@@ -45,6 +45,9 @@ pub struct Settings {
     /// Full screen (the monitor above) or one window / app.
     #[serde(default)]
     pub capture_source: crate::media::CaptureSource,
+    /// Whose sound "PC sound" records: everything, one app, or all but one.
+    #[serde(default)]
+    pub app_audio: crate::media::procaudio::AppAudio,
     pub capture_system_audio: bool,
     pub capture_microphone: bool,
     pub output_dir: String,
@@ -250,6 +253,7 @@ impl Default for Settings {
             codec: Codec::H264,
             monitor_index: 0,
             capture_source: Default::default(),
+            app_audio: Default::default(),
             capture_system_audio: true,
             capture_microphone: false,
             output_dir: default_output_dir().to_string_lossy().to_string(),
@@ -392,6 +396,7 @@ impl Settings {
             output_dir: PathBuf::from(&self.output_dir),
             output_subfolder: None,
             source: self.capture_source.clone(),
+            app_audio: self.app_audio.clone(),
         };
         self.apply_performance_caps(&mut cfg);
         cfg

@@ -1846,7 +1846,11 @@ mod win {
                         pEvents: std::mem::ManuallyDrop::new(None),
                     }];
 
-                    match self.transform.ProcessOutput(0, &mut out, &mut status) {
+                    let result = self.transform.ProcessOutput(0, &mut out, &mut status);
+                    // The caller owns any event collection the MFT hands back;
+                    // windows-rs never drops `ManuallyDrop` fields on its own.
+                    drop(std::mem::ManuallyDrop::take(&mut out[0].pEvents));
+                    match result {
                         Ok(()) => {}
                         Err(e)
                             if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT

@@ -474,7 +474,16 @@ mod imp {
                     pEvents: std::mem::ManuallyDrop::new(None),
                 }];
 
-                match self.transform.ProcessOutput(0, &mut out, &mut status) {
+                let result = self.transform.ProcessOutput(0, &mut out, &mut status);
+                // windows-rs never drops `ManuallyDrop` fields, so give back the
+                // reference lent to the MFT on *every* path. Returning early on
+                // NEED_MORE_INPUT (the normal end of this loop) used to leak one
+                // IMFSample plus a >= 4 KB IMFMediaBuffer per AAC frame: ~47 per
+                // second while the buffer is armed, hundreds of MB per hour.
+                // `out_sample` keeps its own reference for the reads below.
+                drop(std::mem::ManuallyDrop::take(&mut out[0].pSample));
+                drop(std::mem::ManuallyDrop::take(&mut out[0].pEvents));
+                match result {
                     Ok(()) => {}
                     Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(()),
                     Err(e) => return Err(e),
@@ -491,7 +500,6 @@ mod imp {
                     sink(payload, t, d);
                 }
                 let _ = contiguous.Unlock();
-                let _ = std::mem::ManuallyDrop::take(&mut out[0].pSample);
             }
         }
     }

@@ -7,9 +7,8 @@ import ProfilesPanel from "./components/ProfilesPanel";
 import SettingsPanel from "./components/SettingsPanel";
 import StatsPanel from "./components/StatsPanel";
 import TitleBar from "./components/TitleBar";
+import { AdvancedButton, useAdvanced } from "./components/ui";
 import { open } from "@tauri-apps/plugin-dialog";
-import { relaunch } from "@tauri-apps/plugin-process";
-import { check, type DownloadEvent } from "@tauri-apps/plugin-updater";
 import { DEFAULT_SETTINGS, clipflow } from "./lib/bridge";
 import { formatBytes, formatDuration, formatRelativeTime } from "./lib/format";
 import { loadGalleryState, saveGalleryState, type SortKey } from "./lib/galleryState";
@@ -33,7 +32,7 @@ import type {
 } from "./lib/types";
 import { cn } from "./utils/cn";
 
-const APP_VERSION = "1.6.0";
+const APP_VERSION = "1.7.0";
 
 /**
  * How long the privacy-gate state must stay put before it actually flips the
@@ -113,7 +112,7 @@ export default function App() {
   const [clips, setClips] = useState<ClipMetadata[]>([]);
   const [loadingClips, setLoadingClips] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [tab, setTab] = useState<"home" | "clips" | "profiles" | "stats" | "settings">("home");
+  const [tab, setTab] = useState<"home" | "clips" | "settings">("home");
   const [activeClip, setActiveClip] = useState<ClipMetadata | null>(null);
   const [activeFlushMs, setActiveFlushMs] = useState<number | undefined>(undefined);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -148,9 +147,12 @@ export default function App() {
   // Live battery/RAM snapshot for the Settings telemetry row — polled even
   // when ECO is off so the panel always shows what the machine is doing.
   const [powerNow, setPowerNow] = useState<PowerState | null>(null);
+  // Clips being shrunk for sharing right now: path -> progress 0..1.
+  const [shareProgress, setShareProgress] = useState<Map<string, number>>(() => new Map());
+  const [clipsAdvanced, toggleClipsAdvanced] = useAdvanced("clips");
   const [onboarding, setOnboarding] = useState<boolean>(() => {
     try {
-      return localStorage.getItem("clipflow.onboarding.seen") !== "1";
+      return localStorage.getItem("lastshot.onboarding.seen") !== "1";
     } catch {
       return false;
     }
@@ -284,12 +286,12 @@ export default function App() {
       // works; this only controls the silent startup probe.
       if (clipflow.isTauri() && loaded?.checkUpdatesOnStartup) {
         try {
-          const update = await check();
-          if (update && !cancelled) {
+          const newer = await clipflow.checkLatestRelease(APP_VERSION);
+          if (newer && !cancelled) {
             pushToast(
               "info",
-              `Update v${update.version} available`,
-              "Open Settings → Application & Updates → Check for Updates to install.",
+              `Lastshot v${newer} is out`,
+              "Settings → Updates → Check for updates opens the download page.",
             );
           }
         } catch {
@@ -356,6 +358,22 @@ export default function App() {
     );
     attach(
       Promise.resolve(clipflow.onError((msg) => pushToast("err", "Engine error", String(msg)))),
+    );
+    attach(
+      clipflow.onShrinkProgress((p) =>
+        setShareProgress((m) => (m.has(p.path) ? new Map(m).set(p.path, p.progress) : m)),
+      ),
+    );
+    attach(
+      clipflow.onSnipDone((d) => {
+        if (d.copied && d.path) {
+          pushToast("ok", "Screenshot copied", `Paste it with Ctrl+V. Also saved as ${d.path.split("\\").pop()}.`);
+        } else if (d.copied) {
+          pushToast("ok", "Screenshot copied", "Paste it with Ctrl+V.");
+        } else if (d.path) {
+          pushToast("ok", "Screenshot saved", d.path);
+        }
+      }),
     );
     attach(
       Promise.resolve(
@@ -547,14 +565,14 @@ export default function App() {
   }, []);
 
   // Foreground polling is opt-in: it only runs when a feature that actually
-  // needs it is on (auto-switch, privacy gate, auto-save on exit) or while the
-  // Profiles tab is open. With the defaults, gaming sessions do zero focus
+  // needs it is on (auto-switch, privacy gate, auto-save on exit) or while
+  // Settings (where game profiles live) is open. With the defaults, gaming sessions do zero focus
   // queries in the background.
   const needsForegroundPoll =
     settings.autoSwitchProfiles ||
     settings.privacyPauseWhenUnfocused ||
     settings.autosaveOnGameExit ||
-    tab === "profiles";
+    tab === "settings";
   const applyProfileRef = useRef(applyProfile);
   applyProfileRef.current = applyProfile;
   useEffect(() => {
@@ -771,58 +789,32 @@ export default function App() {
       await clipflow.openReleasesPage();
       return;
     }
+    // Lastshot does not update itself (no download runs in the background):
+    // it asks GitHub for the newest version and opens the download page.
     setBusy(true);
     setUpdateProgress({ phase: "PENDING", downloaded: 0, total: 0 });
     try {
-      const update = await check();
-      if (!update) {
-        setUpdateProgress(null);
-        pushToast("ok", "Up to date", `ClipFlow v${APP_VERSION} is the latest release.`);
+      const newer = await clipflow.checkLatestRelease(APP_VERSION);
+      if (!newer) {
+        pushToast("ok", "Up to date", `Lastshot v${APP_VERSION} is the newest version.`);
         return;
       }
       pushToast(
         "info",
-        `Update v${update.version} available`,
-        "Downloading & installing — ClipFlow will restart.",
+        `Lastshot v${newer} is out`,
+        "Opening the download page. Run the new installer; your settings and clips stay.",
       );
-      let downloaded = 0;
-      const onProgress = (p: DownloadEvent) => {
-        if (p.event === "Started") {
-          setUpdateProgress({ phase: "DOWNLOADING", downloaded: 0, total: p.data.contentLength ?? 0 });
-        } else if (p.event === "Progress") {
-          downloaded += p.data.chunkLength;
-          setUpdateProgress((prev) =>
-            prev
-              ? { ...prev, downloaded }
-              : { phase: "DOWNLOADING", downloaded, total: 0 },
-          );
-        } else if (p.event === "Finished") {
-          setUpdateProgress({ phase: "INSTALLING", downloaded: 0, total: 0 });
-        }
-      };
-      await update.downloadAndInstall(onProgress);
-      setUpdateProgress(null);
-      pushToast("ok", "Update installed", "Restarting ClipFlow…");
-      await relaunch();
+      await clipflow.openReleasesPage();
     } catch (e) {
-      setUpdateProgress(null);
-      // Auto-update is currently unavailable because no signed update manifest
-      // is published (see .github/workflows/release.yml). A raw plugin error
-      // like "Could not fetch a valid release JSON" tells the user nothing, so
-      // explain it and send them to the download page instead.
-      pushToast(
-        "warn",
-        "Automatic updates unavailable",
-        "This build cannot update itself. Download the newest installer from the Releases page — recording is unaffected.",
-      );
-      // Keep the technical detail available without leading with it.
-      console.warn("[clipflow] update check failed", e);
+      console.warn("[lastshot] update check failed", e);
+      pushToast("warn", "Could not check for updates", "Opening the releases page instead.");
       try {
         await clipflow.openReleasesPage();
       } catch {
         /* opener unavailable — the toast already told them what to do */
       }
     } finally {
+      setUpdateProgress(null);
       setBusy(false);
     }
   }, [native, pushToast]);
@@ -833,7 +825,7 @@ export default function App() {
       return;
     }
     try {
-      const dir = await open({ directory: true, multiple: false, title: "Choose ClipFlow output folder" });
+      const dir = await open({ directory: true, multiple: false, title: "Choose where Lastshot saves clips" });
       if (typeof dir === "string" && dir.length > 0) {
         await patchSettings({ outputDir: dir });
         pushToast("ok", "Output folder changed", dir);
@@ -881,6 +873,55 @@ export default function App() {
     },
     [native, pushToast],
   );
+
+  /**
+   * Shares a clip (or the start..end part of it): if it already fits under the
+   * size limit it is copied as is, otherwise a smaller copy is made and put on
+   * the clipboard, ready to paste into Discord.
+   */
+  const shareClip = useCallback(
+    async (clip: ClipMetadata, range?: { start: number; end: number }) => {
+      const limitMb = settingsRef.current.shareSizeMb;
+      const whole =
+        !range || (range.start <= 0.05 && range.end >= clip.duration_seconds - 0.05);
+      if (whole && clip.size_bytes <= limitMb * 1_000_000) {
+        await copyClip(clip);
+        return;
+      }
+      setShareProgress((m) => new Map(m).set(clip.path, 0));
+      pushToast(
+        "info",
+        `Shrinking to ${limitMb} MB…`,
+        "Keep playing or browsing; it lands on the clipboard when done.",
+      );
+      try {
+        const r = await clipflow.shrinkClip(clip.path, {
+          start: whole ? undefined : range?.start,
+          end: whole ? undefined : range?.end,
+          copy: true,
+          keep: false,
+        });
+        pushToast(
+          "ok",
+          "Ready to paste",
+          `${formatBytes(r.size_bytes)} · ${r.height}p${r.fps} · press Ctrl+V in Discord.`,
+        );
+      } catch (e) {
+        pushToast("err", "Could not shrink the clip", String(e));
+      } finally {
+        setShareProgress((m) => {
+          const n = new Map(m);
+          n.delete(clip.path);
+          return n;
+        });
+      }
+    },
+    [copyClip, pushToast],
+  );
+
+  const takeScreenshot = useCallback(() => {
+    void clipflow.startSnip().catch((e) => pushToast("err", "Screenshot failed", String(e)));
+  }, [pushToast]);
 
   const revealClip = useCallback(
     async (clip: ClipMetadata) => {
@@ -1265,6 +1306,9 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [selection]);
 
+  const hiddenFilterCount =
+    (gameFilter !== "all" ? 1 : 0) + (audioOnly ? 1 : 0) + (compact ? 1 : 0) + (selectMode ? 1 : 0);
+
   const totalBytes = useMemo(
     () => clips.reduce((acc, c) => acc + c.size_bytes, 0),
     [clips],
@@ -1352,8 +1396,6 @@ export default function App() {
           {[
             { id: "home" as const, label: "Home" },
             { id: "clips" as const, label: "Clips", count: clips.length },
-            { id: "profiles" as const, label: "Profiles" },
-            { id: "stats" as const, label: "Statistics" },
             { id: "settings" as const, label: "Settings" },
           ].map((item) => (
             <button
@@ -1397,14 +1439,25 @@ export default function App() {
 
           <button
             type="button"
+            onClick={takeScreenshot}
+            title={`Take a screenshot (${settings.hotkeySnip})`}
+            className="flex items-center gap-1.5 rounded-md border border-accent/40 bg-accent/10 px-2.5 py-1 font-sans text-[12px] font-semibold text-accent-fg transition-colors hover:bg-accent/20"
+          >
+            <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 fill-none stroke-current" strokeWidth="1.5">
+              <path d="M2 5V3.5A1.5 1.5 0 0 1 3.5 2H5M11 2h1.5A1.5 1.5 0 0 1 14 3.5V5M14 11v1.5a1.5 1.5 0 0 1-1.5 1.5H11M5 14H3.5A1.5 1.5 0 0 1 2 12.5V11" />
+            </svg>
+            Screenshot
+          </button>
+          <button
+            type="button"
             onClick={() => void clipflow.openOutputFolder()}
-            title="Open ClipFlow folder in File Explorer"
+            title={`Open ${settings.outputDir}`}
             className="flex items-center gap-1.5 rounded-md border border-line bg-surface px-2.5 py-1 text-ink-3 hover:border-accent hover:text-ink transition-colors"
           >
             <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 fill-none stroke-current" strokeWidth="1.5">
               <path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5H12.5A1.5 1.5 0 0 1 14 6v6.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12.5v-8z" />
             </svg>
-            <span>Videos\ClipFlow</span>
+            <span className="font-sans">Folder</span>
           </button>
         </div>
       </nav>
@@ -1461,7 +1514,7 @@ export default function App() {
                       Ready for your first clip
                     </div>
                     <p className="max-w-xs text-[12px] text-ink-3 leading-relaxed">
-                      Start the buffer above, play your game, and press{" "}
+                      Start recording above, play, and press{" "}
                       <kbd className="rounded border border-line-3 bg-surface-2 px-1.5 py-0.5 font-mono text-[10px] text-ink">
                         {settings.hotkeySave}
                       </kbd>{" "}
@@ -1474,10 +1527,24 @@ export default function App() {
                       <div
                         key={clip.id}
                         onClick={() => setActiveClip(clip)}
+                        draggable
+                        onDragStart={(e) => {
+                          e.preventDefault();
+                          void clipflow.startClipDrag(clip.path).catch(() => undefined);
+                        }}
+                        title="Click to open. Drag into Discord or a folder to share the file."
                         className="group relative cursor-pointer rounded-lg border border-line bg-surface-3 overflow-hidden hover:border-accent/60 transition-all"
                       >
                         <div className="aspect-video w-full bg-surface-4 relative">
                           <LazyThumbnail clip={clip} />
+                          {shareProgress.has(clip.path) && (
+                            <div className="absolute inset-x-0 bottom-0 z-10 h-0.5 bg-black/40">
+                              <div
+                                className="h-full bg-accent transition-[width] duration-300"
+                                style={{ width: `${(shareProgress.get(clip.path) ?? 0) * 100}%` }}
+                              />
+                            </div>
+                          )}
                           <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-transparent to-transparent pointer-events-none" />
                           <span className="absolute bottom-1.5 left-2 font-mono text-[10px] text-white bg-black/75 px-1.5 py-0.5 rounded border border-white/10">
                             {formatDuration(clip.duration_seconds)}
@@ -1495,9 +1562,16 @@ export default function App() {
                         </div>
                         <div className="p-2.5">
                           <div className="truncate text-[12px] font-medium text-ink">{clip.title}</div>
-                          <div className="mt-1 flex items-center justify-between font-mono text-[10px] text-ink-3">
-                            <span>{formatRelativeTime(clip.created_unix_ms)}</span>
-                            <span>{formatBytes(clip.size_bytes)}</span>
+                          <div className="mt-1 flex items-center justify-between gap-2 font-mono text-[10px] text-ink-3">
+                            <span className="truncate">
+                              {formatRelativeTime(clip.created_unix_ms)} · {formatBytes(clip.size_bytes)}
+                            </span>
+                            <ShareButton
+                              clip={clip}
+                              limitMb={settings.shareSizeMb}
+                              progress={shareProgress.get(clip.path)}
+                              onShare={(c) => void shareClip(c)}
+                            />
                           </div>
                         </div>
                       </div>
@@ -1506,16 +1580,50 @@ export default function App() {
                 )}
               </div>
 
-              {/* Friendly performance summary */}
-              <PipelinePanel
-                stats={stats}
-                performanceMode={settings.performanceMode}
-                integratedGpu={stats.integrated_gpu || integratedGpu}
-                onTogglePerformanceMode={() =>
-                  void patchSettings({ performanceMode: !settings.performanceMode })
-                }
-                onRestartEngine={() => void restartEngine()}
-              />
+              {/* Quick actions */}
+              <div className="panel rounded-xl p-5">
+                <div className="border-b border-line pb-3">
+                  <h3 className="text-[13px] font-semibold text-ink">Quick actions</h3>
+                </div>
+                <div className="mt-3 space-y-2">
+                  <QuickAction
+                    title="Take a screenshot"
+                    hint="Drag a box, click a window, or press F for the whole screen."
+                    kbd={settings.hotkeySnip}
+                    onClick={takeScreenshot}
+                  />
+                  <QuickAction
+                    title={`Share the newest clip · ${settings.shareSizeMb} MB`}
+                    hint={
+                      clips[0]
+                        ? shareProgress.has(clips[0].path)
+                          ? `Shrinking… ${Math.round((shareProgress.get(clips[0].path) ?? 0) * 100)}%`
+                          : "Makes it small enough for Discord and copies it. Then press Ctrl+V."
+                        : "Save a replay first."
+                    }
+                    disabled={!clips[0] || shareProgress.has(clips[0].path)}
+                    onClick={() => clips[0] && void shareClip(clips[0])}
+                  />
+                  <QuickAction
+                    title="Open clips folder"
+                    hint={settings.outputDir}
+                    onClick={() => void clipflow.openOutputFolder()}
+                  />
+                  <QuickAction
+                    title="Open screenshots folder"
+                    onClick={() => void clipflow.openScreenshotsFolder()}
+                  />
+                </div>
+                {(stats.last_error || stats.audio_error) && (
+                  <button
+                    type="button"
+                    onClick={() => setTab("settings")}
+                    className="mt-3 w-full rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-left text-[11px] text-warn"
+                  >
+                    {stats.last_error ?? stats.audio_error} · details in Settings › Instant replay › Advanced
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         ) : tab === "clips" ? (
@@ -1526,7 +1634,7 @@ export default function App() {
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line pb-3.5">
                 <div className="flex items-center gap-2.5">
                   <h2 className="text-[15px] font-semibold tracking-normal text-ink">
-                    Clip Library
+                    Clips
                   </h2>
                   <span className="rounded-full border border-line bg-surface-2 px-2.5 py-0.5 font-mono text-[10px] text-ink-3">
                     {clips.length} {clips.length === 1 ? "clip" : "clips"} · {formatBytes(totalBytes)}
@@ -1550,136 +1658,140 @@ export default function App() {
                       name="clip-filter"
                       value={query}
                       onChange={(e) => setQuery(e.target.value)}
-                      placeholder="Search title, filename…"
+                      placeholder="Search clips…"
                       className="w-52 rounded-lg border border-line bg-surface pl-8 pr-2.5 py-1.5 text-[11px] text-ink outline-none placeholder:text-ink-3 focus:border-accent"
                     />
                   </div>
 
-                  {/* Game filter */}
-                  <select
-                    value={gameFilter}
-                    onChange={(e) => setGameFilter(e.target.value)}
-                    title="Filter by game"
-                    className="rounded-lg border border-line bg-surface px-2.5 py-1.5 text-[11px] text-ink outline-none transition-colors hover:border-line-3 focus:border-accent"
-                  >
-                    <option value="all" className="bg-app">All Games</option>
-                    {games.map((g) => (
-                      <option key={g} value={g} className="bg-app">
-                        {g}
-                      </option>
-                    ))}
-                  </select>
-
-                  {/* Sort dropdown */}
                   <select
                     value={sortKey}
                     onChange={(e) => setSortKey(e.target.value as SortKey)}
                     title="Sort clips"
                     className="rounded-lg border border-line bg-surface px-2.5 py-1.5 text-[11px] text-ink outline-none transition-colors hover:border-line-3 focus:border-accent"
                   >
-                    <option value="newest" className="bg-app">Newest First</option>
-                    <option value="oldest" className="bg-app">Oldest First</option>
-                    <option value="largest" className="bg-app">Largest Size</option>
-                    <option value="smallest" className="bg-app">Smallest Size</option>
-                    <option value="longest" className="bg-app">Longest Duration</option>
-                    <option value="shortest" className="bg-app">Shortest Duration</option>
+                    <option value="newest" className="bg-app">Newest</option>
+                    <option value="oldest" className="bg-app">Oldest</option>
+                    <option value="largest" className="bg-app">Largest</option>
+                    <option value="smallest" className="bg-app">Smallest</option>
+                    <option value="longest" className="bg-app">Longest</option>
+                    <option value="shortest" className="bg-app">Shortest</option>
                   </select>
-                </div>
-              </div>
-
-              {/* Secondary Toolbar: Filters & Actions */}
-              <div className="flex flex-wrap items-center justify-between gap-2.5">
-                {/* Filter toggles */}
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => setAudioOnly((v) => !v)}
-                    title="Only clips with recorded audio track"
-                    className={cn(
-                      "rounded-lg border px-2.5 py-1 text-[11px] transition-colors",
-                      audioOnly
-                        ? "border-accent bg-accent/15 text-accent-fg font-semibold"
-                        : "border-line bg-surface text-ink-3 hover:text-ink",
-                    )}
-                  >
-                    With Audio
-                  </button>
 
                   <button
                     type="button"
                     onClick={() => setFavOnly((v) => !v)}
-                    title="Only starred clips"
+                    title="Only starred clips. Starred clips are never auto-deleted."
                     className={cn(
-                      "rounded-lg border px-2.5 py-1 text-[11px] transition-colors",
+                      "rounded-lg border px-2.5 py-1.5 text-[11px] transition-colors",
                       favOnly
                         ? "border-amber-400/50 bg-amber-400/15 text-warn font-semibold"
                         : "border-line bg-surface text-ink-3 hover:text-ink",
                     )}
                   >
-                    ★ Favorites
+                    ★ Starred
                   </button>
 
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelectMode((v) => !v);
-                      setTagAction(null);
-                    }}
-                    title="Multi-select mode: click cards to select, Shift/Ctrl for ranges"
-                    className={cn(
-                      "rounded-lg border px-2.5 py-1 text-[11px] transition-colors",
-                      selectMode || selectionCount(selection) > 0
-                        ? "border-accent bg-accent/15 text-accent-fg font-semibold"
-                        : "border-line bg-surface text-ink-3 hover:text-ink",
-                    )}
-                  >
-                    Select Mode
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setCompact((v) => !v)}
-                    title="Toggle compact 4-column grid view"
-                    className={cn(
-                      "rounded-lg border px-2.5 py-1 text-[11px] transition-colors",
-                      compact
-                        ? "border-line-3 bg-surface-2 text-ink font-semibold"
-                        : "border-line bg-surface text-ink-3 hover:text-ink",
-                    )}
-                  >
-                    Compact View
-                  </button>
-                </div>
-
-                {/* Library management actions */}
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => void refreshClips()}
-                    className="rounded-lg border border-line bg-surface px-2.5 py-1 text-[11px] text-ink-3 hover:border-line-3 hover:text-ink transition-colors"
-                  >
-                    Rescan
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => void clipflow.openOutputFolder()}
-                    className="rounded-lg border border-line bg-surface px-2.5 py-1 text-[11px] text-ink-3 hover:border-line-3 hover:text-ink transition-colors"
-                  >
-                    Open Folder
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setConfirmClear(true)}
-                    disabled={clips.length === 0}
-                    title="Delete all clips in library"
-                    className="rounded-lg border border-red-500/30 bg-surface px-2.5 py-1 text-[11px] text-danger/80 hover:border-red-400/60 hover:bg-red-500/10 hover:text-danger disabled:opacity-30 transition-colors"
-                  >
-                    Clear All
-                  </button>
+                  <AdvancedButton
+                    open={clipsAdvanced}
+                    onClick={toggleClipsAdvanced}
+                    label={
+                      hiddenFilterCount > 0 && !clipsAdvanced
+                        ? `More (${hiddenFilterCount} on)`
+                        : "More"
+                    }
+                  />
                 </div>
               </div>
+
+              {clipsAdvanced && (
+                <div className="animate-fade space-y-3 rounded-xl border border-line bg-surface-3/60 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2.5">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <select
+                        value={gameFilter}
+                        onChange={(e) => setGameFilter(e.target.value)}
+                        title="Filter by game"
+                        className="rounded-lg border border-line bg-surface px-2.5 py-1 text-[11px] text-ink outline-none transition-colors hover:border-line-3 focus:border-accent"
+                      >
+                        <option value="all" className="bg-app">All games</option>
+                        {games.map((g) => (
+                          <option key={g} value={g} className="bg-app">
+                            {g}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => setAudioOnly((v) => !v)}
+                        title="Only clips with sound"
+                        className={cn(
+                          "rounded-lg border px-2.5 py-1 text-[11px] transition-colors",
+                          audioOnly
+                            ? "border-accent bg-accent/15 text-accent-fg font-semibold"
+                            : "border-line bg-surface text-ink-3 hover:text-ink",
+                        )}
+                      >
+                        With sound
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectMode((v) => !v);
+                          setTagAction(null);
+                        }}
+                        title="Select several clips (or Ctrl/Shift+click any time)"
+                        className={cn(
+                          "rounded-lg border px-2.5 py-1 text-[11px] transition-colors",
+                          selectMode || selectionCount(selection) > 0
+                            ? "border-accent bg-accent/15 text-accent-fg font-semibold"
+                            : "border-line bg-surface text-ink-3 hover:text-ink",
+                        )}
+                      >
+                        Select
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCompact((v) => !v)}
+                        title="Smaller cards, more per row"
+                        className={cn(
+                          "rounded-lg border px-2.5 py-1 text-[11px] transition-colors",
+                          compact
+                            ? "border-line-3 bg-surface-2 text-ink font-semibold"
+                            : "border-line bg-surface text-ink-3 hover:text-ink",
+                        )}
+                      >
+                        Compact
+                      </button>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => void refreshClips()}
+                        className="rounded-lg border border-line bg-surface px-2.5 py-1 text-[11px] text-ink-3 hover:border-line-3 hover:text-ink transition-colors"
+                      >
+                        Rescan
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void clipflow.openOutputFolder()}
+                        className="rounded-lg border border-line bg-surface px-2.5 py-1 text-[11px] text-ink-3 hover:border-line-3 hover:text-ink transition-colors"
+                      >
+                        Open folder
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmClear(true)}
+                        disabled={clips.length === 0}
+                        title="Delete every clip in the library"
+                        className="rounded-lg border border-red-500/30 bg-surface px-2.5 py-1 text-[11px] text-danger/80 hover:border-red-400/60 hover:bg-red-500/10 hover:text-danger disabled:opacity-30 transition-colors"
+                      >
+                        Delete all
+                      </button>
+                    </div>
+                  </div>
+                  <StatsPanel clips={clips} />
+                </div>
+              )}
 
               {/* Batch selection toolbar */}
               {(selectMode || selectionCount(selection) > 0) && (
@@ -1867,6 +1979,9 @@ export default function App() {
                 onOpenExternal={openExternalClip}
                 onDelete={deleteClip}
                 onToggleFavorite={toggleFavorite}
+                onShare={(c) => void shareClip(c)}
+                shareLimitMb={settings.shareSizeMb}
+                shareProgress={shareProgress}
               />
 
               {visibleClips.length < filtered.length && (
@@ -1897,26 +2012,6 @@ export default function App() {
               )}
             </section>
           </div>
-        ) : tab === "profiles" ? (
-          /* ================================================== PROFILES VIEW */
-          <div className="mx-auto max-w-[1000px] p-5">
-            <ProfilesPanel
-              settings={settings}
-              foreground={foreground}
-              activeProfileId={activeProfileId}
-              onChange={(p) => void patchSettings(p)}
-              onApplyProfile={(id) => void applyProfile(id)}
-              onSaveProfile={saveProfile}
-              onDeleteProfile={(id) => void deleteProfile(id)}
-              onSetProfileMap={(map) => void setProfileMap(map)}
-              onRefreshForeground={() => void refreshForeground()}
-            />
-          </div>
-        ) : tab === "stats" ? (
-          /* ================================================== STATS VIEW */
-          <div className="mx-auto max-w-[1000px] p-5">
-            <StatsPanel clips={clips} />
-          </div>
         ) : (
           /* ================================================== SETTINGS VIEW */
           <div className="mx-auto max-w-[1000px] p-5">
@@ -1933,6 +2028,31 @@ export default function App() {
               onChooseFolder={() => void chooseOutputFolder()}
               updateProgress={updateProgress}
               onCheckForUpdates={() => void checkForUpdates()}
+              onOpenScreenshots={() => void clipflow.openScreenshotsFolder()}
+              diagnostics={
+                <PipelinePanel
+                  stats={stats}
+                  performanceMode={settings.performanceMode}
+                  integratedGpu={stats.integrated_gpu || integratedGpu}
+                  onTogglePerformanceMode={() =>
+                    void patchSettings({ performanceMode: !settings.performanceMode })
+                  }
+                  onRestartEngine={() => void restartEngine()}
+                />
+              }
+              profiles={
+                <ProfilesPanel
+                  settings={settings}
+                  foreground={foreground}
+                  activeProfileId={activeProfileId}
+                  onChange={(p) => void patchSettings(p)}
+                  onApplyProfile={(id) => void applyProfile(id)}
+                  onSaveProfile={saveProfile}
+                  onDeleteProfile={(id) => void deleteProfile(id)}
+                  onSetProfileMap={(map) => void setProfileMap(map)}
+                  onRefreshForeground={() => void refreshForeground()}
+                />
+              }
             />
           </div>
         )}
@@ -1983,6 +2103,9 @@ export default function App() {
           onSaveTrimmed={saveTrimmed}
           onToggleFavorite={() => toggleFavorite(activeClip)}
           onUpdateTags={(tags) => updateTags(activeClip, tags)}
+          onShare={(start, end) => shareClip(activeClip, { start, end })}
+          shareLimitMb={settings.shareSizeMb}
+          shareProgress={shareProgress.get(activeClip.path)}
         />
       )}
 
@@ -1998,8 +2121,8 @@ export default function App() {
               Delete All Clips?
             </div>
             <p className="mt-2 text-[12px] leading-relaxed text-ink-3">
-              This permanently removes all {clips.length} clip{clips.length === 1 ? "" : "s"} from
-              the ClipFlow output folder. This action cannot be undone.
+              This permanently deletes all {clips.length} clip{clips.length === 1 ? "" : "s"} in
+              your clips folder, starred ones too. This cannot be undone.
             </p>
             <div className="mt-4 flex justify-end gap-2">
               <button
@@ -2027,10 +2150,11 @@ export default function App() {
         <OnboardingOverlay
           hotkeySave={settings.hotkeySave}
           hotkeyToggle={settings.hotkeyToggle}
+          hotkeySnip={settings.hotkeySnip}
           onDismiss={() => {
             setOnboarding(false);
             try {
-              localStorage.setItem("clipflow.onboarding.seen", "1");
+              localStorage.setItem("lastshot.onboarding.seen", "1");
             } catch {
               /* ignore */
             }
@@ -2052,7 +2176,7 @@ function LazyThumbnail({ clip }: { clip: ClipMetadata }) {
     let cancelled = false;
     const load = () => {
       // Saving happens mid-match with the deck hidden; do not spin up the
-      // video decoder until the user actually opens ClipFlow.
+      // video decoder until the user actually opens Lastshot.
       if (document.visibilityState !== "visible") return;
       const cached = getCachedThumbnail(clip.path);
       if (cached) {
@@ -2088,27 +2212,34 @@ function LazyThumbnail({ clip }: { clip: ClipMetadata }) {
 function OnboardingOverlay({
   hotkeySave,
   hotkeyToggle,
+  hotkeySnip,
   onDismiss,
 }: {
   hotkeySave: string;
   hotkeyToggle: string;
+  hotkeySnip: string;
   onDismiss: () => void;
 }) {
   const steps = [
     {
       kbd: hotkeySave,
-      title: "Save Instant Replay",
-      body: "Flushes the hardware-encoded RAM buffer to an MP4 video file in under 50 ms while you stay in your game.",
+      title: "Save a replay",
+      body: "Saves the last moments of your screen as an MP4, without leaving your game.",
+    },
+    {
+      kbd: hotkeySnip,
+      title: "Take a screenshot",
+      body: "Drag a box or click a window, mark it up, and it is on your clipboard.",
     },
     {
       kbd: hotkeyToggle,
-      title: "Start / Pause Buffer",
-      body: "Arms or disarms continuous memory recording. Leave it running while playing; memory cost is under 150 MB.",
+      title: "Start / pause recording",
+      body: "Recording only keeps a short loop in memory. Nothing is saved until you ask.",
     },
     {
-      kbd: "Videos\\ClipFlow",
-      title: "Saved Locally on Your PC",
-      body: "Clips, trims, and snapshots are stored locally in %USERPROFILE%\\Videos\\ClipFlow with zero cloud uploads.",
+      kbd: "Share",
+      title: "Send it to friends",
+      body: "“Shrink & copy” makes a clip small enough for Discord. Then just press Ctrl+V.",
     },
   ];
 
@@ -2124,10 +2255,10 @@ function OnboardingOverlay({
           </div>
           <div>
             <div className="text-[15px] font-semibold text-ink">
-              Welcome to ClipFlow
+              Welcome to Lastshot
             </div>
             <div className="text-[12px] text-ink-3">
-              Lightweight instant replay for PC gaming
+              Instant replay and screenshots. Everything stays on your PC.
             </div>
           </div>
         </div>
@@ -2157,9 +2288,76 @@ function OnboardingOverlay({
           onClick={onDismiss}
           className="mt-5 w-full rounded-lg border border-accent bg-accent py-2.5 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-accent-hover"
         >
-          Start Clipping
+          Got it
         </button>
       </div>
     </div>
+  );
+}
+
+/** Small "Shrink & copy" button used on clip cards. */
+function ShareButton({
+  clip,
+  limitMb,
+  progress,
+  onShare,
+}: {
+  clip: ClipMetadata;
+  limitMb: number;
+  progress: number | undefined;
+  onShare: (clip: ClipMetadata) => void;
+}) {
+  const fits = clip.size_bytes <= limitMb * 1_000_000;
+  return (
+    <button
+      type="button"
+      disabled={progress !== undefined}
+      onClick={(e) => {
+        e.stopPropagation();
+        onShare(clip);
+      }}
+      title={
+        fits
+          ? `Already under ${limitMb} MB: copies it so you can paste it into Discord.`
+          : `Makes a copy under ${limitMb} MB and puts it on the clipboard.`
+      }
+      className="shrink-0 rounded-md border border-accent/40 bg-accent/10 px-2 py-0.5 font-sans text-[11px] font-semibold text-accent-fg transition-colors hover:bg-accent/20 disabled:cursor-wait"
+    >
+      {progress !== undefined ? `${Math.round(progress * 100)}%` : fits ? "Copy" : "Shrink & copy"}
+    </button>
+  );
+}
+
+/** One row in the Home quick-actions card. */
+function QuickAction({
+  title,
+  hint,
+  kbd,
+  disabled,
+  onClick,
+}: {
+  title: string;
+  hint?: string;
+  kbd?: string;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className="flex w-full items-center justify-between gap-3 rounded-lg border border-line bg-surface-3 px-3.5 py-2.5 text-left transition-colors hover:border-accent/50 hover:bg-surface-2 disabled:cursor-default disabled:opacity-50 disabled:hover:border-line disabled:hover:bg-surface-3"
+    >
+      <span className="min-w-0">
+        <span className="block text-[13px] font-medium text-ink">{title}</span>
+        {hint && <span className="mt-0.5 block truncate text-[11px] text-ink-3">{hint}</span>}
+      </span>
+      {kbd && (
+        <kbd className="shrink-0 rounded border border-line-3 bg-surface px-2 py-0.5 font-mono text-[10px] font-semibold text-ink">
+          {kbd}
+        </kbd>
+      )}
+    </button>
   );
 }

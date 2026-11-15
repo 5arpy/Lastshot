@@ -1,4 +1,5 @@
-//! ClipFlow — zero-bloat instant replay for Windows.
+//! Lastshot — instant replay and snipping tool for Windows.
+//! Based on ClipFlow by jaimitus and drexjgobgt (MIT).
 //!
 //! Tauri v2 application setup: tray icon, global shortcuts, the stats
 //! heartbeat and the IPC surface.
@@ -8,8 +9,11 @@ pub mod commands;
 pub mod foreground;
 pub mod hotkeys;
 pub mod media;
+pub mod paths;
 pub mod power;
 pub mod settings;
+pub mod share;
+pub mod snip;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,7 +28,7 @@ use commands::{AppState, EVT_STATS};
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info,clipflow=debug"),
+        env_logger::Env::default().default_filter_or("info,lastshot=debug"),
     )
     .format_timestamp_millis()
     .init();
@@ -50,9 +54,6 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec![]),
         ))
-        // GitHub Releases auto-updater — check() / downloadAndInstall() are
-        // driven from the UI; nothing runs in the background.
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -67,14 +68,18 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
 
+            // Old "Shrink & copy" files from previous sessions.
+            std::thread::spawn(paths::cleanup_share_temp);
+
             build_tray(&handle)?;
 
-            let (save_key, toggle_key, autostart, cfg) = {
+            let (save_key, toggle_key, snip_key, autostart, cfg) = {
                 let state = handle.state::<AppState>();
                 let s = state.settings.read();
                 (
                     s.hotkey_save.clone(),
                     s.hotkey_toggle.clone(),
+                    s.hotkey_snip.clone(),
                     s.autostart_buffer,
                     // If auto-switch is on and the game already in the foreground
                     // maps to a profile, arm the buffer with that profile's
@@ -98,7 +103,7 @@ pub fn run() {
                 }
             }
 
-            if let Err(e) = hotkeys::register_all(&handle, &save_key, &toggle_key) {
+            if let Err(e) = hotkeys::register_all(&handle, &save_key, &toggle_key, &snip_key) {
                 log::warn!("[clipflow] hotkey registration: {e}");
                 let h = handle.clone();
                 let msg = e.clone();
@@ -205,6 +210,9 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == snip::SNIP_LABEL {
+                    return;
+                }
                 let minimize = window
                     .app_handle()
                     .try_state::<AppState>()
@@ -260,9 +268,16 @@ pub fn run() {
             commands::hide_main_window,
             commands::quit_app,
             commands::simulate_device_loss,
+            share::shrink_clip,
+            share::start_clip_drag,
+            snip::start_snip,
+            snip::snip_get_capture,
+            snip::snip_finish,
+            snip::snip_cancel,
+            snip::open_screenshots_folder,
         ])
         .build(tauri::generate_context!())
-        .expect("error while building ClipFlow")
+        .expect("error while building Lastshot")
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { .. } = event {
                 if let Some(state) = app.try_state::<AppState>() {
@@ -290,12 +305,27 @@ fn allow_asset_dir(app: &tauri::AppHandle, dir: &str) {
 
 /// Tray menu: everything you need mid-game without alt-tabbing.
 fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
-    let save = MenuItem::with_id(app, "save", "Save replay\tAlt+C", true, None::<&str>)?;
+    let save_key = app
+        .try_state::<AppState>()
+        .map(|s| s.settings.read().hotkey_save.clone())
+        .unwrap_or_else(|| "Alt+C".into());
+    let save = MenuItem::with_id(app, "save", format!("Save replay\t{save_key}"), true, None::<&str>)?;
     let last30 = MenuItem::with_id(app, "save30", "Save last 30 s", true, None::<&str>)?;
     let toggle = MenuItem::with_id(app, "toggle", "Arm / disarm buffer", true, None::<&str>)?;
-    let show = MenuItem::with_id(app, "show", "Open ClipFlow Studio", true, None::<&str>)?;
+    let snip_key = app
+        .try_state::<AppState>()
+        .map(|s| s.settings.read().hotkey_snip.clone())
+        .unwrap_or_else(|| "Alt+S".into());
+    let snip_item = MenuItem::with_id(
+        app,
+        "snip",
+        format!("Take a screenshot\t{snip_key}"),
+        true,
+        None::<&str>,
+    )?;
+    let show = MenuItem::with_id(app, "show", "Open Lastshot", true, None::<&str>)?;
     let folder = MenuItem::with_id(app, "folder", "Open clips folder", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Quit ClipFlow", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit Lastshot", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
 
     let capture = Submenu::with_id_and_items(
@@ -303,13 +333,13 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         "capture",
         "Capture",
         true,
-        &[&save, &last30, &toggle],
+        &[&save, &last30, &toggle, &snip_item],
     )?;
     let menu = Menu::with_items(app, &[&capture, &sep, &show, &folder, &sep, &quit])?;
 
-    let mut builder = TrayIconBuilder::with_id("clipflow-tray")
+    let mut builder = TrayIconBuilder::with_id("lastshot-tray")
         .menu(&menu)
-        .tooltip("ClipFlow — buffer armed (Alt + C)")
+        .tooltip("Lastshot — instant replay")
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "save" => hotkeys::trigger_save(app.clone()),
@@ -355,6 +385,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 });
             }
             "toggle" => hotkeys::trigger_toggle(app.clone()),
+            "snip" => snip::begin(app.clone()),
             "show" => {
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.show();

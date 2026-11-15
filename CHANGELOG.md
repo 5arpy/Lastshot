@@ -1,6 +1,27 @@
 # Changelog
 
-All notable changes to **ClipFlow** are documented here. The project follows [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
+All notable changes to **Lastshot** (and, before 1.7.0, to **ClipFlow**, which Lastshot is forked from) are documented here. The project follows [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
+
+## [1.7.0] - 2026-11-15 — first Lastshot release
+
+### Added
+
+- **Screenshot tool.** Press **Alt+S** (or the Screenshot button), then drag a box, click a window, or press **F** for the whole screen. Mark it up with a box, arrow, pen or blur (blur pixelates from the original picture, so it cannot be reversed), then **Enter** copies it and **Ctrl+S** saves it too. Screenshots can also be saved to `Videos\Lastshot\Screenshots` automatically.
+- **Shrink & copy.** One click makes a clip (or the part selected in the editor) small enough for Discord and puts it on the clipboard. The size limit is a setting (10 MB by default, with presets for Nitro), so a Discord policy change needs no app update. Lastshot chooses the resolution and frame rate for the size and duration, re-encodes on the GPU, and retries with a lower bitrate if the result comes out too big. Clips already under the limit are copied as they are.
+- **Drag clips out** of Lastshot into Discord, a browser upload box or Explorer.
+- **Soft dark theme**, now the default, with Dark / Light / System in Settings.
+- Starred clips are **never deleted** by automatic cleanup.
+
+### Changed
+
+- **Simpler layout.** Home, Clips and Settings only. Home has quick actions instead of encoder statistics. Clips shows search, sort and starred, and a **More** button reveals the rest (game filter, select, compact view, library statistics). Every Settings section has its own **Advanced** button. Game profiles and pipeline diagnostics moved into those advanced areas.
+- **Updates.** The broken self-updater is gone. With the startup check turned on, Lastshot asks GitHub for the newest version and opens the download page. Nothing downloads in the background.
+- New name, icon and app ID. Settings live in `%APPDATA%\Lastshot`. ClipFlow settings, stars and tags are imported on first start.
+
+### Fixed
+
+- **Memory leak in the audio encoder.** Every AAC output sample was leaked (a windows-rs `ManuallyDrop` field that was never released), so ClipFlow grew by about 0.5–0.8 GB per hour while recording. Memory now stays flat: a 90-minute test sat at about 200–230 MB the whole time.
+- **60 FPS recordings came out at 30 FPS.** With asynchronous hardware encoders, every other frame was submitted while the encoder was not ready and silently dropped. Frames are now handed over only when the encoder asks for input, and real drops are counted. Measured: 7158 frames in 119.3 s = 60.0 FPS.
 
 ## [1.6.0] - unreleased
 

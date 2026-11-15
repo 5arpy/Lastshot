@@ -33,7 +33,7 @@ export default class ErrorBoundary extends Component<Props, State> {
   private diagnostics = (): string => {
     const { error, info } = this.state;
     return [
-      `ClipFlow UI error`,
+      `Lastshot UI error`,
       `message: ${error?.message ?? "unknown"}`,
       `stack: ${error?.stack ?? "—"}`,
       `component: ${info?.componentStack ?? "—"}`,
@@ -49,7 +49,7 @@ export default class ErrorBoundary extends Component<Props, State> {
     return (
       <div className="grid h-screen w-screen place-items-center bg-app p-6 text-ink">
         <div className="panel-elevated w-full max-w-lg rounded-xl border border-line-2 bg-surface p-6">
-          <div className="text-[15px] font-semibold">ClipFlow hit an unexpected error</div>
+          <div className="text-[15px] font-semibold">Lastshot hit an unexpected error</div>
           <p className="mt-2 text-[12px] leading-relaxed text-ink-3">
             The recording buffer keeps running in the background — nothing was lost.
             Reload the window to get the interface back.

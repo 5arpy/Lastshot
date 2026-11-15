@@ -1,141 +1,82 @@
-# ClipFlow
-
-ClipFlow is an instant replay and gameplay recording utility for Windows 10 and 11. It records your active display into a rolling memory buffer and saves the last 15 to 120 seconds of gameplay to disk with a single hotkey press.
-
-Built with Rust and Tauri v2, ClipFlow uses native Direct3D 11 desktop duplication and Windows Media Foundation hardware encoders to keep CPU and memory overhead low during gaming sessions.
-
----
-
 <p align="center">
-  <img src="ClipFlow_UI.png" alt="ClipFlow dashboard in the soft off-white theme" width="840">
+  <img src="assets/lastshot-icon.svg" width="96" alt="Lastshot icon">
 </p>
 
-| Performance &amp; Game Mode | Clip Trimmer — audio &amp; lossless trim |
-| :---: | :---: |
-| ![Settings](docs/screenshots/settings.png) | ![Trimmer](docs/screenshots/trimmer.png) |
+<h1 align="center">Lastshot</h1>
+
+<p align="center">
+  Free instant replay and snipping tool for Windows.<br>
+  No account. No uploads. No ads. Small and quiet while you play.
+</p>
+
+<p align="center">
+  <a href="https://github.com/5arpy/Lastshot/releases/latest"><b>Download for Windows</b></a>
+</p>
 
 ---
 
-## What's New in 1.5.0
+## What it does
 
-- 🎮 **Game Mode is now the default — and actually enforced.** The 1080p / 60 FPS cap applies on **every** start path (deck ARM, Apply & Restart, profile switch and the global hotkey), with a speed-first encoder (`AVEncCommonQualityVsSpeed`, no B-frames) and an `OPTIMAL_SPEED` video processor.
-- 🖥️ **Integrated-GPU aware.** On an Intel Iris Xe / UHD or AMD Radeon Graphics adapter, Game Mode tightens automatically to **720p / 30 FPS / 6 Mbps** because the game and the encoder share one chip, its memory bandwidth and its power budget. The deck shows "Integrated GPU detected" with the adapter name.
-- ☀️ **Soft off-white UI.** The whole app now uses a low-glare gray palette — no pure-white glare — with a friendlier Performance card and slimmer Settings.
-- 🧹 **Leaner pipeline.** The always-on-top HUD overlay, gallery hover-autoplay, GIF export and the "Simulate GPU Reset" test button were removed. Stats heartbeat is 1 Hz and visibility-gated, thumbnails decode lazily, and the recording pulse pauses while the deck is hidden. **Audio clipping and lossless trimming are untouched.**
+**Instant replay.** Lastshot keeps the last few seconds or minutes of your screen in memory, encoded on your graphics card. Press **Alt+C** and it saves them as an MP4, without leaving your game. Nothing is written to disk until you ask.
 
-See the [changelog](CHANGELOG.md) for the full list, or grab the [latest release](https://github.com/drexjgobgt/ClipFlow-Dev/releases/latest).
+**Screenshots.** Press **Alt+S**, then drag a box, click a window, or press **F** for the whole screen. Mark it up with a box, arrow, pen or blur, and press **Enter**. It is on your clipboard, ready to paste.
 
----
+**Sharing that fits Discord.** Every clip has a **Shrink & copy** button. It makes a copy small enough for Discord (10 MB by default) and puts it on your clipboard: switch to Discord and press **Ctrl+V**. You can also drag a clip straight out of Lastshot into Discord or a folder. If Discord changes its limit, or you have Nitro, change the number in **Settings › Sharing**. You don't need to wait for an app update.
 
-## How It Works
+**Clips you can find again.** Search, sort, star and tag clips, trim them without re-encoding, split them, and grab frames as pictures. Starred clips are never auto-deleted.
 
-1. **Circular Replay Buffer**: Gameplay frames are encoded directly on your GPU and stored in a rolling RAM ring buffer. No intermediate video files are written while you play.
-2. **Instant Clip Flush**: Pressing `Alt + C` packages the cached frames into a standard MP4 file in `%USERPROFILE%\Videos\ClipFlow` without interrupting your game or stealing window focus.
-3. **Synchronized Audio Capture**: Dual WASAPI streams capture game audio and microphone input with monotonic timestamp synchronization, silence injection, and automatic device-loss recovery.
+**Simple by default.** Home, Clips, Settings. Each settings section has its own **Advanced** button for the extra knobs, so you only see them when you want them.
 
----
+## Download and install
 
-## Core Features
+1. Open the [latest release](https://github.com/5arpy/Lastshot/releases/latest).
+2. Download `Lastshot_…_x64-setup.exe` and run it. If you'd rather not install anything, download `lastshot.exe`; it runs as is.
+3. Windows may say **"Windows protected your PC"** because the installer is not code-signed (signing costs money every year). Click **More info › Run anyway**.
 
-- **Instant Replay**: Keep 15, 30, 60, or 120 seconds of recent gameplay ready to save at any time.
-- **Game Mode (default on)**: Caps capture at 1080p/60, tunes the hardware encoder for speed, runs the recorder at normal thread priority and keeps background work quiet while you play — built for Valorant, CS2 and other competitive titles. On an **integrated GPU** (Intel Iris Xe, AMD Radeon Graphics) it tightens further to 720p/30 because the game and encoder share the same chip.
-- **Hardware-Accelerated Encoding**: Supports H.264 and HEVC (H.265) through NVIDIA NVENC, AMD AMF, and Intel QuickSync.
-- **Lossless Clip Trimming**: Cut start and end points using keyframe stream-copy to export clips without re-encoding.
-- **Split at Playhead**: Split a recorded clip into two separate files with one click.
-- **Synchronized Game Audio & Microphone**: Dual WASAPI streams capture game audio and voice with volume mixing, silence injection and automatic device-loss recovery.
-- **Per-Game Capture Profiles**: Assign resolution, frame rate, and bitrate presets to specific game executables with automatic foreground detection.
-- **Game Tagging & Folders**: Clips are automatically labeled with the active game title and can be sorted into dedicated subdirectories.
-- **Clip Library**: Browse recordings with lazy thumbnails, audio presence badges, tag filtering, and batch management.
-- **Privacy Gate**: Automatically pauses recording when sensitive applications, password prompts, or UAC elevation dialogues appear.
-- **Soft off-white desktop UI**: A clear, low-glare gray interface with plain-language status, a single primary Save action and technical details tucked away.
-- **Zero Telemetry**: No accounts, no background tracking services, and no cloud uploads. All video and metadata remain on your local machine. Update checks are **opt-in and off by default** — see [Network access](#network-access).
+Lastshot checks for updates only if you turn that on in **Settings › App › Advanced**, and even then it only opens the download page. Nothing installs by itself.
 
----
+**Needs:** Windows 10 or 11 (64-bit) and a GPU with a hardware video encoder (almost any NVIDIA, AMD or Intel GPU from the last ten years).
 
-## Default Keyboard Shortcuts
+## Default shortcuts
 
-| Shortcut | Action | Description |
-| :--- | :--- | :--- |
-| `Alt + C` | **Save Replay** | Writes the current rolling buffer to an MP4 clip on disk |
-| `Alt + Shift + C` | **Arm / Disarm** | Starts or pauses the background recording buffer |
+| Keys | What it does |
+| --- | --- |
+| Alt+C | Save replay |
+| Alt+S | Take a screenshot |
+| Alt+Shift+C | Start / pause recording |
 
-Hotkeys can be customized at any time in **Settings → Keyboard Shortcuts**.
+Change them in **Settings › Shortcuts**.
 
----
+## Privacy
 
-## Quick Start
+Everything stays on your PC: clips in `Videos\Lastshot`, screenshots in `Videos\Lastshot\Screenshots`, settings in `%APPDATA%\Lastshot`. There is no account, no telemetry and no upload feature. The only network request Lastshot can make is the optional update check against GitHub.
 
-### 1. Download
+**Privacy mode** (Settings › Clips & storage › Advanced) pauses recording while a non-game window is in front, so chats and browser tabs never end up in a replay.
 
-Download the latest version from the [Releases](https://github.com/drexjgobgt/ClipFlow-Dev/releases) page:
+## Coming from ClipFlow?
 
-- **Installer (`.exe` / `.msi`)**: Standard Windows installer with desktop shortcuts and automatic update support.
-- **Portable (`.exe`)**: Self-contained executable requiring no installation.
+Lastshot is a fork of ClipFlow. The first time it starts, it brings over your ClipFlow settings, stars and tags, and keeps using the clips folder you already had (change it in **Settings › Clips & storage**). Once Lastshot works for you, uninstall ClipFlow so the two don't fight over the hotkeys.
 
-### 2. First Run
+## Build from source
 
-1. Launch ClipFlow. The status bar will indicate **Ready to record** or **Recording buffer active**.
-2. Start your game.
-3. When something memorable happens, press `Alt + C`. A system notification will confirm the saved clip.
-4. Access your recordings in the **Clips** tab or directly in `%USERPROFILE%\Videos\ClipFlow`.
+You need [Node.js 20+](https://nodejs.org/), [Rust](https://rustup.rs/) and the [Tauri prerequisites for Windows](https://v2.tauri.app/start/prerequisites/).
 
----
-
-## System Requirements
-
-- **Operating System**: Windows 10 (version 1809 or newer) or Windows 11 (64-bit).
-- **Graphics Card**: DirectX 11.1 compatible GPU with hardware encoding support:
-  - NVIDIA GeForce GTX 600 series or newer (NVENC)
-  - AMD Radeon HD 7000 series or newer (AMF)
-  - Intel HD Graphics 4200 or newer (QuickSync), **including integrated Iris Xe / UHD** — Game Mode automatically records at 720p/30 on integrated GPUs to protect game frame rate
-- **Memory**: **8 GB recommended**, 4 GB supported with a shorter buffer. A 60-second 1080p replay typically uses 80–120 MB; the longest buffer settings on a high bitrate can reach ~1.5 GB, so ClipFlow limits the available buffer duration based on installed RAM.
-- **Storage**: Fast storage (SSD recommended) for saving MP4 clips.
-
----
-
-## Network access
-
-ClipFlow is local-first. It never uploads clips, never sends telemetry, and needs no account.
-
-The only outbound request the app can make is a **single HTTPS fetch of the release manifest** from `github.com` — used to tell you when a new version exists. This is **off by default** and can be enabled in **Settings → Application & Updates → Check for updates at startup**.
-
-Recording, saving, trimming, splitting, tagging and browsing never touch the network.
-
-> **Automatic updates are temporarily unavailable.** The current builds ship plain installers and the in-app updater cannot install a new version; the **Check for Updates** button opens the Releases page instead. See the release notes for the reason and for what to do. This does not affect recording, saving, or any other feature.
-
----
-
-## Building from Source
-
-### Prerequisites
-
-- [Rust](https://www.rust-lang.org/tools/install) (1.75 or later)
-- [Node.js](https://nodejs.org/) (v18 or later)
-- Visual Studio C++ Build Tools with the Windows 10/11 SDK
-
-### Build Steps
-
-```powershell
-# Clone the repository
-git clone https://github.com/drexjgobgt/ClipFlow-Dev.git
-cd ClipFlow-Dev
-
-# Install frontend dependencies
-npm install
-
-# Run the development environment
-npm run tauri dev
-
-# Build production executable and installer
-npm run tauri build
+```bash
+npm ci
+npm run tauri dev      # run with hot reload
+npm run tauri build    # build the installer
 ```
 
-Compiled application binaries and installer bundles are generated in `src-tauri/target/release/bundle/`.
+Tests: `npm run typecheck && npm test` and `cargo test --lib` in `src-tauri`.
 
----
+Tech: Rust and Tauri 2, DXGI desktop duplication, Media Foundation hardware encoders (NVENC / AMF / Quick Sync), WASAPI audio, and a React UI. The installer is a few MB, and memory use while recording is typically 150–250 MB, mostly the replay buffer itself.
+
+## Credits
+
+Lastshot is built on **[ClipFlow](https://github.com/drexjgobgt/ClipFlow-Dev)** by **jaimitus** and **drexjgobgt**, who wrote the capture, encoding and library engine this app runs on. Thank you!
+
+Changes in Lastshot so far: a fix for the audio-encoder memory leak that made ClipFlow grow by about 0.5–0.8 GB per hour, a fix for 60 FPS recordings that came out at 30, the screenshot tool, Discord-sized sharing, drag-out, a soft dark theme, and a simpler layout. See the [changelog](CHANGELOG.md).
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
-
-Maintained by [drexjgobgt](https://github.com/drexjgobgt). Originally developed by [jaimitus](https://github.com/jaimitus).
+MIT, see [LICENSE](LICENSE).

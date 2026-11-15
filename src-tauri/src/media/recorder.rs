@@ -672,10 +672,10 @@ pub fn default_output_dir() -> PathBuf {
     #[cfg(windows)]
     {
         if let Ok(profile) = std::env::var("USERPROFILE") {
-            return PathBuf::from(profile).join("Videos").join("ClipFlow");
+            return PathBuf::from(profile).join("Videos").join("Lastshot");
         }
     }
-    std::env::temp_dir().join("ClipFlow")
+    std::env::temp_dir().join("Lastshot")
 }
 
 // ---------------------------------------------------------------------------
@@ -1048,7 +1048,7 @@ impl CaptureEngine {
         // restored on *every* exit path, not just the happy one.
         let written = (|| -> RResult<(PathBuf, String)> {
             let stem = format!(
-                "ClipFlow_{}",
+                "Lastshot_{}",
                 chrono::Local::now().format("%Y-%m-%d_%H-%M-%S")
             );
             let out_dir = match &cfg.output_subfolder {
@@ -1278,7 +1278,7 @@ mod win {
             let duplication = output1.DuplicateOutput(&device).map_err(|e| {
                 if e.code() == DXGI_ERROR_UNSUPPORTED {
                     RecorderError::Other(
-                        "Desktop Duplication is unavailable on this output (hybrid-GPU: run ClipFlow on the GPU driving the display)".into(),
+                        "Desktop Duplication is unavailable on this output (hybrid-GPU: run Lastshot on the GPU driving the display)".into(),
                     )
                 } else {
                     hr(e)

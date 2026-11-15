@@ -169,7 +169,7 @@ pub fn sanitize_file_stem(raw: &str, fallback: &str) -> String {
 /// folder.
 fn game_folder_name(exe: &str) -> Option<String> {
     let exe = exe.to_ascii_lowercase();
-    if exe.starts_with("clipflow") {
+    if exe.starts_with("clipflow") || exe.starts_with("lastshot") {
         return None;
     }
     let stem = match exe.rfind('.') {
@@ -218,7 +218,7 @@ pub fn resolve_game_folder(state: &AppState, game_override: Option<&str>) -> Opt
 /// the main thread (no blocking `GetWindowTextW`).
 pub fn privacy_should_gate() -> bool {
     match crate::foreground::foreground_exe() {
-        Some(e) => e.starts_with("clipflow") || e.starts_with("explorer"),
+        Some(e) => crate::hotkeys::is_own_or_desktop(&e),
         None => false,
     }
 }
@@ -603,7 +603,7 @@ pub fn open_releases_page(app: AppHandle) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
     app.opener()
         .open_url(
-            "https://github.com/drexjgobgt/ClipFlow-Dev/releases",
+            "https://github.com/5arpy/Lastshot/releases",
             None::<&str>,
         )
         .map_err(|e| e.to_string())
@@ -706,6 +706,9 @@ pub struct SettingsPatch {
     pub eco_battery_threshold_pct: Option<u32>,
     pub eco_ram_free_gbs: Option<u32>,
     pub check_updates_on_startup: Option<bool>,
+    pub share_size_mb: Option<f32>,
+    pub hotkey_snip: Option<String>,
+    pub snip_save_to_folder: Option<bool>,
 }
 
 #[tauri::command]
@@ -725,21 +728,19 @@ pub fn update_settings(
     // Hotkeys must be re-registered with the OS before we persist them — if
     // another app owns the combo the whole patch fails and nothing is written.
     // Conflicts are rejected up front so one combo can never drive both actions.
-    if let (Some(a), Some(b)) = (patch.hotkey_save.as_ref(), patch.hotkey_toggle.as_ref()) {
-        if a == b {
-            return Err(format!(
-                "save and arm/disarm hotkeys cannot share the same combo '{a}'"
-            ));
+    {
+        let save = patch.hotkey_save.as_ref().unwrap_or(&s.hotkey_save);
+        let toggle = patch.hotkey_toggle.as_ref().unwrap_or(&s.hotkey_toggle);
+        let snip = patch.hotkey_snip.as_ref().unwrap_or(&s.hotkey_snip);
+        let same = |a: &String, b: &String| a.eq_ignore_ascii_case(b);
+        if same(save, toggle) {
+            return Err(format!("'{save}' is already used by the arm/disarm hotkey"));
         }
-    }
-    if let Some(v) = patch.hotkey_save.as_ref() {
-        if v == &s.hotkey_toggle {
-            return Err(format!("'{v}' is already used by the arm/disarm hotkey"));
+        if same(snip, save) {
+            return Err(format!("'{snip}' is already used by the save hotkey"));
         }
-    }
-    if let Some(v) = patch.hotkey_toggle.as_ref() {
-        if v == &s.hotkey_save {
-            return Err(format!("'{v}' is already used by the save hotkey"));
+        if same(snip, toggle) {
+            return Err(format!("'{snip}' is already used by the arm/disarm hotkey"));
         }
     }
     if let Some(v) = patch.hotkey_save.clone() {
@@ -749,6 +750,10 @@ pub fn update_settings(
     if let Some(v) = patch.hotkey_toggle.clone() {
         crate::hotkeys::rebind(&app, &s.hotkey_toggle, &v)?;
         s.hotkey_toggle = v;
+    }
+    if let Some(v) = patch.hotkey_snip.clone() {
+        crate::hotkeys::rebind(&app, &s.hotkey_snip, &v)?;
+        s.hotkey_snip = v;
     }
 
     if let Some(v) = patch.buffer_seconds {
@@ -852,6 +857,15 @@ pub fn update_settings(
     if let Some(v) = patch.check_updates_on_startup {
         s.check_updates_on_startup = v;
     }
+    if let Some(v) = patch.share_size_mb {
+        if !v.is_finite() {
+            return Err("size limit must be a number".into());
+        }
+        s.share_size_mb = v.clamp(1.0, 2000.0);
+    }
+    if let Some(v) = patch.snip_save_to_folder {
+        s.snip_save_to_folder = v;
+    }
 
     // Persist first: if this fails, nothing below runs and the in-memory
     // settings are untouched.
@@ -948,21 +962,31 @@ pub async fn cleanup_old_clips(state: State<'_, AppState>, days: u32) -> Result<
     let dir = state.output_dir();
     let days = days.max(1);
     let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
+    let clips = tauri::async_runtime::spawn_blocking(move || library::scan_directory(&dir, false))
+        .await
+        .map_err(|e| format!("cleanup task panicked: {e}"))?
+        .map_err(|e| e.to_string())?;
+    // Starred clips are kept forever: that is what starring is for.
+    let victims: Vec<String> = {
+        let meta = state.clip_meta.lock();
+        clips
+            .into_iter()
+            .filter(|c| {
+                chrono::DateTime::from_timestamp_millis(c.created_unix_ms as i64)
+                    .is_some_and(|created| created < cutoff)
+                    && !meta.get(&c.path).favorite
+            })
+            .map(|c| c.path)
+            .collect()
+    };
     tauri::async_runtime::spawn_blocking(move || {
-        let clips = library::scan_directory(&dir, false).map_err(|e| e.to_string())?;
-        let mut deleted = 0u32;
-        for c in &clips {
-            let created = chrono::DateTime::from_timestamp_millis(c.created_unix_ms as i64);
-            if let Some(created) = created {
-                if created < cutoff && library::delete_clip(Path::new(&c.path)).is_ok() {
-                    deleted += 1;
-                }
-            }
-        }
-        Ok(deleted)
+        victims
+            .iter()
+            .filter(|p| library::delete_clip(Path::new(p)).is_ok())
+            .count() as u32
     })
     .await
-    .map_err(|e| format!("cleanup task panicked: {e}"))?
+    .map_err(|e| format!("cleanup task panicked: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1118,7 +1142,7 @@ pub fn quit_app(state: State<'_, AppState>) -> Result<(), String> {
 // Clipboard (CF_HDROP)
 // ---------------------------------------------------------------------------
 
-mod clipboard {
+pub(crate) mod clipboard {
     use std::path::PathBuf;
 
     /// Multi-file CF_HDROP: a double-NUL terminated list of wide paths, each

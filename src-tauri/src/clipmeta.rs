@@ -181,13 +181,7 @@ impl ClipMetaStore {
 }
 
 fn store_path() -> PathBuf {
-    #[cfg(windows)]
-    {
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            return PathBuf::from(appdata).join("ClipFlow").join("clip_meta.json");
-        }
-    }
-    std::env::temp_dir().join("ClipFlow").join("clip_meta.json")
+    crate::paths::app_file("clip_meta.json")
 }
 
 #[cfg(test)]

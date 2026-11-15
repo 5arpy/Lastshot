@@ -26,7 +26,7 @@ export default function TitleBar({ armed, native, version }: Props) {
 
         <div className="flex items-baseline gap-1.5">
           <span className="text-[13px] font-semibold tracking-normal text-ink">
-            ClipFlow
+            Lastshot
           </span>
           <span className="font-mono text-[10px] text-ink-3">
             v{version}

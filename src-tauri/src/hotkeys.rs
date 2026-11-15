@@ -39,8 +39,8 @@ pub fn validate(accelerator: &str) -> Result<Shortcut, String> {
     Ok(sc)
 }
 
-/// Registers both shortcuts. Called once from `setup`.
-pub fn register_all(app: &AppHandle, save: &str, toggle: &str) -> Result<(), String> {
+/// Registers the save, arm/disarm and snip shortcuts. Called once from `setup`.
+pub fn register_all(app: &AppHandle, save: &str, toggle: &str, snip: &str) -> Result<(), String> {
     let gs = app.global_shortcut();
     let save_sc = validate(save)?;
     let toggle_sc = validate(toggle)?;
@@ -52,6 +52,11 @@ pub fn register_all(app: &AppHandle, save: &str, toggle: &str) -> Result<(), Str
     if !gs.is_registered(toggle_sc) {
         gs.register(toggle_sc)
             .map_err(|e| format!("could not register {toggle}: {e}"))?;
+    }
+    let snip_sc = validate(snip)?;
+    if !gs.is_registered(snip_sc) {
+        gs.register(snip_sc)
+            .map_err(|e| format!("could not register {snip}: {e} (another app may own it)"))?;
     }
     Ok(())
 }
@@ -88,9 +93,9 @@ pub fn on_shortcut(app: &AppHandle, shortcut: &Shortcut, state: ShortcutState) {
     // Read only the two hotkey strings — cloning the full Settings (which
     // includes Vec<CaptureProfile> and Vec<ProfileMapEntry>) on every global
     // shortcut event is wasteful and holds the read lock longer than needed.
-    let (save_key, toggle_key) = {
+    let (save_key, toggle_key, snip_key) = {
         let s = app_state.settings.read();
-        (s.hotkey_save.clone(), s.hotkey_toggle.clone())
+        (s.hotkey_save.clone(), s.hotkey_toggle.clone(), s.hotkey_snip.clone())
     };
 
     let save_matches = parse(&save_key)
@@ -106,6 +111,8 @@ pub fn on_shortcut(app: &AppHandle, shortcut: &Shortcut, state: ShortcutState) {
     } else if toggle_matches {
         let _ = app.emit(EVT_HOTKEY, toggle_key);
         trigger_toggle(app.clone());
+    } else if parse(&snip_key).map(|s| &s == shortcut).unwrap_or(false) {
+        crate::snip::begin(app.clone());
     }
 }
 
@@ -180,6 +187,11 @@ pub fn publish_saved_clip(
     clip
 }
 
+/// The deck itself or the desktop has focus (lower-case exe name).
+pub fn is_own_or_desktop(exe: &str) -> bool {
+    exe.starts_with("lastshot") || exe.starts_with("clipflow") || exe.starts_with("explorer")
+}
+
 /// Fire-and-forget flush. Never blocks the hook thread.
 pub fn trigger_save(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
@@ -218,7 +230,7 @@ pub fn trigger_save(app: AppHandle) {
                     .as_ref()
                     .map(|g| {
                         let e = g.exe.to_ascii_lowercase();
-                        e.starts_with("clipflow") || e.starts_with("explorer")
+                        is_own_or_desktop(&e)
                     })
                     .unwrap_or(false);
                 if gated {
@@ -251,8 +263,7 @@ pub fn trigger_save(app: AppHandle) {
                 let focused_exe = focused
                     .map(|g| g.exe.to_ascii_lowercase())
                     .unwrap_or_default();
-                let safe_to_raise =
-                    focused_exe.starts_with("clipflow") || focused_exe.starts_with("explorer");
+                let safe_to_raise = is_own_or_desktop(&focused_exe);
                 let raise_deck = open_trimmer && safe_to_raise;
 
                 if open_trimmer && !safe_to_raise {

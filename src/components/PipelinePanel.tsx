@@ -75,8 +75,8 @@ export default function PipelinePanel({
             <p className="mt-1 text-[12px] leading-relaxed text-text-secondary">
               {performanceMode
                 ? integratedGpu
-                  ? "Capture is capped at 720p / 30 FPS, the encoder favours speed, and ClipFlow stays quiet in the background while you play."
-                  : "Capture is capped at 1080p / 60 FPS, the encoder favours speed, and ClipFlow stays quiet in the background while you play."
+                  ? "Capture is capped at 720p / 30 FPS, the encoder favours speed, and Lastshot stays quiet in the background while you play."
+                  : "Capture is capped at 1080p / 60 FPS, the encoder favours speed, and Lastshot stays quiet in the background while you play."
                 : "Capture follows your monitor and frame-rate settings exactly. Turn Game Mode on if you notice stutter."}
             </p>
           </div>

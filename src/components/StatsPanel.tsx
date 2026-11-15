@@ -117,7 +117,7 @@ export default function StatsPanel({ clips }: Props) {
       </div>
 
       <p className="border-t border-line pt-3 text-[11px] leading-relaxed text-ink-3">
-        Clips saved with game organization active are automatically sorted into Videos\ClipFlow\&lt;game&gt;\ subfolders.
+        Clips saved with game organization active are automatically sorted into &lt;clips folder&gt;\&lt;game&gt;\ subfolders.
       </p>
     </section>
   );

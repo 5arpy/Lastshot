@@ -30,6 +30,11 @@ interface Props {
   onToggleFavorite: () => Promise<void> | void;
   /** Replaces this clip's custom tags. */
   onUpdateTags: (tags: string[]) => Promise<void> | void;
+  /** Shrinks the selected part under the share limit and copies it. */
+  onShare: (start: number, end: number) => Promise<void> | void;
+  shareLimitMb: number;
+  /** 0-1 while this clip is being shrunk. */
+  shareProgress?: number;
 }
 
 const HANDLE_W = 14;
@@ -39,6 +44,9 @@ export default function ClipTrimmerModal({
   flushMs,
   busy,
   onSaveTrimmed,
+  onShare,
+  shareLimitMb,
+  shareProgress,
   onCopy,
   onReveal,
   onOpenExternal,
@@ -635,7 +643,19 @@ export default function ClipTrimmerModal({
                 disabled={busy}
                 className="rounded-lg border border-line bg-surface px-3.5 py-1.5 text-[11px] text-ink hover:border-accent hover:text-ink disabled:opacity-40"
               >
-                Copy Video
+                Copy original
+              </button>
+
+              <button
+                type="button"
+                onClick={() => void onShare(start, end)}
+                disabled={busy || shareProgress !== undefined || selectionSeconds < 0.2}
+                title={`Makes a copy of the selected part under ${shareLimitMb} MB and puts it on the clipboard, ready to paste into Discord.`}
+                className="rounded-lg border border-accent/50 bg-accent/15 px-3.5 py-1.5 text-[12px] font-semibold text-accent-fg hover:bg-accent/25 disabled:opacity-60"
+              >
+                {shareProgress !== undefined
+                  ? `Shrinking ${Math.round(shareProgress * 100)}%`
+                  : `Shrink & copy · ${shareLimitMb} MB`}
               </button>
 
               <button

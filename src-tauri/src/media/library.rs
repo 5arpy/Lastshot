@@ -210,6 +210,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 fn pretty_title(file_name: &str) -> String {
     file_name
         .trim_end_matches(".mp4")
+        .replace("Lastshot_", "Clip ")
         .replace("ClipFlow_", "Clip ")
         .replace('_', " ")
 }
@@ -247,13 +248,7 @@ struct ProbeCache {
 
 impl ProbeCache {
     fn path() -> PathBuf {
-        #[cfg(windows)]
-        {
-            if let Ok(appdata) = std::env::var("APPDATA") {
-                return PathBuf::from(appdata).join("ClipFlow").join("probe_cache.json");
-            }
-        }
-        std::env::temp_dir().join("ClipFlow").join("probe_cache.json")
+        crate::paths::app_file("probe_cache.json")
     }
 
     fn load_from(path: &Path) -> Self {

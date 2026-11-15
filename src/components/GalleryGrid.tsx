@@ -26,6 +26,20 @@ interface Props {
   onOpenExternal: (clip: ClipMetadata) => void;
   onDelete: (clip: ClipMetadata) => void;
   onToggleFavorite: (clip: ClipMetadata) => void;
+  /** Shrink under the share limit and copy to the clipboard. */
+  onShare: (clip: ClipMetadata) => void;
+  /** Share size limit in MB, for the button label. */
+  shareLimitMb: number;
+  /** Shrink progress (0-1) by clip path, for clips being shrunk right now. */
+  shareProgress?: ReadonlyMap<string, number>;
+}
+
+/** Starts a native file drag so the clip can be dropped into Discord, Explorer, a browser... */
+function startNativeDrag(e: React.DragEvent, path: string) {
+  e.preventDefault();
+  void clipflow.startClipDrag(path).catch(() => {
+    /* drag is a convenience; the copy buttons still work */
+  });
 }
 
 function IconButton({
@@ -73,6 +87,9 @@ const ClipCard = memo(function ClipCard({
   onOpenExternal,
   onDelete,
   onToggleFavorite,
+  onShare,
+  shareLimitMb,
+  progress,
 }: {
   clip: ClipMetadata;
   compact?: boolean;
@@ -85,8 +102,12 @@ const ClipCard = memo(function ClipCard({
   onOpenExternal: (c: ClipMetadata) => void;
   onDelete: (c: ClipMetadata) => void;
   onToggleFavorite: (c: ClipMetadata) => void;
+  onShare: (c: ClipMetadata) => void;
+  shareLimitMb: number;
+  progress: number | undefined;
 }) {
   const [thumb, setThumb] = useState(clip.thumbnail);
+  const fitsAlready = clip.size_bytes <= shareLimitMb * 1_000_000;
 
   useEffect(() => {
     if (clip.thumbnail) {
@@ -162,6 +183,9 @@ const ClipCard = memo(function ClipCard({
       }${clip.favorite ? ", favourite" : ""}`}
       aria-pressed={selectMode ? selected : undefined}
       onKeyDown={handleKeyDown}
+      draggable={!selectMode}
+      onDragStart={(e) => startNativeDrag(e, clip.path)}
+      title="Click to open. Drag into Discord or a folder to share the file."
       className={cn(
         "panel panel-hover group relative cursor-pointer overflow-hidden rounded-xl transition-all duration-150",
         selected
@@ -178,6 +202,7 @@ const ClipCard = memo(function ClipCard({
             alt={clip.title}
             loading="lazy"
             decoding="async"
+            draggable={false}
             className="h-full w-full object-cover"
           />
         ) : (
@@ -344,11 +369,37 @@ const ClipCard = memo(function ClipCard({
             </>
           )}
         </div>
-        <div className="mt-1.5 flex items-center justify-between font-mono text-[10px] text-ink-3">
-          <span>{formatRelativeTime(clip.created_unix_ms)}</span>
-          <span>{formatBytes(clip.size_bytes)}</span>
+        <div className="mt-1.5 flex items-center justify-between gap-2 font-mono text-[10px] text-ink-3">
+          <span className="truncate">
+            {formatRelativeTime(clip.created_unix_ms)} · {formatBytes(clip.size_bytes)}
+          </span>
+          <button
+            type="button"
+            disabled={progress !== undefined}
+            onClick={(e) => {
+              e.stopPropagation();
+              onShare(clip);
+            }}
+            title={
+              fitsAlready
+                ? `Already under ${shareLimitMb} MB: copies the clip so you can paste it into Discord.`
+                : `Makes a copy under ${shareLimitMb} MB and puts it on the clipboard, ready to paste into Discord.`
+            }
+            className="shrink-0 rounded-md border border-accent/40 bg-accent/10 px-2 py-0.5 font-sans text-[11px] font-semibold text-accent-fg transition-colors hover:bg-accent/20 disabled:cursor-wait disabled:opacity-80"
+          >
+            {progress !== undefined
+              ? `Shrinking ${Math.round(progress * 100)}%`
+              : fitsAlready
+                ? "Copy to share"
+                : `Shrink & copy · ${shareLimitMb} MB`}
+          </button>
         </div>
       </div>
+      {progress !== undefined && (
+        <div className="absolute inset-x-0 bottom-0 h-0.5 bg-line">
+          <div className="h-full bg-accent transition-[width] duration-300" style={{ width: `${progress * 100}%` }} />
+        </div>
+      )}
     </article>
   );
 });
@@ -368,6 +419,9 @@ const GalleryGrid = memo(function GalleryGrid({
   onOpenExternal,
   onDelete,
   onToggleFavorite,
+  onShare,
+  shareLimitMb,
+  shareProgress,
 }: Props) {
   const gap = gapFor(!!compact);
   const { cols, rowPitch, totalHeight, startRow, endRow, containerRef, rowRef } =
@@ -426,11 +480,8 @@ const GalleryGrid = memo(function GalleryGrid({
             No clips recorded yet
           </div>
           <p className="max-w-sm text-[12px] leading-relaxed text-ink-3">
-            The rolling buffer is active in memory. Press{" "}
-            <kbd className="rounded border border-line-3 bg-surface-2 px-1.5 py-0.5 font-mono text-[11px] text-ink">
-              Alt + C
-            </kbd>{" "}
-            at any time while playing to save the last replay moments instantly.
+            While recording is on, press your Save replay shortcut (Settings › Shortcuts) to keep
+            the last moments as a clip.
           </p>
         </div>
       );
@@ -464,6 +515,9 @@ const GalleryGrid = memo(function GalleryGrid({
               onOpenExternal={onOpenExternal}
               onDelete={onDelete}
               onToggleFavorite={onToggleFavorite}
+              onShare={onShare}
+              shareLimitMb={shareLimitMb}
+              progress={shareProgress?.get(clip.path)}
             />
           ))}
         </div>,

@@ -19,6 +19,10 @@ import type {
   MonitorInfo,
   PowerState,
   ProfileMapEntry,
+  ShrinkProgress,
+  ShrinkResult,
+  SnipCapture,
+  SnipDone,
   SplitResult,
   TrimResult,
 } from "./types";
@@ -39,7 +43,10 @@ type TauriGlobal = {
       minimize: () => Promise<void>;
       toggleMaximize: () => Promise<void>;
       hide: () => Promise<void>;
+      show: () => Promise<void>;
+      setFocus: () => Promise<void>;
       startDragging: () => Promise<void>;
+      label: string;
     };
   };
 };
@@ -55,6 +62,23 @@ export const isTauri = (): boolean =>
   typeof window !== "undefined" &&
   (typeof window.__TAURI__ !== "undefined" ||
     typeof window.__TAURI_INTERNALS__ !== "undefined");
+
+/** Label of the window this page runs in ("main", "snip"), or null in a browser. */
+export function currentWindowLabel(): string | null {
+  try {
+    return window.__TAURI__?.window?.getCurrentWindow().label ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Shows and focuses the window this page runs in (no-op in a browser). */
+export async function showCurrentWindow(): Promise<void> {
+  const w = window.__TAURI__?.window?.getCurrentWindow();
+  if (!w) return;
+  await w.show();
+  await w.setFocus();
+}
 
 function tauri(): TauriGlobal {
   const t = window.__TAURI__;
@@ -114,7 +138,25 @@ export const CHANNELS = {
   error: "clipflow://error",
   hotkey: "clipflow://hotkey",
   bufferState: "clipflow://buffer-state",
+  shrinkProgress: "clipflow://shrink-progress",
+  snipDone: "clipflow://snip-done",
 } as const;
+
+export const RELEASES_URL = "https://github.com/5arpy/Lastshot/releases";
+const LATEST_RELEASE_API = "https://api.github.com/repos/5arpy/Lastshot/releases/latest";
+
+/** Compares dotted versions ("1.10.0" > "1.9.2"). */
+export function isNewerVersion(candidate: string, current: string): boolean {
+  const parse = (v: string) => v.replace(/^v/i, "").split(/[.-]/).map((p) => parseInt(p, 10) || 0);
+  const a = parse(candidate);
+  const b = parse(current);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const x = a[i] ?? 0;
+    const y = b[i] ?? 0;
+    if (x !== y) return x > y;
+  }
+  return false;
+}
 
 // ---------------------------------------------------------------------------
 // Default settings used before the backend answers (and in the browser)
@@ -128,7 +170,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   monitorIndex: 0,
   captureSystemAudio: true,
   captureMicrophone: false,
-  outputDir: "C:\\Users\\You\\Videos\\ClipFlow",
+  outputDir: "C:\\Users\\You\\Videos\\Lastshot",
   hotkeySave: "Alt+C",
   hotkeyToggle: "Alt+Shift+C",
   openTrimmerAfterSave: true,
@@ -177,6 +219,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   ecoBatteryThresholdPct: 30,
   ecoRamFreeGbs: 4,
   checkUpdatesOnStartup: false,
+  shareSizeMb: 10,
+  hotkeySnip: "Alt+S",
+  snipSaveToFolder: true,
 };
 
 let browserSettings: AppSettings = { ...DEFAULT_SETTINGS };
@@ -450,7 +495,97 @@ export const clipflow = {
       await invoke("open_releases_page");
       return;
     }
-    window.open("https://github.com/drexjgobgt/ClipFlow-Dev/releases", "_blank");
+    window.open(RELEASES_URL, "_blank");
+  },
+
+  /**
+   * Asks GitHub for the newest Lastshot release. Returns its version when it
+   * is newer than `current`, otherwise null. One HTTPS request, only when
+   * called; nothing is installed automatically.
+   */
+  async checkLatestRelease(current: string): Promise<string | null> {
+    const res = await fetch(LATEST_RELEASE_API, {
+      headers: { Accept: "application/vnd.github+json" },
+    });
+    if (res.status === 404) return null; // no release published yet
+    if (!res.ok) throw new Error(`GitHub answered ${res.status}`);
+    const body = (await res.json()) as { tag_name?: string };
+    const tag = body.tag_name ?? "";
+    return tag && isNewerVersion(tag, current) ? tag.replace(/^v/i, "") : null;
+  },
+
+  // ------------------------------------------------------------- sharing
+  /**
+   * Re-encodes a clip (or part of it) under the size limit from Settings.
+   * `copy` puts it on the clipboard; `keep` saves it next to the original.
+   */
+  async shrinkClip(
+    path: string,
+    opts: { start?: number; end?: number; copy: boolean; keep: boolean },
+  ): Promise<ShrinkResult> {
+    if (isTauri()) {
+      return invoke<ShrinkResult>("shrink_clip", {
+        path,
+        start: opts.start ?? null,
+        end: opts.end ?? null,
+        copy: opts.copy,
+        keep: opts.keep,
+      });
+    }
+    // Browser preview: pretend, with progress, so the UI flow is testable.
+    for (let i = 1; i <= 10; i++) {
+      await new Promise((r) => setTimeout(r, 120));
+      emitLocal(CHANNELS.shrinkProgress, { path, progress: i / 10 });
+    }
+    const mb = browserSettings.shareSizeMb;
+    return {
+      path: path.replace(/\.mp4$/i, `_${Math.round(mb)}MB.mp4`),
+      file_name: `clip_${Math.round(mb)}MB.mp4`,
+      size_bytes: Math.round(mb * 0.9 * 1_000_000),
+      duration_seconds: 30,
+      width: 1280,
+      height: 720,
+      fps: 30,
+      video_kbps: 2400,
+      elapsed_ms: 1200,
+      attempts: 1,
+    };
+  },
+
+  /** Native file drag (call from `dragstart`, after `preventDefault`). */
+  async startClipDrag(path: string): Promise<void> {
+    if (isTauri()) await invoke("start_clip_drag", { paths: [path] });
+  },
+
+  onShrinkProgress(handler: Handler<ShrinkProgress>) {
+    return listen<ShrinkProgress>(CHANNELS.shrinkProgress, handler);
+  },
+
+  // ------------------------------------------------------------ snipping
+  async startSnip(): Promise<void> {
+    if (isTauri()) {
+      await invoke("start_snip");
+      return;
+    }
+    emitLocal(
+      CHANNELS.error,
+      "The snipping tool works in the installed app, not in the browser preview.",
+    );
+  },
+  async snipGetCapture(): Promise<SnipCapture> {
+    return invoke<SnipCapture>("snip_get_capture");
+  },
+  async snipFinish(png: string, copy: boolean, save: boolean): Promise<SnipDone> {
+    return invoke<SnipDone>("snip_finish", { png, copy, save });
+  },
+  async snipCancel(): Promise<void> {
+    if (isTauri()) await invoke("snip_cancel");
+  },
+  async openScreenshotsFolder(): Promise<void> {
+    if (isTauri()) await invoke("open_screenshots_folder");
+  },
+  onSnipDone(handler: Handler<SnipDone>) {
+    return listen<SnipDone>(CHANNELS.snipDone, handler);
   },
 
   async copyClip(path: string): Promise<void> {

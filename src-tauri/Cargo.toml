@@ -1,17 +1,17 @@
 [package]
-name = "clipflow"
-version = "1.6.0"
-description = "ClipFlow - zero-bloat, privacy-first instant replay & game clipping for Windows"
-authors = ["ClipFlow Contributors"]
+name = "lastshot"
+version = "1.7.0"
+description = "Lastshot - free instant replay & snipping tool for Windows. No account, fully local."
+authors = ["5arpy", "jaimitus", "drexjgobgt"]
 license = "MIT"
-repository = "https://github.com/clipflow/clipflow"
+repository = "https://github.com/5arpy/Lastshot"
 edition = "2021"
 rust-version = "1.77.2"
 
 # The library is what Tauri v2 builds; `main.rs` is a 6-line shim so that the
 # same crate can be consumed by integration tests / benches.
 [lib]
-name = "clipflow_lib"
+name = "lastshot_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -31,7 +31,6 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-dialog = "2.0.4"
 tauri-plugin-notification = "2.0.1"
 tauri-plugin-autostart = "2"
-tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 
 # ---------------------------------------------------------- Serialization/IO
@@ -68,6 +67,7 @@ features = [
     "Win32_System_SystemInformation",
     "Win32_UI_WindowsAndMessaging",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Direct3D",

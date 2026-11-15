@@ -113,6 +113,24 @@ pub struct Settings {
     /// probe. See README "Zero Telemetry".
     #[serde(default)]
     pub check_updates_on_startup: bool,
+    /// "Shrink & copy" size limit in MB (Discord's free cap is 10 MB). Kept as
+    /// a setting so a platform change needs no app update.
+    #[serde(default = "default_share_mb")]
+    pub share_size_mb: f32,
+    /// Hotkey that opens the snipping overlay.
+    #[serde(default = "default_snip_hotkey")]
+    pub hotkey_snip: String,
+    /// Also save every snip as a PNG in `<clips folder>\Screenshots`.
+    #[serde(default = "default_true")]
+    pub snip_save_to_folder: bool,
+}
+
+fn default_share_mb() -> f32 {
+    10.0
+}
+
+fn default_snip_hotkey() -> String {
+    "Alt+S".into()
 }
 
 fn default_30() -> u32 {
@@ -165,6 +183,9 @@ impl Default for Settings {
             eco_battery_threshold_pct: 30,
             eco_ram_free_gbs: 4,
             check_updates_on_startup: false,
+            share_size_mb: default_share_mb(),
+            hotkey_snip: default_snip_hotkey(),
+            snip_save_to_folder: true,
         }
     }
 }
@@ -288,13 +309,7 @@ impl Settings {
     }
 
     pub fn config_path() -> PathBuf {
-        #[cfg(windows)]
-        {
-            if let Ok(appdata) = std::env::var("APPDATA") {
-                return PathBuf::from(appdata).join("ClipFlow").join("settings.json");
-            }
-        }
-        std::env::temp_dir().join("ClipFlow").join("settings.json")
+        crate::paths::app_file("settings.json")
     }
 
     pub fn load() -> Self {

@@ -3,6 +3,7 @@
 pub mod audio;
 pub mod library;
 pub mod recorder;
+pub mod shrink;
 
 pub use library::{ClipMetadata, TrimResult};
 pub use recorder::{

@@ -1,9 +1,12 @@
 name: Release
 
-# Push a tag like `v1.1.0` (or run manually) to build, sign and publish a
-# GitHub Release. tauri-action uploads the installers, their `.sig` files and
-# the `latest.json` updater manifest — which is exactly the endpoint ClipFlow's
-# in-app updater polls (`releases/latest/download/latest.json`).
+# Push a tag like `v1.7.0` (or run this by hand) to build Lastshot on a
+# Windows runner and publish a GitHub Release with:
+#   - the NSIS installer (Lastshot_<version>_x64-setup.exe)
+#   - the plain lastshot.exe, for people who want a portable copy
+#
+# Lastshot does not update itself, so nothing is signed for an updater; the
+# app only checks the latest release tag and opens the download page.
 
 on:
   push:
@@ -16,15 +19,9 @@ permissions:
 
 jobs:
   release:
-    # Explicitly granted inside the job: the repo default is read-only, and
-    # release creation needs contents: write on the GITHUB_TOKEN.
+    runs-on: windows-latest
     permissions:
       contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: [windows-latest]
-    runs-on: ${{ matrix.platform }}
 
     steps:
       - name: Checkout repository
@@ -47,26 +44,28 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      # Gate the release with the same local checks. tauri-action's vite build
-      # strips types via esbuild without checking them, so without this step a
-      # tag could publish code that fails tsc or the test suites.
+      # tauri-action's vite build does not type-check, so gate the release on
+      # the same checks CI runs.
       - name: Typecheck and unit tests
         run: npm run typecheck && npm test
+
+      - name: Rust unit tests
+        working-directory: src-tauri
+        run: cargo test --release --lib
 
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         with:
           tagName: v__VERSION__
-          releaseName: "ClipFlow v__VERSION__"
+          releaseName: "Lastshot v__VERSION__"
           releaseBody: |
-            See the assets below to download and install this version.
-            Windows: use the **NSIS setup** (recommended) or the **MSI** package.
-            Automatic updates are delivered through this release.
+            **Download:** `Lastshot_…_x64-setup.exe` below, run it, done. Or grab `lastshot.exe` for a portable copy (needs Microsoft Edge WebView2, which Windows 10/11 already have).
+
+            Windows may show "Windows protected your PC" because the installer is not code-signed (that costs money every year). Click **More info → Run anyway**.
+
+            See CHANGELOG.md for what changed.
           releaseDraft: false
           prerelease: false
-          # Also upload the raw release exe so every release ships a portable
-          # build (ClipFlow_v1.1.0_Portable.exe) alongside the installers.
           uploadPlainBinary: true

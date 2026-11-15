@@ -93,6 +93,46 @@ export interface TrimResult {
   snapped_start_seconds: number;
 }
 
+/** A clip re-encoded to fit a size limit. */
+export interface ShrinkResult {
+  path: string;
+  file_name: string;
+  size_bytes: number;
+  duration_seconds: number;
+  width: number;
+  height: number;
+  fps: number;
+  video_kbps: number;
+  elapsed_ms: number;
+  attempts: number;
+}
+
+export interface ShrinkProgress {
+  path: string;
+  progress: number;
+}
+
+/** A window outline on the snipped monitor (physical px, front-most first). */
+export interface SnipWindowRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  title: string;
+}
+
+export interface SnipCapture {
+  image: string;
+  width: number;
+  height: number;
+  windows: SnipWindowRect[];
+}
+
+export interface SnipDone {
+  path: string | null;
+  copied: boolean;
+}
+
 /** Result of splitting a clip in two at the playhead. */
 export interface SplitResult {
   partA: TrimResult;
@@ -192,6 +232,12 @@ export interface AppSettings {
    * always works.
    */
   checkUpdatesOnStartup: boolean;
+  /** "Shrink & copy" size limit in MB (Discord's free cap is 10). */
+  shareSizeMb: number;
+  /** Hotkey that opens the snipping overlay. */
+  hotkeySnip: string;
+  /** Also save every snip as a PNG in <clips folder>\Screenshots. */
+  snipSaveToFolder: boolean;
 }
 
 /** A point-in-time snapshot of the machine's power / memory state. */

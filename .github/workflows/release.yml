@@ -49,9 +49,12 @@ jobs:
       - name: Typecheck and unit tests
         run: npm run typecheck && npm test
 
+      # tauri::generate_context! embeds ../dist at compile time, so the
+      # frontend has to be built before cargo can compile the tests.
       - name: Rust unit tests
-        working-directory: src-tauri
-        run: cargo test --release --lib
+        run: |
+          npm run build
+          cargo test --release --lib --manifest-path src-tauri/Cargo.toml
 
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0

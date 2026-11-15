@@ -1,8 +1,10 @@
 # Changelog
 
-All notable changes to **Lastshot** (and, before 1.7.0, to **ClipFlow**, which Lastshot is forked from) are documented here. The project follows [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
+All notable changes to **Lastshot** (and, before 1.7.1, to **ClipFlow**, which Lastshot is forked from) are documented here. The project follows [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
-## [1.7.0] - 2026-11-15 — first Lastshot release
+## [1.7.1] - 2026-11-15 — first Lastshot release
+
+(1.7.0 was tagged but never published: its release build stopped on a workflow ordering mistake. 1.7.1 has the same app code.)
 
 ### Added
 

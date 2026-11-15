@@ -3,6 +3,7 @@
 pub mod audio;
 pub mod compose;
 pub mod compositor;
+pub mod cursor;
 pub mod library;
 pub mod procaudio;
 pub mod recorder;

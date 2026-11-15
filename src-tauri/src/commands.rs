@@ -712,6 +712,7 @@ pub struct SettingsPatch {
     pub monitor_index: Option<u32>,
     pub capture_source: Option<crate::media::CaptureSource>,
     pub app_audio: Option<crate::media::procaudio::AppAudio>,
+    pub capture_cursor: Option<bool>,
     pub capture_system_audio: Option<bool>,
     pub capture_microphone: Option<bool>,
     pub output_dir: Option<String>,
@@ -858,7 +859,8 @@ pub fn update_settings(
         s.monitor_index = v;
     }
     let source_changed = patch.capture_source.as_ref().map(|v| *v != s.capture_source).unwrap_or(false)
-        || patch.app_audio.as_ref().map(|v| *v != s.app_audio).unwrap_or(false);
+        || patch.app_audio.as_ref().map(|v| *v != s.app_audio).unwrap_or(false)
+        || patch.capture_cursor.map(|v| v != s.capture_cursor).unwrap_or(false);
     if source_changed && state.engine.recording_status().is_some() {
         return Err("Stop the recording before changing what to record.".into());
     }
@@ -867,6 +869,9 @@ pub fn update_settings(
     }
     if let Some(v) = patch.app_audio.clone() {
         s.app_audio = v;
+    }
+    if let Some(v) = patch.capture_cursor {
+        s.capture_cursor = v;
     }
     if let Some(v) = patch.capture_system_audio {
         s.capture_system_audio = v;

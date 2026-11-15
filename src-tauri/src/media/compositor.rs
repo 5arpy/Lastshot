@@ -222,6 +222,18 @@ float4 ps_main(V i) : SV_Target {
                 let mut canvas = None;
                 device.CreateTexture2D(&desc, None, Some(&mut canvas)).map_err(e)?;
                 let canvas = canvas.ok_or("canvas: none")?;
+                Self::on_target(device, context, canvas)
+            }
+        }
+
+        /// Draws straight onto `target` (which must allow render-target
+        /// binding), e.g. the encoder's input copy, so overlays such as the
+        /// mouse cursor cost no extra full-frame copy.
+        pub fn on_target(device: &ID3D11Device, context: &ID3D11DeviceContext, canvas: ID3D11Texture2D) -> Result<Self, String> {
+            unsafe {
+                let mut d = D3D11_TEXTURE2D_DESC::default();
+                canvas.GetDesc(&mut d);
+                let (width, height) = (d.Width, d.Height);
                 let mut rtv = None;
                 device.CreateRenderTargetView(&canvas, None, Some(&mut rtv)).map_err(e)?;
 
@@ -307,9 +319,14 @@ float4 ps_main(V i) : SV_Target {
 
         /// Clears the canvas and sets up the pipeline for this frame.
         pub fn begin(&self, rgba: [f32; 4]) {
+            unsafe { self.context.ClearRenderTargetView(&self.rtv, &rgba) };
+            self.begin_keep();
+        }
+
+        /// Sets up the pipeline, keeping what the canvas already holds.
+        pub fn begin_keep(&self) {
             unsafe {
                 let c = &self.context;
-                c.ClearRenderTargetView(&self.rtv, &rgba);
                 c.OMSetRenderTargets(Some(&[Some(self.rtv.clone())]), None);
                 c.OMSetBlendState(&self.blend, None, 0xffff_ffff);
                 c.RSSetState(&self.raster);

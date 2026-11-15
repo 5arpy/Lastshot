@@ -295,6 +295,8 @@ export interface AppSettings {
   captureSource: CaptureSource;
   /** PC sound: everything, only one app, or everything except one app. */
   appAudio: AppAudio;
+  /** Draw the mouse pointer into recordings and replays. */
+  captureCursor: boolean;
   /** "Open with Lastshot" on MP4 files in Explorer. */
   explorerOpenWith: boolean;
   /** Screenshot folder; empty = `<save location>\Screenshots`. */

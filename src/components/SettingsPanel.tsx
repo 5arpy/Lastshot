@@ -522,6 +522,12 @@ export default function SettingsPanel({
             )}
           </div>
         </Row>
+        <Row label="Mouse pointer" hint="Show the mouse pointer in recordings and replays.">
+          <Toggle
+            on={settings.captureCursor !== false}
+            onClick={() => onChange({ captureCursor: settings.captureCursor === false })}
+          />
+        </Row>
         {monitors.length > 1 && (
           <Row label="Screen" hint="Which monitor is recorded. Applies after a restart.">
             <select

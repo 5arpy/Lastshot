@@ -48,6 +48,9 @@ pub struct Settings {
     /// Whose sound "PC sound" records: everything, one app, or all but one.
     #[serde(default)]
     pub app_audio: crate::media::procaudio::AppAudio,
+    /// Show the mouse pointer in recordings and replays.
+    #[serde(default = "default_true")]
+    pub capture_cursor: bool,
     pub capture_system_audio: bool,
     pub capture_microphone: bool,
     pub output_dir: String,
@@ -254,6 +257,7 @@ impl Default for Settings {
             monitor_index: 0,
             capture_source: Default::default(),
             app_audio: Default::default(),
+            capture_cursor: true,
             capture_system_audio: true,
             capture_microphone: false,
             output_dir: default_output_dir().to_string_lossy().to_string(),
@@ -397,6 +401,7 @@ impl Settings {
             output_subfolder: None,
             source: self.capture_source.clone(),
             app_audio: self.app_audio.clone(),
+            capture_cursor: self.capture_cursor,
         };
         self.apply_performance_caps(&mut cfg);
         cfg

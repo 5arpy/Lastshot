@@ -158,6 +158,13 @@ pub struct RecorderConfig {
     /// Whose sound the PC-sound track records.
     #[serde(default)]
     pub app_audio: crate::media::procaudio::AppAudio,
+    /// Draw the mouse pointer into the video.
+    #[serde(default = "cursor_default")]
+    pub capture_cursor: bool,
+}
+
+fn cursor_default() -> bool {
+    true
 }
 
 /// The picture the engine records (instant replay and recordings alike).
@@ -193,6 +200,7 @@ impl Default for RecorderConfig {
             output_subfolder: None,
             source: CaptureSource::Display,
             app_audio: Default::default(),
+            capture_cursor: true,
         }
     }
 }
@@ -1709,9 +1717,12 @@ mod win {
         }
 
         /// One `VideoProcessorBlt` = colour convert + scale + (optional) crop.
-        pub fn convert(&self, src: &ID3D11Texture2D) -> RResult<()> {
+        /// `overlay` draws onto the frame's copy before it is converted
+        /// (the mouse pointer).
+        pub fn convert_with(&self, src: &ID3D11Texture2D, overlay: impl FnOnce(&ID3D11Texture2D)) -> RResult<()> {
             unsafe {
                 self.context.CopyResource(&self.input_tex, src);
+                overlay(&self.input_tex);
 
                 let mut streams = [D3D11_VIDEO_PROCESSOR_STREAM {
                     Enable: TRUE,
@@ -2471,6 +2482,7 @@ mod win {
         tex: Option<crate::media::compositor::SourceTexture>,
         comp: crate::media::compositor::Compositor,
         last_retry: Instant,
+        cursor: bool,
     }
 
     impl WindowSource {
@@ -2480,6 +2492,7 @@ mod win {
             hwnd: i64,
             exe: &str,
             max_height: u32,
+            cursor: bool,
         ) -> RResult<Self> {
             use crate::media::wincap;
             use windows::Win32::Foundation::HWND;
@@ -2505,9 +2518,9 @@ mod win {
             let (w, h2) = ((w & !1).max(2), (h2 & !1).max(2));
             let comp = crate::media::compositor::Compositor::new(device, context, w, h2)
                 .map_err(RecorderError::Other)?;
-            let cap = crate::media::wincap::WindowCapture::new(device, HWND(win.hwnd as isize as *mut _), true)
+            let cap = crate::media::wincap::WindowCapture::new(device, HWND(win.hwnd as isize as *mut _), cursor)
                 .map_err(RecorderError::Other)?;
-            Ok(Self { cap: Some(cap), exe: win.exe, tex: None, comp, last_retry: Instant::now() })
+            Ok(Self { cap: Some(cap), exe: win.exe, tex: None, comp, last_retry: Instant::now(), cursor })
         }
 
         pub fn size(&self) -> (u32, u32) {
@@ -2524,7 +2537,7 @@ mod win {
                     self.last_retry = Instant::now();
                     if let Some(w) = crate::media::wincap::find_app_window(&self.exe) {
                         let hwnd = windows::Win32::Foundation::HWND(w.hwnd as isize as *mut _);
-                        self.cap = crate::media::wincap::WindowCapture::new(self.comp.device(), hwnd, true).ok();
+                        self.cap = crate::media::wincap::WindowCapture::new(self.comp.device(), hwnd, self.cursor).ok();
                     }
                 }
             }
@@ -2621,7 +2634,7 @@ mod win {
 
             let mut window = match &cfg.source {
                 CaptureSource::Window { hwnd, exe, .. } => {
-                    match WindowSource::open(&gfx.device, &gfx.context, *hwnd, exe, cfg.max_height) {
+                    match WindowSource::open(&gfx.device, &gfx.context, *hwnd, exe, cfg.max_height, cfg.capture_cursor) {
                         Ok(w) => Some(w),
                         Err(e) => {
                             shared.fail(format!("{e}"));
@@ -2696,6 +2709,9 @@ mod win {
             let mut force_key = true;
             let mut was_gated = false;
             let mut last_texture: Option<ID3D11Texture2D> = None;
+            // Desktop Duplication leaves the pointer out; we draw it.
+            let mut cursor = (cfg.capture_cursor && window.is_none())
+                .then(crate::media::cursor::CursorOverlay::default);
             let mut fps_window = Instant::now();
             let mut fps_frames = 0u32;
 
@@ -2758,6 +2774,9 @@ mod win {
                 } else {
                 match acquire {
                     Ok(()) => {
+                        if let Some(c) = cursor.as_mut() {
+                            c.update(&gfx.duplication, &gfx.device, &gfx.context, &frame_info);
+                        }
                         if let Some(res) = resource.as_ref() {
                             match res.cast::<ID3D11Texture2D>() {
                                 Ok(t) => {
@@ -2805,7 +2824,11 @@ mod win {
                     // a key frame so the buffer restarts cleanly.
                     if shared.privacy_gate.load(Ordering::Acquire) {
                         was_gated = true;
-                    } else if let Err(e) = converter.convert(tex) {
+                    } else if let Err(e) = converter.convert_with(tex, |t| {
+                        if let Some(c) = cursor.as_mut() {
+                            c.draw_on(&gfx.device, &gfx.context, t);
+                        }
+                    }) {
                         log::warn!("[lastshot] color convert failed: {e}");
                         shared.dropped_frames.fetch_add(1, Ordering::Relaxed);
                     } else {

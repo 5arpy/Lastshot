@@ -245,6 +245,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   studioLayers: "recording",
   captureSource: { kind: "display" },
   appAudio: { kind: "all" },
+  captureCursor: true,
   explorerOpenWith: false,
   screenshotDir: "",
   screenshotFormat: "png",

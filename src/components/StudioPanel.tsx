@@ -406,6 +406,9 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
                 ))}
               </select>
             </label>
+            <label className="flex items-center gap-2" title={rec ? "Stop the recording to change this" : undefined}>
+              <input type="checkbox" checked={settings.captureCursor !== false} disabled={!!rec} onChange={(e) => onPatch({ captureCursor: e.target.checked })} /> Mouse pointer
+            </label>
             <label className="flex items-center gap-2">
               <input type="checkbox" checked={settings.captureSystemAudio} onChange={(e) => onPatch({ captureSystemAudio: e.target.checked })} /> PC sound
             </label>

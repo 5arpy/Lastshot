@@ -26,6 +26,10 @@ import type {
   SnipCapture,
   SnipDone,
   BarState,
+  DrawCommand,
+  MediaInfo,
+  RenderProject,
+  ScreenShot,
   DiskInfo,
   RecordingStatus,
   SplitResult,
@@ -42,6 +46,7 @@ type TauriGlobal = {
       event: string,
       handler: (e: { payload: T }) => void,
     ) => Promise<() => void>;
+    emitTo: (target: string, event: string, payload?: unknown) => Promise<void>;
   };
   window?: {
     getCurrentWindow: () => {
@@ -138,6 +143,8 @@ async function listen<T>(channel: string, handler: Handler<T>): Promise<() => vo
 }
 
 export const CHANNELS = {
+  draw: "lastshot://draw",
+  renderProgress: "lastshot://render-progress",
   clipSaved: "lastshot://clip-saved",
   stats: "lastshot://stats",
   error: "lastshot://error",
@@ -233,6 +240,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   libraryFolders: [],
   hotkeyRecord: "Alt+R",
   controlBar: "recording",
+  studioLayers: "recording",
   explorerOpenWith: false,
   screenshotDir: "",
   screenshotFormat: "png",
@@ -678,6 +686,57 @@ export const lastshot = {
   /** Hides the control bar until the next recording. */
   async hideBar(): Promise<void> {
     if (isTauri()) await invoke("hide_bar");
+  },
+  /** Opens the control bar again (also when the setting is off). */
+  async showBar(): Promise<void> {
+    if (isTauri()) await invoke("show_bar");
+  },
+  /** Small pill (timer + expand) or the full bar. */
+  async setBarCompact(compact: boolean): Promise<void> {
+    if (isTauri()) await invoke("set_bar_compact", { compact });
+  },
+  /** Drawing on the recorded screen (the drawings are in the recording). */
+  async setDrawing(on: boolean): Promise<void> {
+    if (isTauri()) await invoke("set_drawing", { on });
+  },
+  /** Drawings stay but the mouse goes through to the apps below. */
+  async setDrawingPassthrough(on: boolean): Promise<void> {
+    if (isTauri()) await invoke("set_drawing_passthrough", { on });
+  },
+  // --------------------------------------------------------------- studio
+  async screenSnapshot(): Promise<ScreenShot> {
+    if (isTauri()) return invoke<ScreenShot>("screen_snapshot");
+    return { image: "", width: 1920, height: 1080, name: "Screen" };
+  },
+  async syncLayers(): Promise<void> {
+    if (isTauri()) await invoke("sync_layers");
+  },
+
+  // --------------------------------------------------------------- editor
+  /** What a file is (video/audio, length, size); also lets the window play it. */
+  async mediaInfo(path: string): Promise<MediaInfo> {
+    if (isTauri()) return invoke<MediaInfo>("media_info", { path });
+    throw new Error("Adding files works in the installed app.");
+  },
+  /** Lets the window show pictures picked from anywhere. */
+  async allowMedia(paths: string[]): Promise<void> {
+    if (isTauri()) await invoke("allow_media", { paths });
+  },
+  /** Renders the timeline into a new clip (lands in Clips). */
+  async renderProject(project: RenderProject): Promise<ClipMetadata> {
+    if (isTauri()) return invoke<ClipMetadata>("render_project", { project });
+    throw new Error("Rendering works in the installed app.");
+  },
+  onRenderProgress(handler: Handler<number>) {
+    return listen<number>(CHANNELS.renderProgress, handler);
+  },
+
+  /** Control bar → drawing layer. */
+  async sendDraw(cmd: DrawCommand): Promise<void> {
+    if (isTauri()) await tauri().event.emitTo("annot", CHANNELS.draw, cmd);
+  },
+  onDraw(handler: Handler<DrawCommand>) {
+    return listen<DrawCommand>(CHANNELS.draw, handler);
   },
   async getBarState(): Promise<BarState> {
     if (isTauri()) return invoke<BarState>("get_bar_state");

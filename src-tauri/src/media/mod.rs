@@ -1,6 +1,7 @@
 //! Media subsystem: capture, encode, buffer, mux, trim.
 
 pub mod audio;
+pub mod compose;
 pub mod library;
 pub mod recorder;
 pub mod shrink;

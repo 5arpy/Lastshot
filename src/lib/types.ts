@@ -268,6 +268,8 @@ export interface AppSettings {
   hotkeyRecord: string;
   /** On-screen control bar: while recording, always, or never. */
   controlBar: "recording" | "always" | "off";
+  /** Studio layers on the recorded screen. */
+  studioLayers: "recording" | "always" | "off";
   /** "Open with Lastshot" on MP4 files in Explorer. */
   explorerOpenWith: boolean;
   /** Screenshot folder; empty = `<save location>\Screenshots`. */
@@ -308,9 +310,57 @@ export interface BarState {
   markers?: number;
   /** Recording file size so far. */
   bytes?: number;
-  /** 0-1 while an area recording is being cropped after stop. */
+  /** 0-1 while a stopped recording is being finished. */
   finishing?: number | null;
+  /** "Saving the recording" / "Cutting the recording to the area". */
+  finishingLabel?: string | null;
+  /** The control bar window is open. */
+  barOpen?: boolean;
+  /** Drawing on the screen is on. */
+  drawing?: boolean;
 }
+
+/** Small picture of the recorded screen (Studio preview). */
+export interface ScreenShot {
+  image: string;
+  width: number;
+  height: number;
+  name: string;
+}
+
+/** A file added to the Editor: what it is. */
+export interface MediaInfo {
+  kind: "video" | "audio";
+  duration: number;
+  width: number;
+  height: number;
+  hasAudio: boolean;
+}
+
+/** What the Editor sends to be rendered (see `media/compose.rs`). */
+export interface RenderProject {
+  width: number;
+  height: number;
+  fps: number;
+  video: { path?: string; png?: string; start: number; duration: number; srcIn: number }[];
+  overlays: { png: string; start: number; duration: number; x: number; y: number; opacity: number }[];
+  audio: {
+    path: string;
+    start: number;
+    duration: number;
+    srcIn: number;
+    volume: number;
+    fadeIn: number;
+    fadeOut: number;
+  }[];
+  targetMb?: number | null;
+}
+
+/** Message from the control bar to the drawing layer. */
+export type DrawCommand =
+  | { kind: "tool"; tool: "pen" | "marker" | "arrow" | "box"; color: string }
+  | { kind: "undo" }
+  | { kind: "clear" };
 
 /** Space on one drive. */
 export interface DiskInfo {

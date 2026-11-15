@@ -15,6 +15,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::commands::{AppState, EVT_ERROR};
 
 pub const EVT_SNIP_DONE: &str = "lastshot://snip-done";
+pub use imp::snapshot;
+
 pub const SNIP_LABEL: &str = "snip";
 
 /// A top-level window's outline, relative to the captured monitor, in
@@ -405,6 +407,32 @@ mod imp {
         }
     }
 
+    /// The screen area as a small PNG data URL, at most `max_w` wide.
+    pub fn snapshot(x: i32, y: i32, w: u32, h: u32, max_w: u32) -> Result<String, String> {
+        let bgra = unsafe { grab(x, y, w as i32, h as i32)? };
+        let mut rgba = image::RgbaImage::new(w, h);
+        for (i, px) in bgra.chunks_exact(4).enumerate() {
+            rgba.as_mut()[i * 4..i * 4 + 4].copy_from_slice(&[px[2], px[1], px[0], 255]);
+        }
+        let small = if w > max_w {
+            let nh = (h as f64 * max_w as f64 / w as f64).round().max(1.0) as u32;
+            image::imageops::resize(&rgba, max_w, nh, image::imageops::FilterType::Triangle)
+        } else {
+            rgba
+        };
+        let mut png = Vec::new();
+        image::ImageEncoder::write_image(
+            image::codecs::png::PngEncoder::new(&mut png),
+            small.as_raw(),
+            small.width(),
+            small.height(),
+            image::ExtendedColorType::Rgba8,
+        )
+        .map_err(|e| format!("png encode: {e}"))?;
+        use base64::Engine;
+        Ok(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(&png)))
+    }
+
     unsafe fn grab(x: i32, y: i32, w: i32, h: i32) -> Result<Vec<u8>, String> {
         let screen = GetDC(None);
         if screen.is_invalid() {
@@ -592,6 +620,9 @@ mod imp {
     use super::*;
     pub fn capture_under_cursor() -> Result<(SnipCapture, (i32, i32, u32, u32)), String> {
         Err("snipping requires Windows".into())
+    }
+    pub fn snapshot(_x: i32, _y: i32, _w: u32, _h: u32, _max_w: u32) -> Result<String, String> {
+        Err("requires Windows".into())
     }
     pub fn copy_png(_png: &[u8]) -> Result<(), String> {
         Err("snipping requires Windows".into())

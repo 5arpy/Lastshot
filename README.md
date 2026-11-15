@@ -27,11 +27,15 @@
 
 **A simple editor.** Cut out the boring parts, split the clip into parts and drag them into a new order, save or share any single part, crop to 9:16 for TikTok or Shorts (or 1:1, 4:3), and join several clips into one. Plain trims stay lossless and instant; edits re-encode once at full quality on your GPU. The original clip is never changed.
 
+**Editor: a timeline for real edits.** The *Editor* tab has video, overlay and music tracks. Put clips, videos, pictures and text on the timeline, cut and move parts around, trim, add music with fades, and render one MP4, at full quality or a size you pick. No extra downloads: it uses the video encoder built into Windows.
+
+**Studio: record with layers on top.** The *Studio* tab adds your webcam, pictures, text, a clock or a timer on top of the screen, OBS-style, and keeps every recording option in one place. During a recording, *Draw* on the control bar lets you mark up the screen live.
+
 **Clips you can find again.** Search, sort, star and tag clips, trim them without re-encoding, split them, and grab frames as pictures. Starred clips are never auto-deleted.
 
 **All your videos in one place.** Add other folders (OBS, ShadowPlay, Downloads) in **Settings › Clips & storage** and their videos show up in Clips, ready to edit and share. The Clips page lists every folder with how many clips it holds and how much space they take, plus how full each drive is. Drop any video on the window, or turn on **Open with Lastshot** for Explorer, to open it in the editor.
 
-**Simple by default.** Home, Clips, Settings. Each settings section has its own **Advanced** button for the extra knobs, so you only see them when you want them.
+**Simple by default.** Home, Clips, Editor, Studio, Settings. The snipping tool stays separate, one shortcut away. Each settings section has its own **Advanced** button for the extra knobs, so you only see them when you want them.
 
 ## Download and install
 

@@ -54,6 +54,7 @@ export const CROP_ASPECTS = [
   { id: "9:16", w: 9, h: 16, hint: "TikTok, Shorts, Reels" },
   { id: "1:1", w: 1, h: 1, hint: "Square" },
   { id: "4:3", w: 4, h: 3, hint: "Classic" },
+  { id: "free", w: 0, h: 0, hint: "Any size: drag the corners and sides" },
 ] as const;
 
 export type CropAspect = (typeof CROP_ASPECTS)[number]["id"];
@@ -64,10 +65,38 @@ export interface CropState {
   scale: number;
   cx: number;
   cy: number;
+  /** Custom ("free") crop: the box itself, as fractions of the frame. */
+  rect?: CropRect;
+}
+
+/** Smallest custom crop side, as a fraction of the frame. */
+const MIN_CROP = 0.05;
+
+function clampRect(r: CropRect): CropRect {
+  const w = Math.min(Math.max(r.w, MIN_CROP), 1);
+  const h = Math.min(Math.max(r.h, MIN_CROP), 1);
+  return { x: Math.min(Math.max(r.x, 0), 1 - w), y: Math.min(Math.max(r.y, 0), 1 - h), w, h };
+}
+
+/**
+ * Resizes a custom crop by dragging one handle: `edge` holds the sides it
+ * moves ("n", "se", "w", ...). The opposite sides stay put.
+ */
+export function resizeCrop(r: CropRect, edge: string, dx: number, dy: number): CropRect {
+  let left = r.x;
+  let top = r.y;
+  let right = r.x + r.w;
+  let bottom = r.y + r.h;
+  if (edge.includes("w")) left = Math.min(Math.max(0, left + dx), right - MIN_CROP);
+  if (edge.includes("e")) right = Math.max(Math.min(1, right + dx), left + MIN_CROP);
+  if (edge.includes("n")) top = Math.min(Math.max(0, top + dy), bottom - MIN_CROP);
+  if (edge.includes("s")) bottom = Math.max(Math.min(1, bottom + dy), top + MIN_CROP);
+  return { x: left, y: top, w: right - left, h: bottom - top };
 }
 
 /** The crop box as fractions of a `srcW x srcH` frame. */
 export function cropRect(srcW: number, srcH: number, s: CropState): CropRect {
+  if (s.aspect === "free") return clampRect(s.rect ?? { x: 0.1, y: 0.1, w: 0.8, h: 0.8 });
   const a = CROP_ASPECTS.find((x) => x.id === s.aspect) ?? CROP_ASPECTS[0];
   const src = srcW > 0 && srcH > 0 ? srcW / srcH : 16 / 9;
   const want = a.w / a.h;

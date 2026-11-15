@@ -740,6 +740,7 @@ pub struct SettingsPatch {
     pub library_folders: Option<Vec<String>>,
     pub hotkey_record: Option<String>,
     pub control_bar: Option<String>,
+    pub studio_layers: Option<String>,
     pub explorer_open_with: Option<bool>,
     pub screenshot_dir: Option<String>,
     pub screenshot_format: Option<String>,
@@ -806,6 +807,12 @@ pub fn update_settings(
             return Err(format!("unknown control bar mode {v}"));
         }
         s.control_bar = v;
+    }
+    if let Some(v) = patch.studio_layers.clone() {
+        if !["recording", "always", "off"].contains(&v.as_str()) {
+            return Err(format!("unknown layers mode {v}"));
+        }
+        s.studio_layers = v;
     }
     if let Some(v) = patch.screenshot_dir.as_ref() {
         s.screenshot_dir = v.trim().to_string();
@@ -1003,6 +1010,9 @@ pub fn update_settings(
 
     *state.settings.write() = s.clone();
     // After the write: the bar reads the new mode and hotkey.
+    if patch.studio_layers.is_some() || patch.monitor_index.is_some() {
+        crate::studio::sync(&app);
+    }
     if patch.control_bar.is_some() || patch.hotkey_record.is_some() {
         crate::recording::sync_bar(&app);
         crate::recording::emit_state(&app);

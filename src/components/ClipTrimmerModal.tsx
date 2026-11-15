@@ -6,6 +6,7 @@ import {
   addCut,
   CROP_ASPECTS,
   cropRect,
+  resizeCrop,
   inTimeOrder,
   isFullFrame,
   keptRanges,
@@ -64,6 +65,8 @@ interface Props {
   ) => Promise<void> | void;
   /** Set for clips from another folder: moves the file into the Lastshot folder. */
   onMoveToLibrary?: () => Promise<void> | void;
+  /** Puts this clip on the Editor's timeline. */
+  onOpenInEditor?: () => void;
 }
 
 const HANDLE_W = 14;
@@ -78,6 +81,7 @@ export default function ClipTrimmerModal({
   shareProgress,
   onExport,
   onMoveToLibrary,
+  onOpenInEditor,
   onCopy,
   onReveal,
   onOpenExternal,
@@ -422,12 +426,46 @@ export default function ClipTrimmerModal({
     // Start from where the box really is (it is clamped at the edges).
     const box = cropRect(srcW, srcH, crop);
     const from = { ...crop, cx: box.x + box.w / 2, cy: box.y + box.h / 2 };
-    const move = (ev: PointerEvent) =>
-      setCrop({
-        ...from,
-        cx: from.cx + (ev.clientX - x0) / pic.w,
-        cy: from.cy + (ev.clientY - y0) / pic.h,
-      });
+    const move = (ev: PointerEvent) => {
+      const dx = (ev.clientX - x0) / pic.w;
+      const dy = (ev.clientY - y0) / pic.h;
+      setCrop(
+        from.aspect === "free"
+          ? { ...from, rect: { ...box, x: box.x + dx, y: box.y + dy } }
+          : { ...from, cx: from.cx + dx, cy: from.cy + dy },
+      );
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  /** Drag a handle: custom crop moves that side/corner; a fixed shape grows or shrinks from its centre. */
+  const resizeCropAt = (edge: string) => (e: React.PointerEvent) => {
+    if (!crop || !pic) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const x0 = e.clientX;
+    const y0 = e.clientY;
+    const box = cropRect(srcW, srcH, crop);
+    const cx = box.x + box.w / 2;
+    const cy = box.y + box.h / 2;
+    const move = (ev: PointerEvent) => {
+      const dx = (ev.clientX - x0) / pic.w;
+      const dy = (ev.clientY - y0) / pic.h;
+      if (crop.aspect === "free") {
+        setCrop({ ...crop, rect: resizeCrop(box, edge, dx, dy) });
+      } else {
+        // How far the corner is from the centre now, against before.
+        const fx = Math.abs(box.x + (edge.includes("e") ? box.w : 0) + dx - cx) / (box.w / 2);
+        const fy = Math.abs(box.y + (edge.includes("s") ? box.h : 0) + dy - cy) / (box.h / 2);
+        const scale = Math.min(1, Math.max(0.2, crop.scale * Math.max(fx, fy)));
+        setCrop({ ...crop, scale, cx, cy });
+      }
+    };
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
@@ -658,11 +696,29 @@ export default function ClipTrimmerModal({
                     width: cropBox.w * pic.w,
                     height: cropBox.h * pic.h,
                   }}
-                  title="Drag to move the crop"
+                  title="Drag to move the crop; drag the handles to resize it"
                 >
                   <span className="absolute left-1 top-1 rounded bg-black/70 px-1.5 py-0.5 font-mono text-[10px] text-white">
-                    {crop?.aspect} · {Math.round(cropBox.w * srcW) & ~1}×{Math.round(cropBox.h * srcH) & ~1}
+                    {crop?.aspect === "free" ? "Custom" : crop?.aspect} · {Math.round(cropBox.w * srcW) & ~1}×
+                    {Math.round(cropBox.h * srcH) & ~1}
                   </span>
+                  {(crop?.aspect === "free"
+                    ? ["nw", "n", "ne", "e", "se", "s", "sw", "w"]
+                    : ["nw", "ne", "se", "sw"]
+                  ).map((edge) => (
+                    <span
+                      key={edge}
+                      onPointerDown={resizeCropAt(edge)}
+                      className="absolute h-3 w-3 rounded-sm border border-black/40 bg-white shadow"
+                      style={{
+                        left: edge.includes("w") ? -7 : edge.includes("e") ? undefined : "calc(50% - 6px)",
+                        right: edge.includes("e") ? -7 : undefined,
+                        top: edge.includes("n") ? -7 : edge.includes("s") ? undefined : "calc(50% - 6px)",
+                        bottom: edge.includes("s") ? -7 : undefined,
+                        cursor: `${edge}-resize`,
+                      }}
+                    />
+                  ))}
                 </div>
               </div>
             )}
@@ -1001,6 +1057,8 @@ export default function ClipTrimmerModal({
                         scale: c?.scale ?? 1,
                         cx: c?.cx ?? 0.5,
                         cy: c?.cy ?? 0.5,
+                        // Custom starts from the box you had, or a bit inside the frame.
+                        rect: c && c.aspect !== "free" ? cropRect(srcW, srcH, c) : c?.rect,
                       }))
                     }
                     className={cn(
@@ -1010,10 +1068,10 @@ export default function ClipTrimmerModal({
                         : "border-line bg-surface hover:text-ink",
                     )}
                   >
-                    {a.id}
+                    {a.id === "free" ? "Custom" : a.id}
                   </button>
                 ))}
-                {crop && (
+                {crop && crop.aspect !== "free" && (
                   <label className="flex items-center gap-1.5" title="Crop size (smaller = zoom in)">
                     Size
                     <input
@@ -1072,6 +1130,17 @@ export default function ClipTrimmerModal({
               >
                 Reveal
               </button>
+
+              {onOpenInEditor && (
+                <button
+                  type="button"
+                  onClick={onOpenInEditor}
+                  title="Add this clip to the Editor's timeline (music, text, pictures, more clips)"
+                  className="rounded-lg border border-accent/50 bg-accent/10 px-3 py-1.5 text-[11px] font-semibold text-accent-fg hover:bg-accent/20"
+                >
+                  Open in Editor
+                </button>
+              )}
 
               {onMoveToLibrary && (
                 <button

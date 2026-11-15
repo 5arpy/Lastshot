@@ -8,6 +8,7 @@ import {
   moveItem,
   orderParts,
   partKey,
+  resizeCrop,
   skipCuts,
   splitRanges,
   totalLength,
@@ -99,5 +100,28 @@ describe("parts", () => {
     expect(orderParts([kept[0]], [partKey(kept[1]), partKey(kept[0])])).toEqual([kept[0]]);
     expect(moveItem(["a", "b", "c"], 0, 2)).toEqual(["b", "c", "a"]);
     expect(moveItem(["a", "b", "c"], 2, 0)).toEqual(["c", "a", "b"]);
+  });
+});
+
+describe("custom crop", () => {
+  const r = { x: 0.1, y: 0.1, w: 0.8, h: 0.8 };
+  const near = (a: { x: number; y: number; w: number; h: number }, b: typeof a) =>
+    (["x", "y", "w", "h"] as const).forEach((k) => expect(a[k]).toBeCloseTo(b[k], 6));
+
+  it("moves only the dragged sides", () => {
+    near(resizeCrop(r, "e", -0.2, 0.5), { x: 0.1, y: 0.1, w: 0.6, h: 0.8 });
+    near(resizeCrop(r, "nw", 0.1, 0.2), { x: 0.2, y: 0.3, w: 0.7, h: 0.6 });
+  });
+  it("stays inside the frame and keeps a minimum size", () => {
+    near(resizeCrop(r, "w", -1, 0), { x: 0, y: 0.1, w: 0.9, h: 0.8 });
+    expect(resizeCrop(r, "e", -5, 0).w).toBeCloseTo(0.05, 6);
+  });
+  it("free crop box is clamped by cropRect", () => {
+    near(cropRect(1920, 1080, { aspect: "free", scale: 1, cx: 0.5, cy: 0.5, rect: { x: 0.9, y: 0, w: 0.5, h: 0.5 } }), {
+      x: 0.5,
+      y: 0,
+      w: 0.5,
+      h: 0.5,
+    });
   });
 });

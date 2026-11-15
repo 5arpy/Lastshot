@@ -84,6 +84,9 @@ features = [
 
 [target.'cfg(windows)'.dependencies]
 windows-core = "0.58.0"
+# Same version Tauri's WebView2 layer uses (no extra download): lets the
+# Studio layer window use the webcam without a permission prompt.
+webview2-com = "0.38"
 
 [features]
 # Allows `cargo run --features headless-sim` on non-Windows dev machines: the

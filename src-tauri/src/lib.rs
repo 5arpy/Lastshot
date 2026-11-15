@@ -7,6 +7,7 @@
 pub mod clipmeta;
 pub mod files;
 pub mod commands;
+pub mod editor;
 pub mod foreground;
 pub mod hotkeys;
 pub mod media;
@@ -16,6 +17,7 @@ pub mod recording;
 pub mod settings;
 pub mod share;
 pub mod snip;
+pub mod studio;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -72,6 +74,10 @@ pub fn run() {
         .manage(AppState::new())
         .setup(|app| {
             let handle = app.handle().clone();
+            // Studio's webcam preview runs in the main window.
+            if let Some(w) = app.get_webview_window("main") {
+                studio::allow_camera(&w);
+            }
 
             // Old "Shrink & copy" files from previous sessions.
             std::thread::spawn(paths::cleanup_share_temp);
@@ -230,7 +236,10 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() == snip::SNIP_LABEL || window.label() == recording::BAR_LABEL {
+                if window.label() == snip::SNIP_LABEL
+                    || window.label() == recording::BAR_LABEL
+                    || window.label() == recording::ANNOT_LABEL
+                    || window.label() == studio::SCENE_LABEL {
                     return;
                 }
                 let minimize = window
@@ -299,6 +308,10 @@ pub fn run() {
             recording::discard_recording,
             recording::add_marker,
             recording::hide_bar,
+            recording::show_bar,
+            recording::set_bar_compact,
+            recording::set_drawing,
+            recording::set_drawing_passthrough,
             files::get_disk_info,
             files::move_clip_to_library,
             files::open_video_file,
@@ -308,6 +321,11 @@ pub fn run() {
             snip::snip_get_capture,
             snip::snip_finish,
             snip::snip_record,
+            editor::media_info,
+            editor::allow_media,
+            editor::render_project,
+            studio::screen_snapshot,
+            studio::sync_layers,
             snip::snip_cancel,
             snip::open_screenshots_folder,
         ])
@@ -371,6 +389,8 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     )?;
     let snip_rec_item =
         MenuItem::with_id(app, "snip_rec", "Snip: record an area", true, None::<&str>)?;
+    let bar_item =
+        MenuItem::with_id(app, "bar", "Show the control bar", true, None::<&str>)?;
     let show = MenuItem::with_id(app, "show", "Open Lastshot", true, None::<&str>)?;
     let folder = MenuItem::with_id(app, "folder", "Open clips folder", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Lastshot", true, None::<&str>)?;
@@ -381,7 +401,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         "capture",
         "Capture",
         true,
-        &[&save, &last30, &record_item, &snip_item, &snip_rec_item, &toggle],
+        &[&save, &last30, &record_item, &snip_item, &snip_rec_item, &bar_item, &toggle],
     )?;
     let menu = Menu::with_items(app, &[&capture, &sep, &show, &folder, &sep, &quit])?;
 
@@ -435,6 +455,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             "toggle" => hotkeys::trigger_toggle(app.clone()),
             "snip" => snip::begin(app.clone()),
             "snip_rec" => snip::begin_with(app.clone(), false, "rec"),
+            "bar" => recording::show_bar(app.clone()),
             "record" => recording::toggle(app.clone()),
             "show" => {
                 if let Some(w) = app.get_webview_window("main") {

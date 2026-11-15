@@ -25,6 +25,14 @@ static MARKERS: parking_lot::Mutex<Vec<f32>> = parking_lot::Mutex::new(Vec::new(
 static FINISHING: parking_lot::Mutex<Option<f32>> = parking_lot::Mutex::new(None);
 /// The user hid the bar; it stays away until the next recording starts.
 static BAR_HIDDEN: AtomicBool = AtomicBool::new(false);
+/// The user asked for the bar (Home / tray) even though the setting is off.
+static BAR_WANTED: AtomicBool = AtomicBool::new(false);
+static BAR_OPEN: AtomicBool = AtomicBool::new(false);
+static DRAWING: AtomicBool = AtomicBool::new(false);
+/// What is happening after stop: "Saving the recording" / "Cutting to the area".
+static FINISH_LABEL: parking_lot::Mutex<Option<&'static str>> = parking_lot::Mutex::new(None);
+/// Label of the screen-drawing overlay window.
+pub const ANNOT_LABEL: &str = "annot";
 
 /// Part of the screen a recording keeps.
 #[derive(Clone, Debug)]
@@ -53,8 +61,14 @@ pub struct BarState {
     pub markers: usize,
     /// Size of the recording file so far, bytes.
     pub bytes: u64,
-    /// 0-1 while an area recording is being cropped after stop.
+    /// 0-1 while a stopped recording is being finished (saved / cut to the area).
     pub finishing: Option<f32>,
+    /// What the finishing step is, for the bar and the notice in the window.
+    pub finishing_label: Option<String>,
+    /// The bar window is open.
+    pub bar_open: bool,
+    /// Drawing on the screen is on.
+    pub drawing: bool,
 }
 
 fn bar_state(state: &AppState) -> BarState {
@@ -70,6 +84,9 @@ fn bar_state(state: &AppState) -> BarState {
         markers: if recording.is_some() { MARKERS.lock().len() } else { 0 },
         bytes,
         finishing: *FINISHING.lock(),
+        finishing_label: FINISH_LABEL.lock().map(str::to_string),
+        bar_open: BAR_OPEN.load(Ordering::Relaxed),
+        drawing: DRAWING.load(Ordering::Relaxed),
         recording,
         mic_muted: MIC_MUTED.load(Ordering::Relaxed),
         mic_on: s.capture_microphone,
@@ -153,8 +170,23 @@ pub async fn start_with(app: &AppHandle, area: Option<Area>) -> Result<Recording
 
 /// Finishes the recording and adds it to Clips.
 pub async fn stop(app: &AppHandle) -> Result<ClipMetadata, String> {
+    let r = stop_inner(app).await;
+    *FINISHING.lock() = None;
+    *FINISH_LABEL.lock() = None;
+    BAR_WANTED.store(false, Ordering::Relaxed);
+    sync_bar(app);
+    emit_state(app);
+    r
+}
+
+async fn stop_inner(app: &AppHandle) -> Result<ClipMetadata, String> {
     let state = app.state::<AppState>();
     let engine = Arc::clone(&state.engine);
+    close_drawing(app);
+    // Shown in the bar and in the window until the clip is in Clips.
+    *FINISHING.lock() = Some(0.0);
+    *FINISH_LABEL.lock() = Some("Saving the recording");
+    emit_state(app);
     let write = tauri::async_runtime::spawn_blocking(move || {
         let _guard = BUSY.lock();
         engine.stop_recording().map_err(|e| e.to_string())
@@ -164,8 +196,7 @@ pub async fn stop(app: &AppHandle) -> Result<ClipMetadata, String> {
     let area = AREA.lock().take();
     let markers = std::mem::take(&mut *MARKERS.lock());
     if area.is_some() {
-        // Keeps the bar up to show the cropping progress.
-        *FINISHING.lock() = Some(0.0);
+        *FINISH_LABEL.lock() = Some("Cutting the recording to the area");
     }
     sync_bar(app);
     let write = match area {
@@ -183,8 +214,6 @@ pub async fn stop(app: &AppHandle) -> Result<ClipMetadata, String> {
         .map(|n| n.to_string_lossy().to_string());
     let mut clip = crate::hotkeys::publish_saved_clip(app, &write, game, "recording", false, false);
     clip.markers = state.clip_meta.lock().get(&write.path).markers;
-    sync_bar(app);
-    emit_state(app);
     Ok(clip)
 }
 
@@ -230,7 +259,7 @@ async fn crop_to_area(
     .await
     .map_err(|e| e.to_string())
     .and_then(|r| r);
-    *FINISHING.lock() = None;
+    *FINISHING.lock() = Some(1.0);
     match result {
         Ok((_, probe)) => crate::media::recorder::ClipWriteResult {
             size_bytes: std::fs::metadata(&full).map(|m| m.len()).unwrap_or(0),
@@ -264,6 +293,8 @@ pub async fn discard(app: &AppHandle) -> Result<(), String> {
     .map_err(|e| format!("recording task failed: {e}"))??;
     AREA.lock().take();
     MARKERS.lock().clear();
+    close_drawing(app);
+    BAR_WANTED.store(false, Ordering::Relaxed);
     let _ = std::fs::remove_file(&write.path);
     sync_bar(app);
     emit_state(app);
@@ -295,9 +326,134 @@ pub fn add_marker(app: AppHandle, state: State<'_, AppState>) -> Result<usize, S
 #[tauri::command]
 pub fn hide_bar(app: AppHandle) {
     BAR_HIDDEN.store(true, Ordering::Relaxed);
+    BAR_WANTED.store(false, Ordering::Relaxed);
     if let Some(w) = app.get_webview_window(BAR_LABEL) {
         let _ = w.close();
     }
+    BAR_OPEN.store(false, Ordering::Relaxed);
+    emit_state(&app);
+}
+
+/// Brings the bar back (after it was hidden, or when the setting is off).
+#[tauri::command]
+pub fn show_bar(app: AppHandle) {
+    BAR_HIDDEN.store(false, Ordering::Relaxed);
+    BAR_WANTED.store(true, Ordering::Relaxed);
+    sync_bar(&app);
+}
+
+/// Shrinks the bar to a small pill (timer + expand) or back to full size,
+/// keeping its centre where it is.
+#[tauri::command]
+pub fn set_bar_compact(app: AppHandle, compact: bool) -> Result<(), String> {
+    let w = app.get_webview_window(BAR_LABEL).ok_or("no bar")?;
+    let scale = w.scale_factor().map_err(|e| e.to_string())?;
+    let pos = w.outer_position().map_err(|e| e.to_string())?;
+    let size = w.outer_size().map_err(|e| e.to_string())?;
+    let new_w = if compact { BAR_COMPACT_W } else { BAR_W };
+    let new_px = (new_w * scale) as i32;
+    let x = pos.x + (size.width as i32 - new_px) / 2;
+    w.set_size(tauri::LogicalSize::new(new_w, BAR_H)).map_err(|e| e.to_string())?;
+    w.set_position(tauri::PhysicalPosition::new(x, pos.y)).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+const BAR_W: f64 = 600.0;
+const BAR_H: f64 = 46.0;
+const BAR_COMPACT_W: f64 = 150.0;
+
+/// The monitor Lastshot records (Settings › Screen), as (x, y, w, h) physical pixels.
+pub fn recorded_monitor(state: &AppState) -> Option<(i32, i32, u32, u32, String)> {
+    let wanted = state.settings.read().monitor_index;
+    let monitors = crate::media::recorder::enumerate_monitors();
+    monitors
+        .iter()
+        .find(|m| m.index == wanted)
+        .or_else(|| monitors.iter().find(|m| m.primary))
+        .or(monitors.first())
+        .map(|m| (m.x, m.y, m.width, m.height, m.name.clone()))
+}
+
+/// Turns drawing on the screen on or off. The drawing layer covers the
+/// recorded screen and IS in the recording (the bar is not).
+#[tauri::command]
+pub async fn set_drawing(app: AppHandle, on: bool) -> Result<(), String> {
+    if !on {
+        close_drawing(&app);
+        emit_state(&app);
+        return Ok(());
+    }
+    let rect = recorded_monitor(&app.state::<AppState>()).ok_or("no screen found")?;
+    let h = app.clone();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    // Windows are built on the main thread, queued from here (see sync_bar).
+    let _ = app.run_on_main_thread(move || {
+        let _ = tx.send(open_drawing(&h, rect).map_err(|e| e.to_string()));
+    });
+    rx.await.map_err(|e| e.to_string())??;
+    DRAWING.store(true, Ordering::Relaxed);
+    emit_state(&app);
+    Ok(())
+}
+
+/// Click-through: the drawings stay on screen but the mouse works normally again.
+#[tauri::command]
+pub fn set_drawing_passthrough(app: AppHandle, on: bool) -> Result<(), String> {
+    let w = app.get_webview_window(ANNOT_LABEL).ok_or("drawing is off")?;
+    w.set_ignore_cursor_events(on).map_err(|e| e.to_string())?;
+    if !on {
+        raise_bar(&app);
+    }
+    Ok(())
+}
+
+fn close_drawing(app: &AppHandle) {
+    DRAWING.store(false, Ordering::Relaxed);
+    if let Some(w) = app.get_webview_window(ANNOT_LABEL) {
+        let _ = w.close();
+    }
+}
+
+/// Keeps the bar above the drawing layer (both are always on top).
+fn raise_bar(app: &AppHandle) {
+    if let Some(b) = app.get_webview_window(BAR_LABEL) {
+        let _ = b.set_always_on_top(false);
+        let _ = b.set_always_on_top(true);
+    }
+}
+
+fn open_drawing(app: &AppHandle, rect: (i32, i32, u32, u32, String)) -> tauri::Result<()> {
+    if app.get_webview_window(ANNOT_LABEL).is_some() {
+        return Ok(());
+    }
+    let (x, y, w, h, _) = rect;
+    let win = tauri::WebviewWindowBuilder::new(app, ANNOT_LABEL, tauri::WebviewUrl::default())
+        .title("Lastshot drawing")
+        .decorations(false)
+        .transparent(true)
+        .resizable(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .shadow(false)
+        .focused(false)
+        .visible(false)
+        .build()?;
+    hide_from_alt_tab(&win);
+    win.set_position(tauri::PhysicalPosition::new(x, y))?;
+    win.set_size(tauri::PhysicalSize::new(w, h))?;
+    // Shown without taking focus from a game; clicking it to draw activates it.
+    #[cfg(windows)]
+    if let Ok(hwnd) = win.hwnd() {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWNOACTIVATE};
+        unsafe {
+            let _ = ShowWindow(HWND(hwnd.0 as _), SW_SHOWNOACTIVATE);
+        }
+    }
+    #[cfg(not(windows))]
+    win.show()?;
+    raise_bar(app);
+    Ok(())
 }
 
 /// Keeps a helper window (control bar, snip overlay) out of Alt+Tab and the
@@ -398,16 +554,20 @@ pub fn show_main_window(app: AppHandle) {
 /// Shows or hides the bar for the "Control bar" setting and the current
 /// recording state.
 pub fn sync_bar(app: &AppHandle) {
+    // Studio layers follow recording too.
+    crate::studio::sync(app);
     let Some(state) = app.try_state::<AppState>() else {
         return;
     };
     let mode = state.settings.read().control_bar.clone();
     let recording = state.engine.recording_status().is_some();
-    let want = match mode.as_str() {
+    let busy = recording || FINISHING.lock().is_some();
+    let want = (match mode.as_str() {
         "always" => true,
-        "recording" => recording || FINISHING.lock().is_some(),
+        "recording" => busy,
         _ => false,
-    } && !BAR_HIDDEN.load(Ordering::Relaxed);
+    } || (busy && BAR_WANTED.load(Ordering::Relaxed)))
+        && !BAR_HIDDEN.load(Ordering::Relaxed);
     let h = app.clone();
     // Always queue it from a worker thread: called from a sync command (which
     // runs on the main thread), `run_on_main_thread` would build the window
@@ -422,6 +582,10 @@ pub fn sync_bar(app: &AppHandle) {
             } else if let Some(w) = h2.get_webview_window(BAR_LABEL) {
                 let _ = w.close();
             }
+            // Closing is asynchronous: the window still exists right after
+            // close(), so go by what was asked.
+            BAR_OPEN.store(want && h2.get_webview_window(BAR_LABEL).is_some(), Ordering::Relaxed);
+            emit_state(&h2);
         });
     });
 }
@@ -430,7 +594,7 @@ fn open_bar(app: &AppHandle) -> tauri::Result<()> {
     if app.get_webview_window(BAR_LABEL).is_some() {
         return Ok(());
     }
-    let (bw, bh) = (520.0, 46.0);
+    let (bw, bh) = (BAR_W, BAR_H);
     let win = tauri::WebviewWindowBuilder::new(app, BAR_LABEL, tauri::WebviewUrl::default())
         .title("Lastshot controls")
         .decorations(false)

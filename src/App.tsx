@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import HomeDashboard from "./components/HomeDashboard";
+import EditorPanel from "./components/EditorPanel";
+import StudioPanel from "./components/StudioPanel";
 import FolderSidebar, { matchesFolder } from "./components/FolderSidebar";
 import ClipTrimmerModal from "./components/ClipTrimmerModal";
 import GalleryGrid from "./components/GalleryGrid";
@@ -119,7 +121,15 @@ export default function App() {
   const [clips, setClips] = useState<ClipMetadata[]>([]);
   const [loadingClips, setLoadingClips] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [tab, setTab] = useState<"home" | "clips" | "settings">("home");
+  const [tab, setTab] = useState<"home" | "clips" | "editor" | "studio" | "settings">("home");
+  // Files handed to the Editor (drag & drop on its tab, "Open in Editor").
+  const [editorIncoming, setEditorIncoming] = useState<{ paths: string[]; seq: number } | null>(null);
+  const tabRef = useRef(tab);
+  tabRef.current = tab;
+  const sendToEditor = useCallback((paths: string[]) => {
+    setEditorIncoming((p) => ({ paths, seq: (p?.seq ?? 0) + 1 }));
+    setTab("editor");
+  }, []);
   /** Settings section to scroll to when the Settings tab opens. */
   const [settingsFocus, setSettingsFocus] = useState<string | null>(null);
   const [barState, setBarState] = useState<BarState | null>(null);
@@ -397,6 +407,10 @@ export default function App() {
     attach(
       Promise.resolve(
         lastshot.onFilesDropped((paths) => {
+          if (tabRef.current === "editor") {
+            if (paths.length) sendToEditor(paths);
+            return;
+          }
           const video = paths.find((p) => /\.(mp4|mov|m4v)$/i.test(p));
           if (video) void openFile(video);
           else if (paths.length) pushToast("warn", "Not a video", "Lastshot opens MP4, MOV and M4V files.");
@@ -1715,6 +1729,8 @@ export default function App() {
           {[
             { id: "home" as const, label: "Home" },
             { id: "clips" as const, label: "Clips", count: clips.length },
+            { id: "editor" as const, label: "Editor" },
+            { id: "studio" as const, label: "Studio" },
             { id: "settings" as const, label: "Settings" },
           ].map((item) => (
             <button
@@ -1807,6 +1823,7 @@ export default function App() {
               onRecordArea={() => void recordArea()}
               onMarker={() => void addMarker()}
               onDiscardRecording={() => void discardRecording()}
+              onShowBar={() => void lastshot.showBar()}
               onScreenshot={takeScreenshot}
               onOpenSettings={openSettingsAt}
               onControlBar={(m) => void patchSettings({ controlBar: m })}
@@ -2410,6 +2427,21 @@ export default function App() {
               )}
             </section>
           </div>
+        ) : tab === "editor" ? (
+          /* ================================================== EDITOR */
+          <div className="h-full min-h-[640px]">
+            <EditorPanel
+              clips={clips}
+              incoming={editorIncoming}
+              onToast={pushToast}
+              onRendered={(c) => setClips((prev) => [c, ...prev.filter((x) => x.path !== c.path)])}
+            />
+          </div>
+        ) : tab === "studio" ? (
+          /* ================================================== STUDIO */
+          <div className="mx-auto max-w-[1440px] p-5">
+            <StudioPanel settings={settings} monitors={monitors} bar={barState} onToast={pushToast} onPatch={(p) => void patchSettings(p)} />
+          </div>
         ) : (
           /* ================================================== SETTINGS VIEW */
           <div className="mx-auto max-w-[1000px] p-5">
@@ -2466,6 +2498,22 @@ export default function App() {
         aria-atomic="false"
         className="pointer-events-none fixed bottom-4 right-4 z-[60] flex w-80 flex-col gap-2"
       >
+        {barState?.finishing != null && (
+          <div className="animate-toast pointer-events-auto flex items-center gap-3 rounded-xl border border-line-3 bg-surface-2 px-3.5 py-2.5">
+            <span className="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+            <div className="min-w-0 flex-1">
+              <div className="text-[12px] font-semibold tracking-wide text-ink">
+                {barState.finishingLabel ?? "Saving the recording"}…
+              </div>
+              <div className="mt-1 h-1 overflow-hidden rounded-full bg-surface-3">
+                <div
+                  className="h-full rounded-full bg-accent transition-[width] duration-300"
+                  style={{ width: `${Math.max(4, Math.round((barState.finishing ?? 0) * 100))}%` }}
+                />
+              </div>
+            </div>
+          </div>
+        )}
         {toasts.map((t) => (
           <div
             key={t.id}
@@ -2507,6 +2555,10 @@ export default function App() {
           onShare={(start, end) => shareClip(activeClip, { start, end })}
           onExport={(segments, crop, mode) => exportEdit(segments, crop, mode, activeClip.path)}
           onMoveToLibrary={activeClip.folder ? () => moveToLibrary(activeClip) : undefined}
+          onOpenInEditor={() => {
+            sendToEditor([activeClip.path]);
+            setActiveClip(null);
+          }}
           shareLimitMb={settings.shareSizeMb}
           shareProgress={shareProgress.get(activeClip.path)}
         />

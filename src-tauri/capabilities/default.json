@@ -5,7 +5,9 @@
   "windows": [
     "main",
     "snip",
-    "bar"
+    "bar",
+    "annot",
+    "scene"
   ],
   "permissions": [
     "core:default",

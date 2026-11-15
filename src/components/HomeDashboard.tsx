@@ -24,6 +24,8 @@ interface Props {
   onRecordArea: () => void;
   onMarker: () => void;
   onDiscardRecording: () => void;
+  /** Opens the control bar again after it was closed. */
+  onShowBar: () => void;
   onScreenshot: () => void;
   onOpenSettings: (section: string) => void;
   onControlBar: (mode: AppSettings["controlBar"]) => void;
@@ -139,6 +141,7 @@ export default function HomeDashboard({
   onRecordArea,
   onMarker,
   onDiscardRecording,
+  onShowBar,
   onScreenshot,
   onOpenSettings,
   onControlBar,
@@ -323,6 +326,16 @@ export default function HomeDashboard({
               >
                 {armed ? "Click again to delete" : "Discard"}
               </button>
+              {!bar?.barOpen && (
+                <button
+                  type="button"
+                  onClick={onShowBar}
+                  title="Bring back the small control bar"
+                  className="flex-1 rounded-md border border-line bg-surface-2 px-2 py-1 font-medium text-ink-2 hover:border-line-3 hover:text-ink"
+                >
+                  Show bar
+                </button>
+              )}
             </div>
             </>
           ) : (

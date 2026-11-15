@@ -135,6 +135,9 @@ pub struct Settings {
     /// or "off". It is never captured.
     #[serde(default = "default_control_bar")]
     pub control_bar: String,
+    /// Studio layers on the recorded screen: "off", "recording" or "always".
+    #[serde(default = "default_studio_layers")]
+    pub studio_layers: String,
     /// "Open with Lastshot" on MP4 files in Explorer's right-click menu.
     #[serde(default)]
     pub explorer_open_with: bool,
@@ -183,6 +186,10 @@ fn default_record_hotkey() -> String {
 }
 
 fn default_control_bar() -> String {
+    "recording".into()
+}
+
+fn default_studio_layers() -> String {
     "recording".into()
 }
 
@@ -271,6 +278,7 @@ impl Default for Settings {
             library_folders: Vec::new(),
             hotkey_record: default_record_hotkey(),
             control_bar: default_control_bar(),
+            studio_layers: default_studio_layers(),
             explorer_open_with: false,
             screenshot_dir: String::new(),
             screenshot_format: default_screenshot_format(),

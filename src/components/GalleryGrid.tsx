@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useState } from "react";
-import { clipflow } from "../lib/bridge";
+import { lastshot } from "../lib/bridge";
 import type { ClipMetadata } from "../lib/types";
-import { formatBytes, formatDuration, formatRelativeTime } from "../lib/format";
+import { formatBytes, formatDuration, formatRelativeTime, folderName } from "../lib/format";
 import { cacheThumbnail, getCachedThumbnail } from "../lib/thumbCache";
 import { cn } from "../utils/cn";
 import { gapFor, useVirtualGrid } from "../hooks/useVirtualGrid";
@@ -37,7 +37,7 @@ interface Props {
 /** Starts a native file drag so the clip can be dropped into Discord, Explorer, a browser... */
 function startNativeDrag(e: React.DragEvent, path: string) {
   e.preventDefault();
-  void clipflow.startClipDrag(path).catch(() => {
+  void lastshot.startClipDrag(path).catch(() => {
     /* drag is a convenience; the copy buttons still work */
   });
 }
@@ -125,7 +125,7 @@ const ClipCard = memo(function ClipCard({
         return;
       }
       requested = true;
-      void clipflow
+      void lastshot
         .getClipThumbnail(clip.path, 1)
         .then((t) => {
           if (!alive || !t) return;
@@ -224,10 +224,22 @@ const ClipCard = memo(function ClipCard({
         <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/55 via-transparent to-transparent" />
 
         {/* Game badge */}
-        {clip.game && (
-          <span className="absolute left-2.5 top-2.5 rounded bg-black/75 px-1.5 py-0.5 font-mono text-[10px] font-medium tracking-wide text-white border border-white/10">
-            {clip.game.toUpperCase()}
-          </span>
+        {(clip.game || clip.folder) && (
+          <div className="absolute left-2.5 top-2.5 flex max-w-[85%] gap-1">
+            {clip.folder && (
+              <span
+                title={`From ${clip.folder}`}
+                className="truncate rounded bg-black/75 px-1.5 py-0.5 text-[10px] font-medium text-white border border-white/10"
+              >
+                📁 {folderName(clip.folder)}
+              </span>
+            )}
+            {clip.game && (
+              <span className="rounded bg-black/75 px-1.5 py-0.5 font-mono text-[10px] font-medium tracking-wide text-white border border-white/10">
+                {clip.game.toUpperCase()}
+              </span>
+            )}
+          </div>
         )}
 
         {/* Duration badge */}

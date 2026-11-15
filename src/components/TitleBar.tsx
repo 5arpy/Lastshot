@@ -1,4 +1,4 @@
-import { clipflow } from "../lib/bridge";
+import { lastshot } from "../lib/bridge";
 import { cn } from "../utils/cn";
 
 interface Props {
@@ -13,7 +13,7 @@ export default function TitleBar({ armed, native, version }: Props) {
       className="drag-region flex h-10 shrink-0 select-none items-center justify-between border-b border-line bg-app px-3.5"
       onPointerDown={(e) => {
         if ((e.target as HTMLElement).closest(".no-drag")) return;
-        void clipflow.startDragging();
+        void lastshot.startDragging();
       }}
     >
       <div className="flex items-center gap-2.5">
@@ -59,7 +59,7 @@ export default function TitleBar({ armed, native, version }: Props) {
 
       <div className="no-drag flex items-center gap-1">
         <button
-          onClick={() => void clipflow.minimize()}
+          onClick={() => void lastshot.minimize()}
           className="grid h-7 w-8 place-items-center rounded text-ink-3 transition-colors hover:bg-surface-2 hover:text-ink"
           title="Minimize"
           aria-label="Minimize"
@@ -69,7 +69,7 @@ export default function TitleBar({ armed, native, version }: Props) {
           </svg>
         </button>
         <button
-          onClick={() => void clipflow.toggleMaximize()}
+          onClick={() => void lastshot.toggleMaximize()}
           className="grid h-7 w-8 place-items-center rounded text-ink-3 transition-colors hover:bg-surface-2 hover:text-ink"
           title="Maximize"
           aria-label="Maximize"
@@ -79,7 +79,7 @@ export default function TitleBar({ armed, native, version }: Props) {
           </svg>
         </button>
         <button
-          onClick={() => void clipflow.hideToTray()}
+          onClick={() => void lastshot.hideToTray()}
           className="grid h-7 w-8 place-items-center rounded text-ink-3 transition-colors hover:bg-surface-2 hover:text-ink"
           title="Hide to tray (keeps recording in background)"
           aria-label="Hide to tray"
@@ -90,9 +90,9 @@ export default function TitleBar({ armed, native, version }: Props) {
           </svg>
         </button>
         <button
-          onClick={() => void clipflow.quit()}
+          onClick={() => void lastshot.quit()}
           className="grid h-7 w-8 place-items-center rounded text-ink-3 transition-colors hover:bg-red-500/20 hover:text-danger"
-          title="Quit ClipFlow"
+          title="Quit Lastshot"
           aria-label="Quit"
         >
           <svg className="h-3 w-3" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.25">

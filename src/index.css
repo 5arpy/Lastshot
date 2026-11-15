@@ -1,7 +1,7 @@
 @import "tailwindcss";
 
 @theme {
-  /* Theme tokens. The light values are ClipFlow's original palette; the soft
+  /* Theme tokens. The light values are Lastshot's original palette; the soft
      dark palette below overrides them unless html[data-theme="light"]. */
   --color-app: #e9ecef;
   --color-surface: #f8f9fa;

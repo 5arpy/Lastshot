@@ -42,6 +42,20 @@ impl AppState {
     pub fn output_dir(&self) -> PathBuf {
         PathBuf::from(self.settings.read().output_dir.clone())
     }
+
+    /// Where new files made from `source` (trims, splits, edits) go: next to
+    /// it inside the save folder, or the save folder itself for a clip from
+    /// an extra library folder (Lastshot never writes into those).
+    pub fn edit_dir_for(&self, source: &Path) -> PathBuf {
+        edit_dir(&self.output_dir(), source)
+    }
+}
+
+fn edit_dir(out: &Path, source: &Path) -> PathBuf {
+    match source.parent() {
+        Some(p) if p.starts_with(out) => p.to_path_buf(),
+        _ => out.to_path_buf(),
+    }
 }
 
 impl Default for AppState {
@@ -54,11 +68,11 @@ impl Default for AppState {
 // Event payloads
 // ---------------------------------------------------------------------------
 
-pub const EVT_CLIP_SAVED: &str = "clipflow://clip-saved";
-pub const EVT_STATS: &str = "clipflow://stats";
-pub const EVT_ERROR: &str = "clipflow://error";
-pub const EVT_HOTKEY: &str = "clipflow://hotkey";
-pub const EVT_BUFFER_STATE: &str = "clipflow://buffer-state";
+pub const EVT_CLIP_SAVED: &str = "lastshot://clip-saved";
+pub const EVT_STATS: &str = "lastshot://stats";
+pub const EVT_ERROR: &str = "lastshot://error";
+pub const EVT_HOTKEY: &str = "lastshot://hotkey";
+pub const EVT_BUFFER_STATE: &str = "lastshot://buffer-state";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -165,11 +179,11 @@ pub fn sanitize_file_stem(raw: &str, fallback: &str) -> String {
 }
 
 /// Sanitises a foreground exe into a safe per-game folder name. Returns `None`
-/// for our own process so pressing Alt+C on the deck never creates a "clipflow"
+/// for our own process so pressing Alt+C on the deck never creates a "lastshot"
 /// folder.
 fn game_folder_name(exe: &str) -> Option<String> {
     let exe = exe.to_ascii_lowercase();
-    if exe.starts_with("clipflow") || exe.starts_with("lastshot") {
+    if exe.starts_with("lastshot") {
         return None;
     }
     let stem = match exe.rfind('.') {
@@ -294,7 +308,7 @@ pub async fn save_instant_replay(
     );
 
     log::info!(
-        "[clipflow] saved {} ({:.1}s, {:.1} MB) in {:.1} ms",
+        "[lastshot] saved {} ({:.1}s, {:.1} MB) in {:.1} ms",
         clip.file_name,
         clip.duration_seconds,
         clip.size_bytes as f32 / 1_048_576.0,
@@ -314,9 +328,16 @@ pub async fn get_recorded_clips(
     with_thumbnails: Option<bool>,
 ) -> Result<Vec<ClipMetadata>, String> {
     let dir = state.output_dir();
+    let extra: Vec<std::path::PathBuf> = state
+        .settings
+        .read()
+        .library_folders
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect();
     let thumbs = with_thumbnails.unwrap_or(true);
     let mut clips = tauri::async_runtime::spawn_blocking(move || {
-        library::scan_directory(&dir, thumbs).map_err(|e| e.to_string())
+        library::scan_library(&dir, &extra, thumbs).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| format!("scan task panicked: {e}"))??;
@@ -361,7 +382,12 @@ pub struct SplitResult {
 }
 
 #[tauri::command]
-pub async fn split_clip(source_path: String, at_seconds: f32) -> Result<SplitResult, String> {
+pub async fn split_clip(
+    state: State<'_, AppState>,
+    source_path: String,
+    at_seconds: f32,
+) -> Result<SplitResult, String> {
+    let dir = state.edit_dir_for(Path::new(&source_path));
     tauri::async_runtime::spawn_blocking(move || {
         let source = PathBuf::from(&source_path);
         if !source.exists() {
@@ -372,9 +398,10 @@ pub async fn split_clip(source_path: String, at_seconds: f32) -> Result<SplitRes
         let duration = library::probe(&source).map_err(|e| e.to_string())?.duration_seconds;
         let at = split_at_seconds(duration, at_seconds)?;
 
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let part_a = library::trim_stream_copy(
             &source,
-            &library::suggested_trim_path(&source),
+            &library::suggested_trim_path_in(&dir, &source),
             0.0,
             at,
         )
@@ -384,7 +411,7 @@ pub async fn split_clip(source_path: String, at_seconds: f32) -> Result<SplitRes
         // MFStartup/MFShutdown churn is a known source of flaky failures).
         std::thread::sleep(std::time::Duration::from_millis(40));
 
-        let dest_b = library::suggested_trim_path(&source);
+        let dest_b = library::suggested_trim_path_in(&dir, &source);
         let part_b = match library::trim_stream_copy(&source, &dest_b, at, duration) {
             Ok(b) => b,
             Err(e) => {
@@ -407,18 +434,21 @@ pub async fn split_clip(source_path: String, at_seconds: f32) -> Result<SplitRes
 /// roughly the time it takes to copy the bytes.
 #[tauri::command]
 pub async fn trim_clip(
+    state: State<'_, AppState>,
     source_path: String,
     start_time: f32,
     end_time: f32,
     overwrite: Option<bool>,
 ) -> Result<TrimResult, String> {
+    let dir = state.edit_dir_for(Path::new(&source_path));
     tauri::async_runtime::spawn_blocking(move || {
         let source = PathBuf::from(&source_path);
         let overwrite = overwrite.unwrap_or(false);
         let dest = if overwrite {
             source.with_extension("trim.tmp.mp4")
         } else {
-            library::suggested_trim_path(&source)
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            library::suggested_trim_path_in(&dir, &source)
         };
 
         let mut result = library::trim_stream_copy(&source, &dest, start_time, end_time)
@@ -597,7 +627,7 @@ pub fn open_clip_external(app: AppHandle, path: String) -> Result<(), String> {
 }
 
 /// Manual "check for updates" — just opens the GitHub Releases page. No
-/// background updater, no telemetry: ClipFlow stays true to its privacy model.
+/// background updater, no telemetry: Lastshot stays true to its privacy model.
 #[tauri::command]
 pub fn open_releases_page(app: AppHandle) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
@@ -630,7 +660,7 @@ pub async fn extract_png_frame(
     .map_err(|e| format!("snapshot task panicked: {e}"))?
 }
 
-/// Writes a PNG (base64 data URL) into the ClipFlow output folder. Only accepts
+/// Writes a PNG (base64 data URL) into the Lastshot output folder. Only accepts
 /// valid PNG bytes so the webview can never write arbitrary files.
 #[tauri::command]
 pub async fn save_png_snapshot(
@@ -709,6 +739,7 @@ pub struct SettingsPatch {
     pub share_size_mb: Option<f32>,
     pub hotkey_snip: Option<String>,
     pub snip_save_to_folder: Option<bool>,
+    pub library_folders: Option<Vec<String>>,
 }
 
 #[tauri::command]
@@ -866,6 +897,15 @@ pub fn update_settings(
     if let Some(v) = patch.snip_save_to_folder {
         s.snip_save_to_folder = v;
     }
+    if let Some(v) = patch.library_folders.as_ref() {
+        let mut seen = std::collections::HashSet::new();
+        s.library_folders = v
+            .iter()
+            .map(|f| f.trim().to_string())
+            .filter(|f| !f.is_empty() && seen.insert(f.to_lowercase()))
+            .take(20)
+            .collect();
+    }
 
     // Persist first: if this fails, nothing below runs and the in-memory
     // settings are untouched.
@@ -883,6 +923,11 @@ pub fn update_settings(
         // is a static glob in tauri.conf.json. Widen it to the new folder or
         // previews break the moment the user moves the library.
         crate::allow_asset_dir(&app, &dir);
+    }
+    if patch.library_folders.is_some() {
+        for dir in &s.library_folders {
+            crate::allow_asset_dir(&app, dir);
+        }
     }
     if let Some(v) = patch.always_on_top {
         if let Some(w) = app.get_webview_window("main") {
@@ -1215,7 +1260,7 @@ pub(crate) mod clipboard {
             .iter()
             .map(|p| p.display().to_string())
             .collect();
-        log::info!("[clipflow] (stub) copied {} to clipboard", names.join(", "));
+        log::info!("[lastshot] (stub) copied {} to clipboard", names.join(", "));
         Ok(())
     }
 }
@@ -1231,6 +1276,20 @@ pub fn simulate_device_loss(state: State<'_, AppState>) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn edits_of_outside_clips_go_to_the_save_folder() {
+        use super::edit_dir;
+        use std::path::{Path, PathBuf};
+        let out = Path::new(r"C:\Videos\Lastshot");
+        assert_eq!(
+            edit_dir(out, Path::new(r"C:\Videos\Lastshot\cs2\a.mp4")),
+            PathBuf::from(r"C:\Videos\Lastshot\cs2")
+        );
+        assert_eq!(edit_dir(out, Path::new(r"D:\Old\b.mp4")), out.to_path_buf());
+        assert_eq!(edit_dir(out, Path::new(r"C:\Videos\LastshotOld\c.mp4")), out.to_path_buf());
+    }
+
     use super::split_at_seconds;
 
     #[test]

@@ -94,7 +94,7 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
 
 /**
  * Converts an absolute Windows path into something the webview may load.
- * Under Tauri this is the `asset:` custom protocol (scoped to the ClipFlow
+ * Under Tauri this is the `asset:` custom protocol (scoped to the Lastshot
  * output folder in `tauri.conf.json`); in the browser there is no such thing,
  * so callers fall back to the simulated blob URL.
  */
@@ -135,13 +135,13 @@ async function listen<T>(channel: string, handler: Handler<T>): Promise<() => vo
 }
 
 export const CHANNELS = {
-  clipSaved: "clipflow://clip-saved",
-  stats: "clipflow://stats",
-  error: "clipflow://error",
-  hotkey: "clipflow://hotkey",
-  bufferState: "clipflow://buffer-state",
-  shrinkProgress: "clipflow://shrink-progress",
-  snipDone: "clipflow://snip-done",
+  clipSaved: "lastshot://clip-saved",
+  stats: "lastshot://stats",
+  error: "lastshot://error",
+  hotkey: "lastshot://hotkey",
+  bufferState: "lastshot://buffer-state",
+  shrinkProgress: "lastshot://shrink-progress",
+  snipDone: "lastshot://snip-done",
 } as const;
 
 export const RELEASES_URL = "https://github.com/5arpy/Lastshot/releases";
@@ -224,6 +224,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   shareSizeMb: 10,
   hotkeySnip: "Alt+S",
   snipSaveToFolder: true,
+  libraryFolders: [],
 };
 
 let browserSettings: AppSettings = { ...DEFAULT_SETTINGS };
@@ -232,7 +233,7 @@ let browserSettings: AppSettings = { ...DEFAULT_SETTINGS };
 // API
 // ---------------------------------------------------------------------------
 
-export const clipflow = {
+export const lastshot = {
   isTauri,
 
   async startBuffer(bufferSeconds: number, targetFps: number): Promise<EngineStats> {
@@ -903,4 +904,4 @@ export const clipflow = {
   },
 };
 
-export type ClipFlowApi = typeof clipflow;
+export type LastshotApi = typeof lastshot;

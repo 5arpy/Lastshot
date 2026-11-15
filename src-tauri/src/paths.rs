@@ -1,17 +1,9 @@
 //! Where Lastshot keeps its small state files (settings, clip metadata, probe
-//! cache): `%APPDATA%\Lastshot`.
-//!
-//! Lastshot started as a fork of ClipFlow. On the first run, if there is no
-//! Lastshot folder yet but a ClipFlow one exists, its files are copied over so
-//! settings, favorites and tags carry across. The ClipFlow folder is left
-//! untouched.
+//! cache): `%APPDATA%\Lastshot`. Lastshot reads nothing from other apps.
 
 use std::path::PathBuf;
-use std::sync::Once;
 
 pub const APP_DIR_NAME: &str = "Lastshot";
-const LEGACY_DIR_NAME: &str = "ClipFlow";
-const MIGRATED_FILES: &[&str] = &["settings.json", "clip_meta.json", "probe_cache.json"];
 
 fn base_dir() -> PathBuf {
     #[cfg(windows)]
@@ -23,38 +15,13 @@ fn base_dir() -> PathBuf {
     std::env::temp_dir()
 }
 
-/// `%APPDATA%\Lastshot`, migrated from `%APPDATA%\ClipFlow` once.
+/// `%APPDATA%\Lastshot`.
 pub fn app_data_dir() -> PathBuf {
-    static MIGRATE: Once = Once::new();
-    let dir = base_dir().join(APP_DIR_NAME);
-    MIGRATE.call_once(|| migrate_from_legacy(&dir));
-    dir
+    base_dir().join(APP_DIR_NAME)
 }
 
 pub fn app_file(name: &str) -> PathBuf {
     app_data_dir().join(name)
-}
-
-fn migrate_from_legacy(dir: &PathBuf) {
-    if dir.join("settings.json").exists() {
-        return;
-    }
-    let legacy = base_dir().join(LEGACY_DIR_NAME);
-    if !legacy.join("settings.json").exists() {
-        return;
-    }
-    if std::fs::create_dir_all(dir).is_err() {
-        return;
-    }
-    for name in MIGRATED_FILES {
-        let from = legacy.join(name);
-        if from.exists() {
-            if let Err(e) = std::fs::copy(&from, dir.join(name)) {
-                log::warn!("[lastshot] could not migrate {name} from ClipFlow: {e}");
-            }
-        }
-    }
-    log::info!("[lastshot] imported settings from {}", legacy.display());
 }
 
 /// Temporary home for "Shrink & copy" files. They must outlive the paste (the

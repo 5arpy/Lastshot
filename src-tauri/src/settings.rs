@@ -1,5 +1,5 @@
 //! User settings. Stored as a single JSON file next to the executable's
-//! app-data folder. No cloud, no account, no telemetry - ClipFlow never opens
+//! app-data folder. No cloud, no account, no telemetry - Lastshot never opens
 //! an outbound socket.
 
 use std::path::PathBuf;
@@ -63,7 +63,7 @@ pub struct Settings {
     /// When true, the mapped profile follows the game that has focus.
     #[serde(default)]
     pub auto_switch_profiles: bool,
-    /// Launch ClipFlow hidden to tray at Windows sign-in.
+    /// Launch Lastshot hidden to tray at Windows sign-in.
     #[serde(default)]
     pub launch_at_startup: bool,
     /// Delete clips older than N days at launch (0 = keep everything).
@@ -107,7 +107,7 @@ pub struct Settings {
     pub eco_ram_free_gbs: u32,
     /// Check GitHub for a newer signed release at startup.
     ///
-    /// Default `false`: ClipFlow's proposition is "no telemetry, no background
+    /// Default `false`: Lastshot's proposition is "no telemetry, no background
     /// network", and an unconditional startup check contradicted that. The
     /// manual button in Settings always works; this only controls the silent
     /// probe. See README "Zero Telemetry".
@@ -123,6 +123,11 @@ pub struct Settings {
     /// Also save every snip as a PNG in `<clips folder>\Screenshots`.
     #[serde(default = "default_true")]
     pub snip_save_to_folder: bool,
+    /// Extra folders whose videos show up in Clips too (edit, share, star),
+    /// e.g. another recorder's folder. Lastshot only saves to `output_dir`,
+    /// and auto-cleanup / "Delete all" never touch these.
+    #[serde(default)]
+    pub library_folders: Vec<String>,
 }
 
 fn default_share_mb() -> f32 {
@@ -186,6 +191,7 @@ impl Default for Settings {
             share_size_mb: default_share_mb(),
             hotkey_snip: default_snip_hotkey(),
             snip_save_to_folder: true,
+            library_folders: Vec::new(),
         }
     }
 }
@@ -316,7 +322,7 @@ impl Settings {
         let path = Self::config_path();
         match std::fs::read_to_string(&path) {
             Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|e| {
-                log::warn!("[clipflow] settings parse error ({e}); using defaults");
+                log::warn!("[lastshot] settings parse error ({e}); using defaults");
                 Self::default()
             }),
             Err(_) => Self::default(),

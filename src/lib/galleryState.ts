@@ -41,7 +41,7 @@ export const DEFAULT_GALLERY_STATE: GalleryState = {
   compact: false,
 };
 
-export const GALLERY_STORAGE_KEY = "clipflow.gallery.state.v1";
+export const GALLERY_STORAGE_KEY = "lastshot.gallery.state.v1";
 
 /** Longest query worth keeping — guards against junk data. */
 const MAX_QUERY_LENGTH = 200;

@@ -1,5 +1,5 @@
 /**
- * Save-confirmation blip, generated with WebAudio so ClipFlow ships zero audio
+ * Save-confirmation blip, generated with WebAudio so Lastshot ships zero audio
  * assets and stays fully offline. Gated by the `playSaveSound` setting.
  *
  * Browsers/WebView2 require a user gesture before an AudioContext is allowed

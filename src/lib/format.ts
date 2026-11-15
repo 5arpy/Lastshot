@@ -39,3 +39,8 @@ export function formatRelativeTime(unixMs: number): string {
 export function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
+
+/** Last part of a folder path: `D:\\Videos\\ClipFlow` -> `ClipFlow`. */
+export function folderName(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+}

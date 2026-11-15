@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { clipflow, isTauri, showCurrentWindow } from "../lib/bridge";
+import { lastshot, isTauri, showCurrentWindow } from "../lib/bridge";
 import type { SnipCapture, SnipWindowRect } from "../lib/types";
 import { cn } from "../utils/cn";
 
@@ -154,7 +154,7 @@ export default function SnipOverlay() {
     let alive = true;
     const load = async () => {
       try {
-        const c = isTauri() ? await clipflow.snipGetCapture() : demoCapture();
+        const c = isTauri() ? await lastshot.snipGetCapture() : demoCapture();
         if (!alive) return;
         const image = new Image();
         image.onload = () => {
@@ -189,7 +189,7 @@ export default function SnipOverlay() {
   }, [error]);
 
   const cancel = useCallback(() => {
-    if (isTauri()) void clipflow.snipCancel();
+    if (isTauri()) void lastshot.snipCancel();
     else window.close();
   }, []);
 
@@ -237,7 +237,7 @@ export default function SnipOverlay() {
       try {
         const png = c.toDataURL("image/png");
         if (isTauri()) {
-          await clipflow.snipFinish(png, true, save);
+          await lastshot.snipFinish(png, true, save);
         } else {
           const a = document.createElement("a");
           a.href = png;

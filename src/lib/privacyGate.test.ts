@@ -134,9 +134,9 @@ describe("PrivacyGateHysteresis", () => {
 });
 
 describe("shouldGateForForeground", () => {
-  it("gates only for ClipFlow itself and the desktop", () => {
-    expect(shouldGateForForeground("clipflow.exe")).toBe(true);
-    expect(shouldGateForForeground("ClipFlow")).toBe(true);
+  it("gates only for Lastshot itself and the desktop", () => {
+    expect(shouldGateForForeground("lastshot.exe")).toBe(true);
+    expect(shouldGateForForeground("Lastshot")).toBe(true);
     expect(shouldGateForForeground("explorer.exe")).toBe(true);
   });
 

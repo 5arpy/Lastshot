@@ -80,6 +80,8 @@ export interface ClipMetadata {
   favorite: boolean;
   /** User-added tags (persisted in the local sidecar store). */
   tags: string[];
+  /** The extra library folder this clip is in; null/absent = the save folder. */
+  folder?: string | null;
   /** Browser-simulation only: object URL for the preview player. */
   preview_url?: string;
 }
@@ -206,7 +208,7 @@ export interface AppSettings {
   profileMap: ProfileMapEntry[];
   /** When on, the mapped profile follows the game that has focus. */
   autoSwitchProfiles: boolean;
-  /** Launch ClipFlow hidden to tray at Windows sign-in. */
+  /** Launch Lastshot hidden to tray at Windows sign-in. */
   launchAtStartup: boolean;
   /** Delete clips older than N days at launch (0 = keep everything). */
   autoCleanupDays: number;
@@ -242,7 +244,7 @@ export interface AppSettings {
   /**
    * Check GitHub for a newer signed release at startup.
    *
-   * Default `false`: ClipFlow promises "no telemetry, no background network",
+   * Default `false`: Lastshot promises "no telemetry, no background network",
    * so the silent startup probe is opt-in. The manual button in Settings
    * always works.
    */
@@ -253,6 +255,11 @@ export interface AppSettings {
   hotkeySnip: string;
   /** Also save every snip as a PNG in <clips folder>\Screenshots. */
   snipSaveToFolder: boolean;
+  /**
+   * Extra folders whose videos show up in Clips too. Lastshot only saves to
+   * outputDir; auto-cleanup and "Delete all" never touch these.
+   */
+  libraryFolders: string[];
 }
 
 /** A point-in-time snapshot of the machine's power / memory state. */

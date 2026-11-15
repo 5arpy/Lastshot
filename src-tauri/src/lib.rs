@@ -62,7 +62,7 @@ pub fn run() {
                 })
                 .build(),
         )
-        // Second instance ⇒ just surface the existing window; ClipFlow is a
+        // Second instance ⇒ just surface the existing window; Lastshot is a
         // single-instance app by design (one buffer, one encoder session).
         .manage(AppState::new())
         .setup(|app| {
@@ -104,7 +104,7 @@ pub fn run() {
             }
 
             if let Err(e) = hotkeys::register_all(&handle, &save_key, &toggle_key, &snip_key) {
-                log::warn!("[clipflow] hotkey registration: {e}");
+                log::warn!("[lastshot] hotkey registration: {e}");
                 let h = handle.clone();
                 let msg = e.clone();
                 tauri::async_runtime::spawn(async move {
@@ -129,14 +129,17 @@ pub fn run() {
             // Widen the asset protocol to whatever output folder is configured.
             //
             // `tauri.conf.json` can only declare a static scope
-            // ($VIDEO/ClipFlow/**, $HOME/Videos/ClipFlow/**), but Settings lets
+            // ($VIDEO/Lastshot/**, $HOME/Videos/Lastshot/**), but Settings lets
             // the user point the library anywhere (e.g. D:\Clips). Without this
             // the gallery thumbnails still worked (they are data URLs from Rust)
             // while the trimmer's <video> silently refused to load — the classic
             // "NO PREVIEW STREAM" on a perfectly good clip.
             if let Some(state) = handle.try_state::<AppState>() {
-                let dir = state.settings.read().output_dir.clone();
-                allow_asset_dir(&handle, &dir);
+                let s = state.settings.read();
+                allow_asset_dir(&handle, &s.output_dir);
+                for dir in &s.library_folders {
+                    allow_asset_dir(&handle, dir);
+                }
             }
 
             // Privacy mode starts gated when the deck or desktop is focused
@@ -201,7 +204,7 @@ pub fn run() {
                     if let Err(e) = h.emit(EVT_STATS, stats) {
                         // A single failed emit (webview reload/startup race)
                         // must not kill the heartbeat forever.
-                        log::warn!("[clipflow] stats emit failed: {e}");
+                        log::warn!("[lastshot] stats emit failed: {e}");
                     }
                 }
             });
@@ -300,7 +303,7 @@ fn allow_asset_dir(app: &tauri::AppHandle, dir: &str) {
     }
     let path = std::path::PathBuf::from(dir);
     if let Err(e) = app.asset_protocol_scope().allow_directory(&path, true) {
-        log::warn!("[clipflow] could not widen asset scope to {dir}: {e}");
+        log::warn!("[lastshot] could not widen asset scope to {dir}: {e}");
     }
 }
 

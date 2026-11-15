@@ -36,9 +36,7 @@
         "enable": true,
         "scope": [
           "$VIDEO/Lastshot/**",
-          "$HOME/Videos/Lastshot/**",
-          "$VIDEO/ClipFlow/**",
-          "$HOME/Videos/ClipFlow/**"
+          "$HOME/Videos/Lastshot/**"
         ]
       }
     }

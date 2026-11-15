@@ -1,7 +1,7 @@
 //! Per-clip user metadata (favourites + custom tags).
 //!
 //! Clips are plain files on disk, so this data cannot live inside them. It is
-//! kept in a tiny sidecar JSON in the ClipFlow app-data folder, keyed by the
+//! kept in a tiny sidecar JSON in the Lastshot app-data folder, keyed by the
 //! absolute clip path, so it survives restarts and stays 100% local — no
 //! cloud, no account, no telemetry. The gallery scan merges it on every
 //! refresh and prunes entries whose clip has been deleted.
@@ -166,7 +166,10 @@ impl ClipMetaStore {
         let live: std::collections::HashSet<String> =
             clips.iter().map(|c| c.path.clone()).collect();
         let before = self.entries.len();
-        self.entries.retain(|path, _| live.contains(path));
+        // Keep entries whose file still exists somewhere (e.g. a library
+        // folder on a drive that is unplugged right now).
+        self.entries
+            .retain(|path, _| live.contains(path) || std::path::Path::new(path).exists());
         let dirty = self.entries.len() != before;
         for clip in clips.iter_mut() {
             if let Some(e) = self.entries.get(&clip.path) {
@@ -192,7 +195,7 @@ mod tests {
     /// `clip_meta.json`). Unique per test so parallel runs never collide.
     fn store(tag: &str) -> ClipMetaStore {
         let dir = std::env::temp_dir().join(format!(
-            "clipflow-meta-{}-{tag}",
+            "lastshot-meta-{}-{tag}",
             std::process::id()
         ));
         let _ = std::fs::create_dir_all(&dir);

@@ -5,7 +5,7 @@
  */
 export type ThemeChoice = "dark" | "light" | "system";
 
-const KEY = "clipflow.theme";
+const KEY = "lastshot.theme";
 const listeners = new Set<(t: ThemeChoice) => void>();
 let media: MediaQueryList | null = null;
 

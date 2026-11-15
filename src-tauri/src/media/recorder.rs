@@ -1,4 +1,4 @@
-//! ClipFlow capture engine.
+//! Lastshot capture engine.
 //!
 //! Pipeline (all GPU resident, zero CPU readback of pixel data):
 //!
@@ -635,7 +635,7 @@ impl SharedState {
 
     fn fail(&self, msg: impl Into<String>) {
         let msg = msg.into();
-        log::error!("[clipflow::recorder] {msg}");
+        log::error!("[lastshot::recorder] {msg}");
         *self.last_error.write() = Some(msg);
         self.set_state(EngineState::Error);
     }
@@ -868,7 +868,7 @@ impl CaptureEngine {
                 Err(e) => {
                     *self.audio_error.lock() =
                         Some(format!("audio thread could not start: {e}"));
-                    log::warn!("[clipflow::audio] disabled: {e}");
+                    log::warn!("[lastshot::audio] disabled: {e}");
                 }
             }
         } else {
@@ -880,7 +880,7 @@ impl CaptureEngine {
         let thread_cfg = cfg.clone();
         let clock_c = Arc::clone(&clock);
         let handle = std::thread::Builder::new()
-            .name("clipflow-capture".into())
+            .name("lastshot-capture".into())
             .spawn(move || {
                 // Game Mode runs the capture thread at NORMAL so the game's
                 // render thread always wins a scheduling race. Outside Game
@@ -1587,7 +1587,7 @@ mod win {
                     ));
                 }
 
-                // 2. Software fallback keeps ClipFlow usable on old iGPUs; it is
+                // 2. Software fallback keeps Lastshot usable on old iGPUs; it is
                 //    clearly reported to the UI so the user knows why the CPU is busy.
                 let (transform, friendly, hardware) = match chosen {
                     Some((act, name)) => {
@@ -1607,7 +1607,7 @@ mod win {
 
                 if performance_mode && !hardware {
                     log::warn!(
-                        "[clipflow] Game Mode is on but only a software H.264 encoder is available; capture may compete with the game for CPU"
+                        "[lastshot] Game Mode is on but only a software H.264 encoder is available; capture may compete with the game for CPU"
                     );
                 }
 
@@ -2336,7 +2336,7 @@ mod win {
                 }
 
                 if shared.force_device_reset.swap(false, Ordering::AcqRel) {
-                    log::warn!("[clipflow] simulated device reset requested via IPC");
+                    log::warn!("[lastshot] simulated device reset requested via IPC");
                     shared.device_resets.fetch_add(1, Ordering::Relaxed);
                     shared.generation.fetch_add(1, Ordering::AcqRel);
                     shared.set_state(EngineState::Recovering);
@@ -2387,7 +2387,7 @@ mod win {
                                     texture = Some(t);
                                 }
                                 Err(e) => {
-                                    log::warn!("[clipflow] frame cast failed: {e}");
+                                    log::warn!("[lastshot] frame cast failed: {e}");
                                 }
                             }
                         }
@@ -2398,7 +2398,7 @@ mod win {
                         texture = last_texture.clone();
                     }
                     Err(e) if is_device_lost(&e) => {
-                        log::warn!("[clipflow] device lost during acquire: {e}");
+                        log::warn!("[lastshot] device lost during acquire: {e}");
                         let _ = unsafe { gfx.duplication.ReleaseFrame() };
                         shared.device_resets.fetch_add(1, Ordering::Relaxed);
                         shared.generation.fetch_add(1, Ordering::AcqRel);
@@ -2412,7 +2412,7 @@ mod win {
                         continue 'outer;
                     }
                     Err(e) => {
-                        log::warn!("[clipflow] acquire error: {e}");
+                        log::warn!("[lastshot] acquire error: {e}");
                         shared.dropped_frames.fetch_add(1, Ordering::Relaxed);
                         let _ = unsafe { gfx.duplication.ReleaseFrame() };
                         continue;
@@ -2427,7 +2427,7 @@ mod win {
                     if shared.privacy_gate.load(Ordering::Acquire) {
                         was_gated = true;
                     } else if let Err(e) = converter.convert(tex) {
-                        log::warn!("[clipflow] color convert failed: {e}");
+                        log::warn!("[lastshot] color convert failed: {e}");
                         shared.dropped_frames.fetch_add(1, Ordering::Relaxed);
                     } else {
                         if was_gated {
@@ -2456,7 +2456,7 @@ mod win {
                         // from asking for this frame.
                         if let Err(e) = encoder.drain(&mut push) {
                             if !shared.stop_requested.load(Ordering::Acquire) {
-                                log::warn!("[clipflow] encoder drain failed: {e}");
+                                log::warn!("[lastshot] encoder drain failed: {e}");
                             }
                         }
 
@@ -2471,7 +2471,7 @@ mod win {
                                 }
                                 Ok(false) => false,
                                 Err(e) => {
-                                    log::warn!("[clipflow] encoder submit failed: {e}");
+                                    log::warn!("[lastshot] encoder submit failed: {e}");
                                     false
                                 }
                             };
@@ -2483,7 +2483,7 @@ mod win {
 
                         if let Err(e) = drain {
                             if !shared.stop_requested.load(Ordering::Acquire) {
-                                log::warn!("[clipflow] encoder drain failed: {e}");
+                                log::warn!("[lastshot] encoder drain failed: {e}");
                             }
                         }
 

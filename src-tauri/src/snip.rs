@@ -15,7 +15,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::commands::{AppState, EVT_ERROR};
 
-pub const EVT_SNIP_DONE: &str = "clipflow://snip-done";
+pub const EVT_SNIP_DONE: &str = "lastshot://snip-done";
 pub const SNIP_LABEL: &str = "snip";
 
 /// A top-level window's outline, relative to the captured monitor, in

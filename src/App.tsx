@@ -9,8 +9,8 @@ import StatsPanel from "./components/StatsPanel";
 import TitleBar from "./components/TitleBar";
 import { AdvancedButton, useAdvanced } from "./components/ui";
 import { open } from "@tauri-apps/plugin-dialog";
-import { DEFAULT_SETTINGS, clipflow } from "./lib/bridge";
-import { formatBytes, formatDuration, formatRelativeTime } from "./lib/format";
+import { DEFAULT_SETTINGS, lastshot } from "./lib/bridge";
+import { folderName, formatBytes, formatDuration, formatRelativeTime } from "./lib/format";
 import { loadGalleryState, saveGalleryState, type SortKey } from "./lib/galleryState";
 import { PrivacyGateHysteresis, shouldGateForForeground } from "./lib/privacyGate";
 import { decideEco, EcoHysteresis } from "./lib/powerPolicy";
@@ -127,6 +127,8 @@ export default function App() {
   const [sortKey, setSortKey] = useState<SortKey>(initialGallery.sortKey);
   const [audioOnly, setAudioOnly] = useState(initialGallery.audioOnly);
   const [favOnly, setFavOnly] = useState(initialGallery.favOnly);
+  /** "all", "save" (the save folder) or an extra library folder path. */
+  const [folderFilter, setFolderFilter] = useState("all");
   const [tagFilter, setTagFilter] = useState<string | null>(initialGallery.tagFilter);
   const [compact, setCompact] = useState(initialGallery.compact);
   // LOAD MORE pagination: only the first N filtered clips render; the button
@@ -160,7 +162,7 @@ export default function App() {
     }
   });
 
-  const native = clipflow.isTauri();
+  const native = lastshot.isTauri();
   const toastId = useRef(0);
   const mainRef = useRef<HTMLElement | null>(null);
   const settingsRef = useRef(settings);
@@ -229,7 +231,7 @@ export default function App() {
     try {
       // Metadata only: the native probe cache makes this O(files) of stats;
       // thumbnails are decoded lazily per visible card (see GalleryGrid).
-      const list = await clipflow.getClips(false);
+      const list = await lastshot.getClips(false);
       setClips(list);
     } catch (e) {
       pushToast("err", "Could not read clips folder", String(e));
@@ -248,9 +250,9 @@ export default function App() {
       let loaded: AppSettings | null = null;
       try {
         const [s, st, mons] = await Promise.all([
-          clipflow.getSettings(),
-          clipflow.getStats(),
-          clipflow.getMonitors(),
+          lastshot.getSettings(),
+          lastshot.getStats(),
+          lastshot.getMonitors(),
         ]);
         if (cancelled) return;
         loaded = s;
@@ -265,7 +267,7 @@ export default function App() {
       try {
         const days = loaded?.autoCleanupDays ?? 0;
         if (days > 0) {
-          const deleted = await clipflow.cleanupOldClips(days);
+          const deleted = await lastshot.cleanupOldClips(days);
           if (deleted > 0) {
             pushToast(
               "warn",
@@ -281,14 +283,14 @@ export default function App() {
 
       // Silent update probe — OPT-IN, off by default.
       //
-      // ClipFlow's proposition is "no telemetry, no background network", but
+      // Lastshot's proposition is "no telemetry, no background network", but
       // this used to call `check()` unconditionally on every launch, which made
       // that claim untrue: it opens an HTTPS connection to github.com before
       // the user has read anything. The manual button in Settings always
       // works; this only controls the silent startup probe.
-      if (clipflow.isTauri() && loaded?.checkUpdatesOnStartup) {
+      if (lastshot.isTauri() && loaded?.checkUpdatesOnStartup) {
         try {
-          const newer = await clipflow.checkLatestRelease(APP_VERSION);
+          const newer = await lastshot.checkLatestRelease(APP_VERSION);
           if (newer && !cancelled) {
             pushToast(
               "info",
@@ -303,9 +305,9 @@ export default function App() {
 
       // In the browser the Rust autostart does not exist — arm the simulated
       // engine so the deck is alive immediately.
-      if (!clipflow.isTauri()) {
+      if (!lastshot.isTauri()) {
         try {
-          const st = await clipflow.startBuffer(
+          const st = await lastshot.startBuffer(
             DEFAULT_SETTINGS.bufferSeconds,
             DEFAULT_SETTINGS.targetFps,
           );
@@ -331,11 +333,11 @@ export default function App() {
       });
     };
 
-    attach(Promise.resolve(clipflow.onStats((s) => setStats(s))));
-    attach(Promise.resolve(clipflow.onBufferState((s) => setStats(s))));
+    attach(Promise.resolve(lastshot.onStats((s) => setStats(s))));
+    attach(Promise.resolve(lastshot.onBufferState((s) => setStats(s))));
     attach(
       Promise.resolve(
-        clipflow.onClipSaved((payload: ClipSavedPayload) => {
+        lastshot.onClipSaved((payload: ClipSavedPayload) => {
           setClips((prev) => [payload.clip, ...prev.filter((c) => c.path !== payload.clip.path)]);
           setSessionSaves((n) => n + 1);
           setSessionBytes((b) => b + payload.clip.size_bytes);
@@ -359,15 +361,15 @@ export default function App() {
       ),
     );
     attach(
-      Promise.resolve(clipflow.onError((msg) => pushToast("err", "Engine error", String(msg)))),
+      Promise.resolve(lastshot.onError((msg) => pushToast("err", "Engine error", String(msg)))),
     );
     attach(
-      clipflow.onShrinkProgress((p) =>
+      lastshot.onShrinkProgress((p) =>
         setShareProgress((m) => (m.has(p.path) ? new Map(m).set(p.path, p.progress) : m)),
       ),
     );
     attach(
-      clipflow.onSnipDone((d) => {
+      lastshot.onSnipDone((d) => {
         if (d.copied && d.path) {
           pushToast("ok", "Screenshot copied", `Paste it with Ctrl+V. Also saved as ${d.path.split("\\").pop()}.`);
         } else if (d.copied) {
@@ -379,7 +381,7 @@ export default function App() {
     );
     attach(
       Promise.resolve(
-        clipflow.onHotkey((accel) => pushToast("info", `${accel} triggered`)),
+        lastshot.onHotkey((accel) => pushToast("info", `${accel} triggered`)),
       ),
     );
 
@@ -394,7 +396,7 @@ export default function App() {
     async (maxSeconds?: number) => {
       setBusy(true);
       try {
-        const clip = await clipflow.saveInstantReplay(maxSeconds, "ui");
+        const clip = await lastshot.saveInstantReplay(maxSeconds, "ui");
         if (!native) return; // the sim already emitted clip-saved
         setClips((prev) => [clip, ...prev.filter((c) => c.path !== clip.path)]);
         if (settingsRef.current.openTrimmerAfterSave) setActiveClip(clip);
@@ -412,8 +414,8 @@ export default function App() {
     try {
       const armed = stats.state === "buffering" || stats.state === "flushing";
       const next = armed
-        ? await clipflow.stopBuffer()
-        : await clipflow.startBuffer(settings.bufferSeconds, settings.targetFps);
+        ? await lastshot.stopBuffer()
+        : await lastshot.startBuffer(settings.bufferSeconds, settings.targetFps);
       setStats(next);
       pushToast(armed ? "warn" : "ok", armed ? "Buffer disarmed" : "Buffer armed", 
         armed ? "Rolling history released from RAM." : `${settings.bufferSeconds}s rolling window is live.`);
@@ -426,11 +428,11 @@ export default function App() {
 
   // Browser shim for the global hotkey (Tauri registers the real one in Rust).
   useEffect(() => {
-    if (clipflow.isTauri()) return;
+    if (lastshot.isTauri()) return;
     const save = settings.hotkeySave.split("+").map((s) => s.trim().toLowerCase());
     const toggle = settings.hotkeyToggle.split("+").map((s) => s.trim().toLowerCase());
     const onKey = (e: KeyboardEvent) => {
-      if (clipflow.isTauri()) return;
+      if (lastshot.isTauri()) return;
       const pressed = (k: string[]) =>
         k.length >= 2 &&
         k.includes("alt") === e.altKey &&
@@ -440,11 +442,11 @@ export default function App() {
         k.some((t) => e.key.toLowerCase() === t || e.code.toLowerCase() === t);
       if (pressed(save)) {
         e.preventDefault();
-        clipflow.emitLocalHotkey(settings.hotkeySave);
+        lastshot.emitLocalHotkey(settings.hotkeySave);
         void handleSave();
       } else if (pressed(toggle)) {
         e.preventDefault();
-        clipflow.emitLocalHotkey(settings.hotkeyToggle);
+        lastshot.emitLocalHotkey(settings.hotkeyToggle);
         void handleToggle();
       }
     };
@@ -458,7 +460,7 @@ export default function App() {
         // `update_settings` already applies the live buffer change to the
         // running engine, so a second `setBufferSeconds` round-trip here was
         // pure duplication (two IPC calls per slider move).
-        const next = await clipflow.updateSettings(patch);
+        const next = await lastshot.updateSettings(patch);
         setSettings(next);
         // A manual capture tweak means the deck is no longer driven by a
         // profile — drop the active-profile badge until the next apply.
@@ -482,7 +484,7 @@ export default function App() {
       if (busy) return;
       try {
         const prev = settingsRef.current;
-        const next = await clipflow.applyProfile(profileId);
+        const next = await lastshot.applyProfile(profileId);
         setSettings(next);
         setActiveProfileId(profileId);
         const profile = next.profiles.find((p) => p.id === profileId);
@@ -504,7 +506,7 @@ export default function App() {
         // the deck and are usually deliberate, not background activity).
         const exe = gameExe ?? foreground?.exe;
         if (source === "auto" && profile && exe) {
-          void clipflow.notify(
+          void lastshot.notify(
             `${profile.name} profile active`,
             `${exe} — buffer ${next.bufferSeconds}s`,
           );
@@ -519,7 +521,7 @@ export default function App() {
   const saveProfile = useCallback(
     async (profile: CaptureProfile): Promise<boolean> => {
       try {
-        const next = await clipflow.saveProfile(profile);
+        const next = await lastshot.saveProfile(profile);
         setSettings(next);
         pushToast("ok", "Profile saved", `${profile.name || profile.id} · ${profile.bufferSeconds}s buffer`);
         return true;
@@ -534,7 +536,7 @@ export default function App() {
   const deleteProfile = useCallback(
     async (profileId: string) => {
       try {
-        const next = await clipflow.deleteProfile(profileId);
+        const next = await lastshot.deleteProfile(profileId);
         setSettings(next);
         setActiveProfileId((cur) => (cur === profileId ? null : cur));
         pushToast("warn", "Profile deleted", profileId);
@@ -548,7 +550,7 @@ export default function App() {
   const setProfileMap = useCallback(
     async (map: ProfileMapEntry[]) => {
       try {
-        const next = await clipflow.setProfileMap(map);
+        const next = await lastshot.setProfileMap(map);
         setSettings(next);
       } catch (e) {
         pushToast("err", "Could not save game mapping", String(e));
@@ -559,7 +561,7 @@ export default function App() {
 
   const refreshForeground = useCallback(async () => {
     try {
-      const game = await clipflow.getForegroundGame();
+      const game = await lastshot.getForegroundGame();
       setForeground(game);
     } catch {
       /* ignore */
@@ -593,7 +595,7 @@ export default function App() {
       if (cancelled) return;
       let game: ForegroundGame | null = null;
       try {
-        game = await clipflow.getForegroundGame();
+        game = await lastshot.getForegroundGame();
       } catch {
         return;
       }
@@ -620,7 +622,7 @@ export default function App() {
         if (now - focusedSince > 10_000 && now - lastAutosaveAt > 60_000) {
           lastAutosaveAt = now;
           try {
-            await clipflow.saveInstantReplay(30, "autosave", lastFocusedExe);
+            await lastshot.saveInstantReplay(30, "autosave", lastFocusedExe);
             pushToast(
               "ok",
               "Auto-saved on game exit",
@@ -643,7 +645,7 @@ export default function App() {
       // our own deck or the desktop, so the ring is cleared and capture pauses
       // — clips can never contain desktop content. If the foreground query
       // fails (elevated/anti-cheat games deny the query from a non-admin
-      // ClipFlow), we keep recording: breaking Alt+C mid-match is worse than
+      // Lastshot), we keep recording: breaking Alt+C mid-match is worse than
       // an ambiguous frame. Mirrors privacy_should_gate() on the Rust side.
       // Runs AFTER the auto-save check so the last 30 s of a closed game are
       // still flushed before the gate drops the history.
@@ -655,7 +657,7 @@ export default function App() {
         const gate = privacyHysteresis.current!.tick(true, desired);
         if (gate !== null) {
           try {
-            await clipflow.setPrivacyGate(gate);
+            await lastshot.setPrivacyGate(gate);
             privacyHysteresis.current!.commit(gate);
             pushToast(
               "info",
@@ -673,7 +675,7 @@ export default function App() {
         // if a gate was ever armed, then settles to `null`).
         const gate = privacyHysteresis.current!.tick(false, false);
         if (gate !== null) {
-          await clipflow.setPrivacyGate(false);
+          await lastshot.setPrivacyGate(false);
         }
       }
 
@@ -718,7 +720,7 @@ export default function App() {
     if (!settings.adaptiveEco) {
       if (ecoAppliedBuffer.current !== null) {
         ecoAppliedBuffer.current = null;
-        void clipflow.setBufferSeconds(settingsRef.current.bufferSeconds);
+        void lastshot.setBufferSeconds(settingsRef.current.bufferSeconds);
       }
       setEcoState(null);
       setPowerNow(null);
@@ -729,7 +731,7 @@ export default function App() {
       if (cancelled) return;
       let power: PowerState;
       try {
-        power = await clipflow.getPowerState();
+        power = await lastshot.getPowerState();
       } catch {
         return; // telemetry unavailable — try again next poll
       }
@@ -763,7 +765,7 @@ export default function App() {
       // target (e.g. the user changed it in Settings while ECO was active) —
       // re-assert so the chip never lies about what the engine is doing.
       try {
-        await clipflow.setBufferSeconds(target);
+        await lastshot.setBufferSeconds(target);
         ecoAppliedBuffer.current = target;
         if (flip !== null) ecoHysteresis.current!.commit(flip);
         pushToast(
@@ -788,7 +790,7 @@ export default function App() {
   const checkForUpdates = useCallback(async () => {
     if (!native) {
       // Browser preview has no updater — fall back to the Releases page.
-      await clipflow.openReleasesPage();
+      await lastshot.openReleasesPage();
       return;
     }
     // Lastshot does not update itself (no download runs in the background):
@@ -796,7 +798,7 @@ export default function App() {
     setBusy(true);
     setUpdateProgress({ phase: "PENDING", downloaded: 0, total: 0 });
     try {
-      const newer = await clipflow.checkLatestRelease(APP_VERSION);
+      const newer = await lastshot.checkLatestRelease(APP_VERSION);
       if (!newer) {
         pushToast("ok", "Up to date", `Lastshot v${APP_VERSION} is the newest version.`);
         return;
@@ -806,12 +808,12 @@ export default function App() {
         `Lastshot v${newer} is out`,
         "Opening the download page. Run the new installer; your settings and clips stay.",
       );
-      await clipflow.openReleasesPage();
+      await lastshot.openReleasesPage();
     } catch (e) {
       console.warn("[lastshot] update check failed", e);
       pushToast("warn", "Could not check for updates", "Opening the releases page instead.");
       try {
-        await clipflow.openReleasesPage();
+        await lastshot.openReleasesPage();
       } catch {
         /* opener unavailable — the toast already told them what to do */
       }
@@ -837,11 +839,48 @@ export default function App() {
     }
   }, [native, patchSettings, pushToast]);
 
+  const addLibraryFolder = useCallback(async () => {
+    if (!native) {
+      pushToast("info", "Browser preview", "Use the installed app to add folders.");
+      return;
+    }
+    try {
+      const dir = await open({
+        directory: true,
+        multiple: false,
+        title: "Show the clips in this folder in Lastshot",
+      });
+      if (typeof dir !== "string" || !dir) return;
+      const current = settingsRef.current.libraryFolders ?? [];
+      if (dir.toLowerCase() === settingsRef.current.outputDir.toLowerCase()) {
+        pushToast("info", "Already shown", "That is where Lastshot saves clips.");
+        return;
+      }
+      if (current.some((f) => f.toLowerCase() === dir.toLowerCase())) {
+        pushToast("info", "Already added", dir);
+        return;
+      }
+      await patchSettings({ libraryFolders: [...current, dir] });
+      pushToast("ok", "Folder added", `${dir}\nIts clips now show up in Clips.`);
+    } catch (e) {
+      pushToast("err", "Could not add the folder", String(e));
+    }
+  }, [native, patchSettings, pushToast]);
+
+  // Folders changed: rescan so their clips appear (or disappear) right away.
+  const folderKey = (settings.libraryFolders ?? []).join("|");
+  const firstFolderKey = useRef(folderKey);
+  useEffect(() => {
+    if (folderKey === firstFolderKey.current) return;
+    firstFolderKey.current = folderKey;
+    void refreshClips();
+  }, [folderKey, refreshClips]);
+
   const restartEngine = useCallback(async () => {
     setBusy(true);
     try {
-      await clipflow.stopBuffer();
-      const next = await clipflow.startBuffer(settings.bufferSeconds, settings.targetFps);
+      await lastshot.stopBuffer();
+      const next = await lastshot.startBuffer(settings.bufferSeconds, settings.targetFps);
       setStats(next);
       pushToast("ok", "Engine restarted", `${next.encoder.friendly_name}`);
     } catch (e) {
@@ -863,7 +902,7 @@ export default function App() {
   const copyClip = useCallback(
     async (clip: ClipMetadata) => {
       try {
-        await clipflow.copyClip(clip.path);
+        await lastshot.copyClip(clip.path);
         pushToast(
           "ok",
           native ? "Video copied to clipboard" : "Path copied",
@@ -897,7 +936,7 @@ export default function App() {
         "Keep playing or browsing; it lands on the clipboard when done.",
       );
       try {
-        const r = await clipflow.shrinkClip(clip.path, {
+        const r = await lastshot.shrinkClip(clip.path, {
           start: whole ? undefined : range?.start,
           end: whole ? undefined : range?.end,
           copy: true,
@@ -943,7 +982,7 @@ export default function App() {
           : "Keep playing or browsing; the new clip shows up in Clips when done.",
       );
       try {
-        const r = await clipflow.exportClip({
+        const r = await lastshot.exportClip({
           segments,
           crop,
           mode,
@@ -978,13 +1017,13 @@ export default function App() {
   );
 
   const takeScreenshot = useCallback(() => {
-    void clipflow.startSnip().catch((e) => pushToast("err", "Screenshot failed", String(e)));
+    void lastshot.startSnip().catch((e) => pushToast("err", "Screenshot failed", String(e)));
   }, [pushToast]);
 
   const revealClip = useCallback(
     async (clip: ClipMetadata) => {
       try {
-        await clipflow.revealClip(clip.path);
+        await lastshot.revealClip(clip.path);
         if (!native) pushToast("info", "Path copied", clip.path);
       } catch (e) {
         pushToast("err", "Could not open Explorer", String(e));
@@ -1000,7 +1039,7 @@ export default function App() {
   const deleteClip = useCallback(
     async (clip: ClipMetadata) => {
       try {
-        await clipflow.deleteClip(clip.path);
+        await lastshot.deleteClip(clip.path);
         setClips((prev) => prev.filter((c) => c.path !== clip.path));
         if (activeClipRef.current?.path === clip.path) setActiveClip(null);
         pushToast("warn", "Clip deleted", clip.file_name);
@@ -1020,7 +1059,7 @@ export default function App() {
       );
       setActiveClip((c) => (c && c.path === clip.path ? { ...c, favorite: next } : c));
       try {
-        await clipflow.setClipFavorite(clip.path, next);
+        await lastshot.setClipFavorite(clip.path, next);
         pushToast(
           "ok",
           next ? "Added to favourites" : "Removed from favourites",
@@ -1040,7 +1079,7 @@ export default function App() {
       );
       setActiveClip((c) => (c && c.path === clip.path ? { ...c, tags } : c));
       try {
-        await clipflow.setClipTags(clip.path, tags);
+        await lastshot.setClipTags(clip.path, tags);
       } catch (e) {
         pushToast("err", "Could not save tags", String(e));
       }
@@ -1053,7 +1092,7 @@ export default function App() {
       if (!activeClip) return;
       setBusy(true);
       try {
-        const result = await clipflow.trimClip(activeClip.path, start, end, false);
+        const result = await lastshot.trimClip(activeClip.path, start, end, false);
         pushToast(
           "ok",
           `Trimmed in ${result.elapsed_ms.toFixed(0)} ms`,
@@ -1074,7 +1113,7 @@ export default function App() {
     async (clip: ClipMetadata, newName: string) => {
       if (!newName.trim() || newName.trim() === clip.file_name) return;
       try {
-        const path = await clipflow.renameClip(clip.path, newName.trim());
+        const path = await lastshot.renameClip(clip.path, newName.trim());
         const file_name = path.split(/[\\/]/).pop() ?? newName.trim();
         setActiveClip((c) =>
           c?.path === clip.path
@@ -1098,7 +1137,7 @@ export default function App() {
   const openExternalClip = useCallback(
     async (clip: ClipMetadata) => {
       try {
-        await clipflow.openClip(clip.path);
+        await lastshot.openClip(clip.path);
         if (!native) pushToast("info", "No external player in browser preview", clip.path);
       } catch (e) {
         pushToast("err", "Could not open clip", String(e));
@@ -1112,7 +1151,7 @@ export default function App() {
       if (!activeClip) return;
       setBusy(true);
       try {
-        const r = await clipflow.splitClip(activeClip.path, splitSeconds);
+        const r = await lastshot.splitClip(activeClip.path, splitSeconds);
         pushToast(
           "ok",
           "Clip split into 2",
@@ -1133,7 +1172,7 @@ export default function App() {
     async (clip: ClipMetadata, pngBase64: string) => {
       try {
         const base = clip.file_name.replace(/\.mp4$/i, "").replace(/_/g, " ");
-        const path = await clipflow.snapshotToOutput(pngBase64, base);
+        const path = await lastshot.snapshotToOutput(pngBase64, base);
         pushToast(
           "ok",
           "Frame saved as PNG",
@@ -1150,7 +1189,7 @@ export default function App() {
     setConfirmClear(false);
     setBusy(true);
     try {
-      const deleted = await clipflow.deleteAllClips();
+      const deleted = await lastshot.deleteAllClips();
       await refreshClips();
       if (activeClip) setActiveClip(null);
       pushToast(
@@ -1175,6 +1214,10 @@ export default function App() {
       gameFilter === "all" || clips.some((c) => c.game === gameFilter) ? gameFilter : "all";
     const activeTagFilter =
       tagFilter && clips.some((c) => c.tags.includes(tagFilter)) ? tagFilter : null;
+    const activeFolderFilter =
+      folderFilter === "all" || folderFilter === "save" || clips.some((c) => c.folder === folderFilter)
+        ? folderFilter
+        : "all";
     const list = clips.filter((c) => {
       const matchesQuery =
         !q || c.title.toLowerCase().includes(q) || c.file_name.toLowerCase().includes(q);
@@ -1182,7 +1225,10 @@ export default function App() {
       const matchesGame = activeGameFilter === "all" || c.game === activeGameFilter;
       const matchesFav = !favOnly || c.favorite;
       const matchesTag = !activeTagFilter || c.tags.includes(activeTagFilter);
-      return matchesQuery && matchesAudio && matchesGame && matchesFav && matchesTag;
+      const matchesFolder =
+        activeFolderFilter === "all" ||
+        (activeFolderFilter === "save" ? !c.folder : c.folder === activeFolderFilter);
+      return matchesQuery && matchesAudio && matchesGame && matchesFav && matchesTag && matchesFolder;
     });
     const sorted = [...list];
     switch (sortKey) {
@@ -1205,7 +1251,7 @@ export default function App() {
         sorted.sort((a, b) => b.created_unix_ms - a.created_unix_ms);
     }
     return sorted;
-  }, [clips, query, audioOnly, gameFilter, favOnly, tagFilter, sortKey]);
+  }, [clips, query, audioOnly, gameFilter, favOnly, tagFilter, sortKey, folderFilter]);
 
   // Paginated view handed to the grid: filters produce the full sorted list,
   // but only the first `visibleCount` entries render (LOAD MORE reveals the
@@ -1255,7 +1301,7 @@ export default function App() {
     if (paths.length === 0) return;
     setBusy(true);
     try {
-      const n = await clipflow.deleteClips(paths);
+      const n = await lastshot.deleteClips(paths);
       const gone = new Set(paths);
       setClips((prev) => prev.filter((c) => !gone.has(c.path)));
       if (activeClipRef.current && gone.has(activeClipRef.current.path)) {
@@ -1284,7 +1330,7 @@ export default function App() {
       );
       setActiveClip((c) => (c && paths.includes(c.path) ? { ...c, favorite } : c));
       try {
-        const n = await clipflow.setClipsFavorite(paths, favorite);
+        const n = await lastshot.setClipsFavorite(paths, favorite);
         pushToast(
           "ok",
           favorite ? `Added ${n} to favourites` : `Removed ${n} from favourites`,
@@ -1321,8 +1367,8 @@ export default function App() {
       }
       try {
         const n = add
-          ? await clipflow.addClipsTag(paths, clean)
-          : await clipflow.removeClipsTag(paths, clean);
+          ? await lastshot.addClipsTag(paths, clean)
+          : await lastshot.removeClipsTag(paths, clean);
         pushToast(
           "ok",
           add ? `Tagged ${n} clip${n === 1 ? "" : "s"}` : `Removed #${clean} from ${n} clips`,
@@ -1338,7 +1384,7 @@ export default function App() {
     const paths = [...selection.selected];
     if (paths.length === 0) return;
     try {
-      await clipflow.copyClips(paths);
+      await lastshot.copyClips(paths);
       pushToast(
         "ok",
         native ? "Clips copied to clipboard" : "Paths copied",
@@ -1424,7 +1470,7 @@ export default function App() {
   // first page so the new list is explored from the top.
   useEffect(() => {
     setVisibleCount(GALLERY_PAGE_SIZE);
-  }, [query, gameFilter, sortKey, audioOnly, favOnly, tagFilter]);
+  }, [query, gameFilter, sortKey, audioOnly, favOnly, tagFilter, folderFilter]);
 
   // Infinite scroll: a sentinel below the grid auto-loads the next page as it
   // nears the viewport bottom (480 px pre-load keeps scrolling smooth). The
@@ -1522,7 +1568,7 @@ export default function App() {
           </button>
           <button
             type="button"
-            onClick={() => void clipflow.openOutputFolder()}
+            onClick={() => void lastshot.openOutputFolder()}
             title={`Open ${settings.outputDir}`}
             className="flex items-center gap-1.5 rounded-md border border-line bg-surface px-2.5 py-1 text-ink-3 hover:border-accent hover:text-ink transition-colors"
           >
@@ -1602,7 +1648,7 @@ export default function App() {
                         draggable
                         onDragStart={(e) => {
                           e.preventDefault();
-                          void clipflow.startClipDrag(clip.path).catch(() => undefined);
+                          void lastshot.startClipDrag(clip.path).catch(() => undefined);
                         }}
                         title="Click to open. Drag into Discord or a folder to share the file."
                         className="group relative cursor-pointer rounded-lg border border-line bg-surface-3 overflow-hidden hover:border-accent/60 transition-all"
@@ -1679,11 +1725,11 @@ export default function App() {
                   <QuickAction
                     title="Open clips folder"
                     hint={settings.outputDir}
-                    onClick={() => void clipflow.openOutputFolder()}
+                    onClick={() => void lastshot.openOutputFolder()}
                   />
                   <QuickAction
                     title="Open screenshots folder"
-                    onClick={() => void clipflow.openScreenshotsFolder()}
+                    onClick={() => void lastshot.openScreenshotsFolder()}
                   />
                 </div>
                 {(stats.last_error || stats.audio_error) && (
@@ -1748,6 +1794,23 @@ export default function App() {
                     <option value="longest" className="bg-app">Longest</option>
                     <option value="shortest" className="bg-app">Shortest</option>
                   </select>
+
+                  {(settings.libraryFolders ?? []).length > 0 && (
+                    <select
+                      value={folderFilter}
+                      onChange={(e) => setFolderFilter(e.target.value)}
+                      title="Which folder's clips to show"
+                      className="max-w-[12rem] rounded-lg border border-line bg-surface px-2.5 py-1.5 text-[11px] text-ink outline-none transition-colors hover:border-line-3 focus:border-accent"
+                    >
+                      <option value="all" className="bg-app">All folders</option>
+                      <option value="save" className="bg-app">Lastshot clips</option>
+                      {settings.libraryFolders.map((f) => (
+                        <option key={f} value={f} className="bg-app">
+                          📁 {folderName(f)}
+                        </option>
+                      ))}
+                    </select>
+                  )}
 
                   <button
                     type="button"
@@ -1845,7 +1908,7 @@ export default function App() {
                       </button>
                       <button
                         type="button"
-                        onClick={() => void clipflow.openOutputFolder()}
+                        onClick={() => void lastshot.openOutputFolder()}
                         className="rounded-lg border border-line bg-surface px-2.5 py-1 text-[11px] text-ink-3 hover:border-line-3 hover:text-ink transition-colors"
                       >
                         Open folder
@@ -2107,11 +2170,12 @@ export default function App() {
               power={powerNow}
               onChange={(p) => void patchSettings(p)}
               onRestartEngine={() => void restartEngine()}
-              onOpenFolder={() => void clipflow.openOutputFolder()}
+              onOpenFolder={() => void lastshot.openOutputFolder()}
               onChooseFolder={() => void chooseOutputFolder()}
+              onAddLibraryFolder={() => void addLibraryFolder()}
               updateProgress={updateProgress}
               onCheckForUpdates={() => void checkForUpdates()}
-              onOpenScreenshots={() => void clipflow.openScreenshotsFolder()}
+              onOpenScreenshots={() => void lastshot.openScreenshotsFolder()}
               diagnostics={
                 <PipelinePanel
                   stats={stats}
@@ -2267,7 +2331,7 @@ function LazyThumbnail({ clip }: { clip: ClipMetadata }) {
         setSrc(cached);
         return;
       }
-      void clipflow.getClipThumbnail(clip.path, 1).then((thumb) => {
+      void lastshot.getClipThumbnail(clip.path, 1).then((thumb) => {
         if (!cancelled && thumb) {
           cacheThumbnail(clip.path, thumb);
           setSrc(thumb);

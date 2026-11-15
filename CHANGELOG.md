@@ -2,6 +2,20 @@
 
 All notable changes to **Lastshot** (and, before 1.7.1, to **ClipFlow**, which Lastshot is forked from) are documented here. The project follows [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **More folders in Clips.** Settings › Clips & storage › *Also show clips from*: add any folder (another recorder's clips, an old archive, a second drive). Its videos show up in Clips with a 📁 badge and a folder filter, and can be edited, shared, starred and joined like your own. Lastshot keeps saving only to its save location; edits of those clips land there too, and auto-delete / Delete all never touch the extra folders.
+
+### Changed
+
+- **Lastshot is fully separate from ClipFlow.** It no longer copies ClipFlow's settings, favorites or tags on first run, no longer has access to the ClipFlow clips folder, and new installs save to `Videos\Lastshot`. Existing Lastshot settings are kept; to see old ClipFlow clips, add `Videos\ClipFlow` as an extra folder.
+
+### Fixed
+
+- Privacy mode now recognises Lastshot's own window (it still looked for ClipFlow's).
+
 ## [1.8.0] - 2026-11-15
 
 ### Added

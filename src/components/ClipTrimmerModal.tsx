@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { assetUrl, clipflow } from "../lib/bridge";
+import { assetUrl, lastshot } from "../lib/bridge";
 import type { ClipMetadata, CropRect, ExportSegment } from "../lib/types";
 import {
   addCut,
@@ -382,7 +382,7 @@ export default function ClipTrimmerModal({
     const v = videoRef.current;
     if (!v) return;
     void run("Capturing frame…", () =>
-      clipflow
+      lastshot
         .extractFramePng(clip.path, playhead, 0)
         .then((png) => onSnapshot(png)),
     );

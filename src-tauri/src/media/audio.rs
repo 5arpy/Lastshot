@@ -83,7 +83,7 @@ impl AudioCapture {
             let clock_c = Arc::clone(&clock);
             let gate_c = Arc::clone(&privacy_gate);
             let h = std::thread::Builder::new()
-                .name("clipflow-audio".into())
+                .name("lastshot-audio".into())
                 .spawn(move || {
                     imp::run(
                         system,
@@ -210,7 +210,7 @@ mod imp {
             match enumerator.GetDevice(&hstring) {
                 Ok(d) => d,
                 Err(e) => {
-                    log::warn!("[clipflow::audio] specific capture device '{id}' not found ({e}), falling back to default");
+                    log::warn!("[lastshot::audio] specific capture device '{id}' not found ({e}), falling back to default");
                     enumerator
                         .GetDefaultAudioEndpoint(eCapture, eConsole)
                         .or_else(|_| enumerator.GetDefaultAudioEndpoint(eCapture, eCommunications))?
@@ -308,7 +308,7 @@ mod imp {
             let packet = match ep.capture.GetNextPacketSize() {
                 Ok(p) => p,
                 Err(e) => {
-                    log::warn!("[clipflow::audio] GetNextPacketSize failed (device may be reset/disconnected): {e}");
+                    log::warn!("[lastshot::audio] GetNextPacketSize failed (device may be reset/disconnected): {e}");
                     return false;
                 }
             };
@@ -327,7 +327,7 @@ mod imp {
                 Some(&mut dev_pos),
                 Some(&mut qpc),
             ) {
-                log::warn!("[clipflow::audio] GetBuffer failed: {e}");
+                log::warn!("[lastshot::audio] GetBuffer failed: {e}");
                 return false;
             }
             if qpc_first.is_none() && qpc != 0 {
@@ -522,7 +522,7 @@ mod imp {
                     format!("microphone unavailable: {e}")
                 };
                 *status.lock() = Some(msg.clone());
-                log::warn!("[clipflow::audio] {msg}");
+                log::warn!("[lastshot::audio] {msg}");
                 Err(())
             }
         }
@@ -618,7 +618,7 @@ mod imp {
                             Err(e) => {
                                 *status.lock() =
                                     Some(format!("AAC encoder unavailable: {e}"));
-                                log::warn!("[clipflow::audio] AAC MFT: {e}");
+                                log::warn!("[lastshot::audio] AAC MFT: {e}");
                             }
                         }
                     }

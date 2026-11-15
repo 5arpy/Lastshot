@@ -3,7 +3,7 @@ import { Component, type ErrorInfo, type ReactNode } from "react";
 /**
  * Last-resort error boundary.
  *
- * ClipFlow runs in the tray while a game is on screen, so an uncaught render
+ * Lastshot runs in the tray while a game is on screen, so an uncaught render
  * exception used to mean a white window and no way back except killing the
  * process — which also drops the rolling buffer. This keeps the shell alive and
  * gives the user a recovery path plus copyable diagnostics.
@@ -26,8 +26,8 @@ export default class ErrorBoundary extends Component<Props, State> {
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
     this.setState({ info });
-    // Local log only — ClipFlow never reports anywhere.
-    console.error("[clipflow] unhandled render error", error, info.componentStack);
+    // Local log only — Lastshot never reports anywhere.
+    console.error("[lastshot] unhandled render error", error, info.componentStack);
   }
 
   private diagnostics = (): string => {

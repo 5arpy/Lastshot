@@ -28,7 +28,7 @@ export class PrivacyGateHysteresis {
    *
    * @param privacyEnabled the Privacy mode setting.
    * @param desiredGate what the current foreground implies: `true` pauses
-   *   (desktop / ClipFlow focused), `false` records (game focused).
+   *   (desktop / Lastshot focused), `false` records (game focused).
    * @returns the gate value the caller should apply to the engine, or `null`
    *   when nothing should change.
    */
@@ -77,12 +77,12 @@ export class PrivacyGateHysteresis {
 
 /**
  * Mirrors the Rust `privacy_should_gate()`: pause only when the foreground is
- * *positively* ClipFlow itself or the desktop (explorer.exe). A failed query
+ * *positively* Lastshot itself or the desktop (explorer.exe). A failed query
  * (`null` / empty) means "keep recording" — breaking Alt+C for an undetected
  * game is worse than a rare ambiguous frame.
  */
 export function shouldGateForForeground(exe: string | null | undefined): boolean {
   if (!exe) return false;
   const lower = exe.toLowerCase();
-  return lower.startsWith("clipflow") || lower.startsWith("explorer");
+  return lower.startsWith("lastshot") || lower.startsWith("explorer");
 }

@@ -38,6 +38,10 @@ pub struct ClipMetadata {
     /// User-added tags (sidecar `clip_meta.json`).
     #[serde(default)]
     pub tags: Vec<String>,
+    /// The extra library folder this clip was found in; `None` for the save
+    /// folder.
+    #[serde(default)]
+    pub folder: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +57,68 @@ pub struct TrimResult {
 
 pub fn scan_directory(dir: &Path, with_thumbnails: bool) -> RResult<Vec<ClipMetadata>> {
     scan_directory_impl(dir, with_thumbnails, &ProbeCache::path())
+}
+
+/// The save folder plus the extra library folders, as one list (newest
+/// first). Missing extra folders (an unplugged drive) are skipped, never
+/// created; a clip reachable from two roots is listed once.
+pub fn scan_library(
+    save_dir: &Path,
+    extra: &[std::path::PathBuf],
+    with_thumbnails: bool,
+) -> RResult<Vec<ClipMetadata>> {
+    scan_library_impl(save_dir, extra, with_thumbnails, &ProbeCache::path())
+}
+
+fn scan_library_impl(
+    save_dir: &Path,
+    extra: &[std::path::PathBuf],
+    with_thumbnails: bool,
+    cache_path: &Path,
+) -> RResult<Vec<ClipMetadata>> {
+    if !save_dir.exists() {
+        std::fs::create_dir_all(save_dir)?;
+    }
+    let mut cache = ProbeCache::load_from(cache_path);
+    let mut clips = Vec::new();
+    let mut dirty = false;
+    let mut seen = std::collections::HashSet::new();
+    scan_into(save_dir, save_dir, 0, with_thumbnails, &mut clips, &mut cache, &mut seen, &mut dirty)?;
+    let mut listed: std::collections::HashSet<String> =
+        clips.iter().map(|c| c.path.to_lowercase()).collect();
+    for root in extra {
+        if !root.is_dir() {
+            continue;
+        }
+        let mut found = Vec::new();
+        if let Err(e) =
+            scan_into(root, root, 0, with_thumbnails, &mut found, &mut cache, &mut seen, &mut dirty)
+        {
+            log::warn!("[lastshot] could not scan {}: {e}", root.display());
+            continue;
+        }
+        let label = root.to_string_lossy().to_string();
+        for mut c in found {
+            if listed.insert(c.path.to_lowercase()) {
+                c.folder = Some(label.clone());
+                clips.push(c);
+            }
+        }
+    }
+    // Only prune cache entries whose file is really gone, so an unplugged
+    // drive does not throw away its probe results.
+    let before = cache.entries.len();
+    cache
+        .entries
+        .retain(|k, _| seen.contains(k) || Path::new(k).exists());
+    if cache.entries.len() != before {
+        dirty = true;
+    }
+    if dirty {
+        cache.save_to(cache_path);
+    }
+    clips.sort_by(|a, b| b.created_unix_ms.cmp(&a.created_unix_ms));
+    Ok(clips)
 }
 
 /// Shared scan core with an injectable cache file path: `scan_directory` uses
@@ -188,6 +254,7 @@ fn scan_into(
             thumbnail,
             favorite: false,
             tags: Vec::new(),
+            folder: None,
         });
     }
     Ok(())
@@ -297,11 +364,15 @@ impl Default for ProbeResult {
 }
 
 pub fn suggested_trim_path(source: &Path) -> PathBuf {
+    suggested_trim_path_in(source.parent().unwrap_or_else(|| Path::new(".")), source)
+}
+
+/// Like `suggested_trim_path`, but in `dir`.
+pub fn suggested_trim_path_in(dir: &Path, source: &Path) -> PathBuf {
     let stem = source
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "clip".into());
-    let dir = source.parent().unwrap_or_else(|| Path::new("."));
     let mut candidate = dir.join(format!("{stem}_trim.mp4"));
     let mut n = 2;
     while candidate.exists() {
@@ -763,7 +834,7 @@ mod tests {
     /// Unique temp dir per test process so parallel runs never collide.
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "clipflow-lib-test-{}-{tag}",
+            "lastshot-lib-test-{}-{tag}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();

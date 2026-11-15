@@ -10,7 +10,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::commands::{clipboard, AppState};
 use crate::media::shrink::{self, Crop, Segment, ShrinkResult, Target};
 
-pub const EVT_SHRINK_PROGRESS: &str = "clipflow://shrink-progress";
+pub const EVT_SHRINK_PROGRESS: &str = "lastshot://shrink-progress";
 
 #[derive(Clone, Serialize)]
 struct ShrinkProgress {
@@ -38,10 +38,7 @@ pub async fn shrink_clip(
     let target_bytes = (target_mb as f64 * 1_000_000.0) as u64;
     let source = PathBuf::from(&path);
     let dir = if keep {
-        source
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(crate::paths::share_temp_dir)
+        state.edit_dir_for(&source)
     } else {
         crate::paths::share_temp_dir()
     };
@@ -142,10 +139,8 @@ pub async fn export_clip(
                 let stem = format!("Lastshot_{}_joined", chrono::Local::now().format("%Y-%m-%d_%H-%M-%S"));
                 (Target::Quality, unique(&dir, &stem))
             } else {
-                let dir = first_path
-                    .parent()
-                    .map(|p| p.to_path_buf())
-                    .ok_or("clip has no folder")?;
+                let dir = state.edit_dir_for(&first_path);
+                std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
                 let stem = first_path
                     .file_stem()
                     .map(|s| s.to_string_lossy().to_string())

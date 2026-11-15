@@ -7,7 +7,7 @@
  * bounded, key-frame-aligned history. Pressing Alt+C flushes the older
  * recorder, producing a real, playable clip you can scrub in the trimmer.
  *
- * When ClipFlow runs inside Tauri this file is never used — `bridge.ts`
+ * When Lastshot runs inside Tauri this file is never used — `bridge.ts`
  * routes every call to the Rust IPC commands instead.
  */
 
@@ -174,7 +174,7 @@ export class SimEngine {
     ctx.strokeRect(24, 24, 300, 92);
     ctx.fillStyle = "#5eeaff";
     ctx.font = "600 22px ui-monospace, monospace";
-    ctx.fillText("CLIPFLOW · SYNTHETIC FEED", 40, 58);
+    ctx.fillText("LASTSHOT · SYNTHETIC FEED", 40, 58);
     ctx.fillStyle = "#e6ecff";
     ctx.font = "500 16px ui-monospace, monospace";
     ctx.fillText(`T+${((t - this.startedAt) / 1000).toFixed(2)}s`, 40, 84);
@@ -445,7 +445,7 @@ export class SimEngine {
     ).padStart(2, "0")}_${String(now.getHours()).padStart(2, "0")}-${String(
       now.getMinutes(),
     ).padStart(2, "0")}-${String(now.getSeconds()).padStart(2, "0")}`;
-    const fileName = `ClipFlow_${stamp}.mp4`;
+    const fileName = `Lastshot_${stamp}.mp4`;
 
     // Per-game tag mirrors the native subfolder behaviour.
     const game = this.organizeByGame
@@ -455,8 +455,8 @@ export class SimEngine {
     const clip: ClipMetadata = {
       id: `${fileName}-${Date.now()}`,
       path: game
-        ? `C:\\Users\\You\\Videos\\ClipFlow\\${game}\\${fileName}`
-        : `C:\\Users\\You\\Videos\\ClipFlow\\${fileName}`,
+        ? `C:\\Users\\You\\Videos\\Lastshot\\${game}\\${fileName}`
+        : `C:\\Users\\You\\Videos\\Lastshot\\${fileName}`,
       file_name: fileName,
       title: `Clip ${stamp.replace("_", " ")}`,
       duration_seconds: duration,

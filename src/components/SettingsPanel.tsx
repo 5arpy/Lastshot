@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { clipflow } from "../lib/bridge";
+import { lastshot } from "../lib/bridge";
 import type {
   AppSettings,
   AudioDevice,
@@ -25,6 +25,8 @@ interface Props {
   onRestartEngine: () => void;
   onOpenFolder: () => void;
   onChooseFolder: () => void;
+  /** Picks a folder to add to "Also show clips from". */
+  onAddLibraryFolder: () => void;
   updateProgress?: UpdateProgress | null;
   onCheckForUpdates: () => void;
   onOpenScreenshots: () => void;
@@ -176,6 +178,7 @@ export default function SettingsPanel({
   onRestartEngine,
   onOpenFolder,
   onChooseFolder,
+  onAddLibraryFolder,
   updateProgress,
   onCheckForUpdates,
   onOpenScreenshots,
@@ -208,7 +211,7 @@ export default function SettingsPanel({
   const refreshAudioDevices = async () => {
     setScanningDevices(true);
     try {
-      setAudioDevices(await clipflow.getAudioInputDevices());
+      setAudioDevices(await lastshot.getAudioInputDevices());
     } catch {
       /* keep the last list */
     } finally {
@@ -600,7 +603,43 @@ export default function SettingsPanel({
             </button>
           </div>
         </Row>
-        <Row label="Delete old clips" hint="Runs when Lastshot starts. Starred clips are never deleted.">
+        <Row
+          label="Also show clips from"
+          hint="Videos in these folders appear in Clips, ready to edit and share. Edits are saved to the save location; auto-delete and Delete all never touch these folders."
+        >
+          <button
+            type="button"
+            onClick={onAddLibraryFolder}
+            className="rounded border border-line bg-surface-2 px-3 py-1 text-[11px] font-medium text-ink hover:border-accent"
+          >
+            Add folder
+          </button>
+        </Row>
+        {settings.libraryFolders.length > 0 && (
+          <ul className="mb-2 space-y-1">
+            {settings.libraryFolders.map((f) => (
+              <li
+                key={f}
+                className="flex items-center justify-between gap-2 rounded-md border border-line bg-surface-2 px-2.5 py-1.5 text-[11px] text-ink-2"
+              >
+                <span className="truncate" title={f}>
+                  📁 {f}
+                </span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    onChange({ libraryFolders: settings.libraryFolders.filter((x) => x !== f) })
+                  }
+                  title="Stop showing clips from this folder (the files stay where they are)"
+                  className="shrink-0 rounded px-1.5 text-ink-3 hover:text-danger"
+                >
+                  Remove
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        <Row label="Delete old clips" hint="Runs when Lastshot starts. Only the save location; starred clips are never deleted.">
           <Choice
             options={CLEANUP_PRESETS.map((p) => ({ value: p.days, label: p.label }))}
             value={settings.autoCleanupDays}
@@ -643,7 +682,7 @@ export default function SettingsPanel({
             <Row label="Quit Lastshot" hint="Stops recording and removes the tray icon too.">
               <button
                 type="button"
-                onClick={() => void clipflow.quit()}
+                onClick={() => void lastshot.quit()}
                 className="rounded-lg border border-red-500/30 bg-red-500/10 px-3.5 py-1.5 text-[11px] font-medium text-danger hover:border-red-400 hover:bg-red-500/20"
               >
                 Quit

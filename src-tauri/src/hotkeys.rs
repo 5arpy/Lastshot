@@ -147,6 +147,7 @@ pub fn clip_from_write(
         thumbnail: None,
         favorite: false,
         tags: Vec::new(),
+        folder: None,
     }
 }
 
@@ -189,7 +190,7 @@ pub fn publish_saved_clip(
 
 /// The deck itself or the desktop has focus (lower-case exe name).
 pub fn is_own_or_desktop(exe: &str) -> bool {
-    exe.starts_with("lastshot") || exe.starts_with("clipflow") || exe.starts_with("explorer")
+    exe.starts_with("lastshot") || exe.starts_with("explorer")
 }
 
 /// Fire-and-forget flush. Never blocks the hook thread.
@@ -254,7 +255,7 @@ pub fn trigger_save(app: AppHandle) {
             Ok(Ok((write, focused))) => {
                 // Never steal focus from a fullscreen game. Raising the deck
                 // mid-match minimises/pauses exclusive-fullscreen games, which
-                // is exactly what the user reported. Only raise ClipFlow when
+                // is exactly what the user reported. Only raise Lastshot when
                 // the foreground is *explicitly* known to be our own window or
                 // the desktop; when a game has focus — or the query fails and
                 // we cannot tell (conservative default) — confirm the save

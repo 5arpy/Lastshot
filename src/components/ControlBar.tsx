@@ -45,6 +45,12 @@ function Btn({
 
 const ICON = "h-4 w-4 fill-none stroke-current";
 
+/** 12.3 MB / 1.24 GB */
+function sizeText(bytes: number): string {
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(2)} GB`;
+  return `${(bytes / 1e6).toFixed(bytes >= 1e8 ? 0 : 1)} MB`;
+}
+
 /**
  * The small always-on-top bar shown while recording (or always, if chosen in
  * Settings). Windows leaves it out of every capture, so it never appears in
@@ -54,6 +60,9 @@ export default function ControlBar() {
   const [state, setState] = useState<BarState | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Discard asks once: the first click arms it for a few seconds.
+  const [armed, setArmed] = useState(false);
+  const [flash, setFlash] = useState<string | null>(null);
   // Local clock between backend updates: seconds at `at`.
   const base = useRef({ seconds: 0, at: Date.now() });
   const [, tick] = useState(0);
@@ -91,6 +100,21 @@ export default function ControlBar() {
   };
 
   const rec = state?.recording ?? null;
+  useEffect(() => {
+    if (!armed) return;
+    const t = setTimeout(() => setArmed(false), 3500);
+    return () => clearTimeout(t);
+  }, [armed]);
+  useEffect(() => {
+    if (!rec) setArmed(false);
+  }, [rec]);
+
+  const mark = () =>
+    void run(async () => {
+      const n = await lastshot.addMarker();
+      setFlash(`Marked (${n})`);
+      setTimeout(() => setFlash(null), 1200);
+    });
   const seconds =
     rec && !rec.paused ? base.current.seconds + (Date.now() - base.current.at) / 1000 : base.current.seconds;
 
@@ -107,11 +131,22 @@ export default function ControlBar() {
         <span className="min-w-0 flex-1 truncate text-[11px] text-amber-300" title={error}>
           {error}
         </span>
+      ) : state?.finishing != null ? (
+        <span className="flex min-w-0 flex-1 items-center gap-2 text-[12px] text-white/85">
+          <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-[#6b80e4]" />
+          Cutting the recording to the area… {Math.round(state.finishing * 100)}%
+        </span>
       ) : rec ? (
         <>
           <span data-tauri-drag-region className="flex min-w-[78px] items-center gap-1.5 font-mono text-[13px] tabular-nums">
             <span className={`h-2.5 w-2.5 rounded-full ${rec.paused ? "bg-amber-400" : "animate-pulse bg-red-500"}`} />
             {clockTime(seconds)}
+          </span>
+          <span data-tauri-drag-region className="flex flex-col leading-tight text-[10px] text-white/50">
+            <span data-tauri-drag-region title={state?.area ? "Recording only this area" : "Recording the whole screen"}>
+              {state?.area ?? "Full screen"}
+            </span>
+            <span data-tauri-drag-region title="File size so far">{sizeText(state?.bytes ?? 0)}</span>
           </span>
           <Btn
             title={rec.paused ? "Resume" : "Pause"}
@@ -124,6 +159,12 @@ export default function ControlBar() {
               <svg viewBox="0 0 16 16" className="h-4 w-4 fill-current"><path d="M4.5 3h2.5v10H4.5zM9 3h2.5v10H9z" /></svg>
             )}
           </Btn>
+          <Btn title="Mark this moment (it shows on the editor timeline)" onClick={mark} disabled={busy}>
+            <svg viewBox="0 0 16 16" className={ICON} strokeWidth="1.5">
+              <path d="M4 14V2.5M4 3h8l-2 3 2 3H4" strokeLinejoin="round" />
+            </svg>
+            {flash ?? (state?.markers ? state.markers : null)}
+          </Btn>
           <Btn
             title={`Stop and save (${state?.hotkeyRecord ?? ""})`}
             tone="red"
@@ -132,6 +173,17 @@ export default function ControlBar() {
           >
             <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 fill-current"><rect x="3" y="3" width="10" height="10" rx="1.5" /></svg>
             Stop
+          </Btn>
+          <Btn
+            title={armed ? "Click again to delete this recording" : "Stop and delete (asks first)"}
+            tone={armed ? "red" : "plain"}
+            onClick={() => (armed ? void run(() => lastshot.discardRecording()) : setArmed(true))}
+            disabled={busy}
+          >
+            <svg viewBox="0 0 16 16" className={ICON} strokeWidth="1.5">
+              <path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.7 9h5.6l.7-9" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            {armed && "Delete?"}
           </Btn>
         </>
       ) : (
@@ -143,6 +195,13 @@ export default function ControlBar() {
           >
             <span className="h-2.5 w-2.5 rounded-full bg-red-500" />
             Record
+          </Btn>
+          <Btn title="Pick an area or window, then record only that" onClick={() => void run(() => lastshot.startSnip("rec"))} disabled={busy}>
+            <svg viewBox="0 0 16 16" className={ICON} strokeWidth="1.5">
+              <path d="M2 5V3a1 1 0 0 1 1-1h2M11 2h2a1 1 0 0 1 1 1v2M14 11v2a1 1 0 0 1-1 1h-2M5 14H3a1 1 0 0 1-1-1v-2" strokeLinecap="round" />
+              <circle cx="8" cy="8" r="2.2" className="fill-red-500 stroke-none" />
+            </svg>
+            Area
           </Btn>
           <Btn
             title={`Save the last moments (${state?.hotkeySave ?? ""})`}
@@ -178,6 +237,11 @@ export default function ControlBar() {
         <svg viewBox="0 0 16 16" className={ICON} strokeWidth="1.5">
           <rect x="2" y="3" width="12" height="10" rx="1.5" />
           <path d="M2 6h12" />
+        </svg>
+      </Btn>
+      <Btn title="Hide this bar until the next recording" onClick={() => void lastshot.hideBar()}>
+        <svg viewBox="0 0 16 16" className={ICON} strokeWidth="1.5">
+          <path d="M4 8h8" strokeLinecap="round" />
         </svg>
       </Btn>
     </div>

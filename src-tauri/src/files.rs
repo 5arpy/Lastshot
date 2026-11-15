@@ -145,7 +145,7 @@ pub async fn open_video_file(app: AppHandle, path: String) -> Result<ClipMetadat
         Ok(ClipMetadata {
             id: format!("file-{created}-{}", meta.len()),
             path: path.clone(),
-            title: file_name.trim_end_matches(".mp4").replace('_', " "),
+            title: crate::media::library::pretty_title(&file_name),
             file_name,
             duration_seconds: probe.duration_seconds,
             size_bytes: meta.len(),
@@ -159,6 +159,7 @@ pub async fn open_video_file(app: AppHandle, path: String) -> Result<ClipMetadat
             favorite: false,
             tags: Vec::new(),
             folder: p.parent().map(|d| d.to_string_lossy().to_string()),
+            markers: Vec::new(),
         })
     })
     .await

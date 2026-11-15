@@ -151,7 +151,7 @@ pub fn clip_from_write(
         ),
         path: write.path.clone(),
         file_name: write.file_name.clone(),
-        title: write.file_name.trim_end_matches(".mp4").replace('_', " "),
+        title: crate::media::library::pretty_title(&write.file_name),
         duration_seconds: write.duration_seconds,
         size_bytes: write.size_bytes,
         created_unix_ms: chrono::Utc::now().timestamp_millis(),
@@ -166,6 +166,7 @@ pub fn clip_from_write(
         favorite: false,
         tags: Vec::new(),
         folder: None,
+        markers: Vec::new(),
     }
 }
 

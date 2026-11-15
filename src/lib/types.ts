@@ -82,6 +82,8 @@ export interface ClipMetadata {
   tags: string[];
   /** The extra library folder this clip is in; null/absent = the save folder. */
   folder?: string | null;
+  /** Moments marked while recording, seconds. */
+  markers?: number[];
   /** Browser-simulation only: object URL for the preview player. */
   preview_url?: string;
 }
@@ -143,6 +145,8 @@ export interface SnipCapture {
   width: number;
   height: number;
   windows: SnipWindowRect[];
+  /** Tab the snip bar opens on: "shot" (screenshot) or "rec" (record an area). */
+  start_mode?: "shot" | "rec";
 }
 
 export interface SnipDone {
@@ -298,6 +302,14 @@ export interface BarState {
   hotkeyRecord: string;
   hotkeySave: string;
   hotkeySnip: string;
+  /** Size of the recorded area ("1280×720"); null = whole screen. */
+  area?: string | null;
+  /** Moments marked so far in this recording. */
+  markers?: number;
+  /** Recording file size so far. */
+  bytes?: number;
+  /** 0-1 while an area recording is being cropped after stop. */
+  finishing?: number | null;
 }
 
 /** Space on one drive. */

@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { AppSettings, BarState, DiskInfo, EngineStats } from "../lib/types";
 import { formatBytes } from "../lib/format";
 import { cn } from "../utils/cn";
@@ -20,6 +20,10 @@ interface Props {
   onStartRecording: () => void;
   onStopRecording: () => void;
   onPauseRecording: (paused: boolean) => void;
+  /** Opens the snip bar on Record: pick an area or window to record. */
+  onRecordArea: () => void;
+  onMarker: () => void;
+  onDiscardRecording: () => void;
   onScreenshot: () => void;
   onOpenSettings: (section: string) => void;
   onControlBar: (mode: AppSettings["controlBar"]) => void;
@@ -132,6 +136,9 @@ export default function HomeDashboard({
   onStartRecording,
   onStopRecording,
   onPauseRecording,
+  onRecordArea,
+  onMarker,
+  onDiscardRecording,
   onScreenshot,
   onOpenSettings,
   onControlBar,
@@ -144,6 +151,13 @@ export default function HomeDashboard({
   const micProblem = stats.audio_mic && /mic/.test(err) ? stats.audio_error : null;
   const pcProblem = stats.audio_system && stats.audio_error && !micProblem ? stats.audio_error : null;
   const lowDisk = disk && (disk.freeBytes < 5e9 || disk.freeBytes / disk.totalBytes < 0.05);
+  // Delete asks once: the first click arms it for a few seconds.
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (!armed) return;
+    const t = setTimeout(() => setArmed(false), 3500);
+    return () => clearTimeout(t);
+  }, [armed]);
 
   const status = stats.privacy_active
     ? { dot: "bg-amber-400", text: "Instant replay is paused by privacy mode (no game in front)" }
@@ -248,11 +262,18 @@ export default function HomeDashboard({
 
         <ActionCard
           title="Record screen"
-          hint={rec ? "Recording. Press the shortcut again to stop." : "Records until you stop it. No time limit."}
+          hint={
+            bar?.finishing != null
+              ? `Cutting the recording to the area… ${Math.round(bar.finishing * 100)}%`
+              : rec
+                ? `Recording ${bar?.area ? `an area (${bar.area})` : "the whole screen"} · ${formatBytes(bar?.bytes ?? 0)}. Press the shortcut again to stop.`
+                : "The whole screen, or just an area or window. No time limit."
+          }
           hotkey={settings.hotkeyRecord}
           tone={rec ? "live" : "plain"}
         >
           {rec ? (
+            <>
             <div className="flex items-center gap-2">
               <span className="flex flex-1 items-center gap-2 font-mono text-[18px] font-semibold tabular-nums text-ink">
                 <span className={cn("h-3 w-3 rounded-full", rec.paused ? "bg-amber-400" : "animate-pulse bg-red-500")} />
@@ -275,16 +296,61 @@ export default function HomeDashboard({
                 Stop &amp; save
               </button>
             </div>
+            <div className="flex items-center gap-2 text-[11px]">
+              <button
+                type="button"
+                onClick={onMarker}
+                title="Mark this moment; marks show on the editor timeline"
+                className="flex-1 rounded-md border border-line bg-surface-2 px-2 py-1 font-medium text-ink-2 hover:border-line-3 hover:text-ink"
+              >
+                ⚑ Mark moment{bar?.markers ? ` (${bar.markers})` : ""}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (armed) {
+                    setArmed(false);
+                    onDiscardRecording();
+                  } else setArmed(true);
+                }}
+                disabled={busy}
+                className={cn(
+                  "flex-1 rounded-md border px-2 py-1 font-medium",
+                  armed
+                    ? "border-red-500 bg-red-500 text-white"
+                    : "border-line bg-surface-2 text-ink-3 hover:border-red-500/50 hover:text-danger",
+                )}
+              >
+                {armed ? "Click again to delete" : "Discard"}
+              </button>
+            </div>
+            </>
           ) : (
-            <button
-              type="button"
-              onClick={onStartRecording}
-              disabled={busy || starting}
-              className="flex w-full items-center justify-center gap-2 rounded-lg border border-red-500/50 bg-red-500/10 px-3 py-2.5 text-[13px] font-semibold text-danger transition-colors hover:bg-red-500/20 disabled:opacity-50"
-            >
-              <span className="h-2.5 w-2.5 rounded-full bg-red-500" />
-              Start recording
-            </button>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={onStartRecording}
+                disabled={busy || starting}
+                title="Record the whole screen"
+                className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-red-500/50 bg-red-500/10 px-3 py-2.5 text-[13px] font-semibold text-danger transition-colors hover:bg-red-500/20 disabled:opacity-50"
+              >
+                <span className="h-2.5 w-2.5 rounded-full bg-red-500" />
+                Full screen
+              </button>
+              <button
+                type="button"
+                onClick={onRecordArea}
+                disabled={busy || starting}
+                title="Pick an area or a window, then record only that"
+                className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-red-500/50 bg-red-500/10 px-3 py-2.5 text-[13px] font-semibold text-danger transition-colors hover:bg-red-500/20 disabled:opacity-50"
+              >
+                <svg viewBox="0 0 16 16" className="h-4 w-4 fill-none stroke-current" strokeWidth="1.5">
+                  <path d="M2 5V3a1 1 0 0 1 1-1h2M11 2h2a1 1 0 0 1 1 1v2M14 11v2a1 1 0 0 1-1 1h-2M5 14H3a1 1 0 0 1-1-1v-2" strokeLinecap="round" />
+                  <circle cx="8" cy="8" r="2.2" className="fill-red-500 stroke-none" />
+                </svg>
+                Area / window
+              </button>
+            </div>
           )}
           <label className="flex items-center justify-between gap-2 text-[11px] text-ink-3" title="A small bar with a timer, pause, stop, mute and screenshot. It never shows up in your recordings.">
             <span>On-screen control bar</span>
@@ -301,8 +367,8 @@ export default function HomeDashboard({
         </ActionCard>
 
         <ActionCard
-          title="Screenshot"
-          hint="Drag a box, click a window, or press F for the whole screen. Then draw on it and copy."
+          title="Snip"
+          hint="Drag a box, click a window, or press F for the whole screen. Then draw on it and copy. The bar at the top switches to Record."
           hotkey={settings.hotkeySnip}
         >
           <button

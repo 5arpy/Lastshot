@@ -3031,6 +3031,9 @@ fn set_thread_priority(performance_mode: bool) {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MonitorInfo {
     pub index: u32,
+    /// Top-left corner on the desktop, physical pixels.
+    pub x: i32,
+    pub y: i32,
     pub name: String,
     pub width: u32,
     pub height: u32,
@@ -3068,6 +3071,8 @@ pub fn enumerate_monitors() -> Vec<MonitorInfo> {
                         let r = odesc.DesktopCoordinates;
                         out.push(MonitorInfo {
                             index: flat,
+                            x: r.left,
+                            y: r.top,
                             name: String::from_utf16_lossy(
                                 &odesc.DeviceName[..odesc
                                     .DeviceName
@@ -3095,6 +3100,8 @@ pub fn enumerate_monitors() -> Vec<MonitorInfo> {
     {
         vec![MonitorInfo {
             index: 0,
+            x: 0,
+            y: 0,
             name: "\\\\.\\DISPLAY1 (virtual)".into(),
             width: 1920,
             height: 1080,

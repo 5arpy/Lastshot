@@ -17,6 +17,22 @@ pub const EVT_RECORDING: &str = "lastshot://recording";
 pub const BAR_LABEL: &str = "bar";
 
 static MIC_MUTED: AtomicBool = AtomicBool::new(false);
+/// The picked area of the running recording (None = whole screen).
+static AREA: parking_lot::Mutex<Option<Area>> = parking_lot::Mutex::new(None);
+/// Moments marked during the running recording (seconds).
+static MARKERS: parking_lot::Mutex<Vec<f32>> = parking_lot::Mutex::new(Vec::new());
+/// 0-1 while a finished area recording is being cropped.
+static FINISHING: parking_lot::Mutex<Option<f32>> = parking_lot::Mutex::new(None);
+/// The user hid the bar; it stays away until the next recording starts.
+static BAR_HIDDEN: AtomicBool = AtomicBool::new(false);
+
+/// Part of the screen a recording keeps.
+#[derive(Clone, Debug)]
+pub struct Area {
+    pub crop: crate::media::shrink::Crop,
+    /// "1280×720"
+    pub label: String,
+}
 /// Serialises start/stop so a double hotkey press cannot race.
 static BUSY: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
@@ -31,12 +47,30 @@ pub struct BarState {
     pub hotkey_record: String,
     pub hotkey_save: String,
     pub hotkey_snip: String,
+    /// Size of the recorded area ("1280×720"), None for the whole screen.
+    pub area: Option<String>,
+    /// How many moments were marked so far.
+    pub markers: usize,
+    /// Size of the recording file so far, bytes.
+    pub bytes: u64,
+    /// 0-1 while an area recording is being cropped after stop.
+    pub finishing: Option<f32>,
 }
 
 fn bar_state(state: &AppState) -> BarState {
     let s = state.settings.read();
+    let recording = state.engine.recording_status();
+    let bytes = recording
+        .as_ref()
+        .and_then(|r| std::fs::metadata(&r.path).ok())
+        .map(|m| m.len())
+        .unwrap_or(0);
     BarState {
-        recording: state.engine.recording_status(),
+        area: recording.as_ref().and(AREA.lock().as_ref().map(|a| a.label.clone())),
+        markers: if recording.is_some() { MARKERS.lock().len() } else { 0 },
+        bytes,
+        finishing: *FINISHING.lock(),
+        recording,
         mic_muted: MIC_MUTED.load(Ordering::Relaxed),
         mic_on: s.capture_microphone,
         replay_on: state.engine.is_running(),
@@ -62,8 +96,13 @@ fn unique(dir: &std::path::Path, stem: &str) -> PathBuf {
     p
 }
 
-/// Starts recording, turning the capture engine on first if needed.
+/// Starts recording the whole screen, turning the capture engine on first if needed.
 pub async fn start(app: &AppHandle) -> Result<RecordingStatus, String> {
+    start_with(app, None).await
+}
+
+/// Starts recording; with `area`, only that part of the screen is kept.
+pub async fn start_with(app: &AppHandle, area: Option<Area>) -> Result<RecordingStatus, String> {
     let state = app.state::<AppState>();
     let engine = Arc::clone(&state.engine);
     let out = state.output_dir();
@@ -104,6 +143,9 @@ pub async fn start(app: &AppHandle) -> Result<RecordingStatus, String> {
     })
     .await
     .map_err(|e| format!("recording task failed: {e}"))??;
+    *AREA.lock() = area;
+    MARKERS.lock().clear();
+    BAR_HIDDEN.store(false, Ordering::Relaxed);
     sync_bar(app);
     emit_state(app);
     Ok(status)
@@ -119,16 +161,163 @@ pub async fn stop(app: &AppHandle) -> Result<ClipMetadata, String> {
     })
     .await
     .map_err(|e| format!("recording task failed: {e}"))??;
+    let area = AREA.lock().take();
+    let markers = std::mem::take(&mut *MARKERS.lock());
+    if area.is_some() {
+        // Keeps the bar up to show the cropping progress.
+        *FINISHING.lock() = Some(0.0);
+    }
+    sync_bar(app);
+    let write = match area {
+        Some(a) => crop_to_area(app, write, a).await,
+        None => write,
+    };
+    if !markers.is_empty() {
+        let _ = state.clip_meta.lock().set_markers(&write.path, markers);
+    }
     let out = state.output_dir();
     let game = PathBuf::from(&write.path)
         .parent()
         .filter(|p| *p != out.as_path())
         .and_then(|p| p.file_name())
         .map(|n| n.to_string_lossy().to_string());
-    let clip = crate::hotkeys::publish_saved_clip(app, &write, game, "recording", false, false);
+    let mut clip = crate::hotkeys::publish_saved_clip(app, &write, game, "recording", false, false);
+    clip.markers = state.clip_meta.lock().get(&write.path).markers;
     sync_bar(app);
     emit_state(app);
     Ok(clip)
+}
+
+/// Re-encodes a finished recording down to the picked area (on the GPU, at
+/// full quality) and replaces the file. If that fails, the full-screen
+/// recording is kept and the error is shown.
+async fn crop_to_area(
+    app: &AppHandle,
+    write: crate::media::recorder::ClipWriteResult,
+    area: Area,
+) -> crate::media::recorder::ClipWriteResult {
+    use crate::media::shrink::{self, Segment, Target};
+    let full = PathBuf::from(&write.path);
+    let tmp = full.with_file_name(format!(
+        "{}_area.mp4",
+        full.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+    ));
+    *FINISHING.lock() = Some(0.0);
+    emit_state(app);
+    let h = app.clone();
+    let (src, dst) = (full.clone(), tmp.clone());
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let mut last = -1.0f32;
+        let r = shrink::export(
+            &[Segment { path: src.clone(), start: 0.0, end: None }],
+            Some(area.crop),
+            Target::Quality,
+            &dst,
+            &mut |p| {
+                if p - last >= 0.03 {
+                    last = p;
+                    *FINISHING.lock() = Some(p);
+                    emit_state(&h);
+                }
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        std::fs::remove_file(&src).map_err(|e| e.to_string())?;
+        std::fs::rename(&dst, &src).map_err(|e| e.to_string())?;
+        let probe = crate::media::library::probe(&src).map_err(|e| e.to_string())?;
+        Ok::<_, String>((r, probe))
+    })
+    .await
+    .map_err(|e| e.to_string())
+    .and_then(|r| r);
+    *FINISHING.lock() = None;
+    match result {
+        Ok((_, probe)) => crate::media::recorder::ClipWriteResult {
+            size_bytes: std::fs::metadata(&full).map(|m| m.len()).unwrap_or(0),
+            duration_seconds: probe.duration_seconds,
+            width: probe.width,
+            height: probe.height,
+            fps: probe.fps,
+            has_audio: probe.has_audio,
+            ..write
+        },
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            let _ = app.emit(
+                EVT_ERROR,
+                format!("Kept the whole screen: cropping the recording to the area failed ({e})"),
+            );
+            write
+        }
+    }
+}
+
+/// Stops the recording and deletes it.
+pub async fn discard(app: &AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let engine = Arc::clone(&state.engine);
+    let write = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = BUSY.lock();
+        engine.stop_recording().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("recording task failed: {e}"))??;
+    AREA.lock().take();
+    MARKERS.lock().clear();
+    let _ = std::fs::remove_file(&write.path);
+    sync_bar(app);
+    emit_state(app);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn discard_recording(app: AppHandle) -> Result<(), String> {
+    discard(&app).await
+}
+
+/// Marks this moment of the running recording; the editor shows the marks.
+#[tauri::command]
+pub fn add_marker(app: AppHandle, state: State<'_, AppState>) -> Result<usize, String> {
+    let status = state.engine.recording_status().ok_or("Not recording")?;
+    let n = {
+        let mut m = MARKERS.lock();
+        if m.last().is_some_and(|l| (status.seconds - l).abs() < 0.5) {
+            return Ok(m.len());
+        }
+        m.push(status.seconds);
+        m.len()
+    };
+    emit_state(&app);
+    Ok(n)
+}
+
+/// Hides the bar until the next recording starts.
+#[tauri::command]
+pub fn hide_bar(app: AppHandle) {
+    BAR_HIDDEN.store(true, Ordering::Relaxed);
+    if let Some(w) = app.get_webview_window(BAR_LABEL) {
+        let _ = w.close();
+    }
+}
+
+/// Keeps a helper window (control bar, snip overlay) out of Alt+Tab and the
+/// taskbar, so switching away from Lastshot never lands on it.
+pub fn hide_from_alt_tab(win: &tauri::WebviewWindow) {
+    #[cfg(windows)]
+    if let Ok(hwnd) = win.hwnd() {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+        };
+        let h = HWND(hwnd.0 as _);
+        unsafe {
+            let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+            let next = (ex | WS_EX_TOOLWINDOW.0 as isize) & !(WS_EX_APPWINDOW.0 as isize);
+            SetWindowLongPtrW(h, GWL_EXSTYLE, next);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = win;
 }
 
 /// Hotkey / tray: start when idle, stop when recording.
@@ -216,9 +405,9 @@ pub fn sync_bar(app: &AppHandle) {
     let recording = state.engine.recording_status().is_some();
     let want = match mode.as_str() {
         "always" => true,
-        "recording" => recording,
+        "recording" => recording || FINISHING.lock().is_some(),
         _ => false,
-    };
+    } && !BAR_HIDDEN.load(Ordering::Relaxed);
     let h = app.clone();
     // Always queue it from a worker thread: called from a sync command (which
     // runs on the main thread), `run_on_main_thread` would build the window
@@ -241,7 +430,7 @@ fn open_bar(app: &AppHandle) -> tauri::Result<()> {
     if app.get_webview_window(BAR_LABEL).is_some() {
         return Ok(());
     }
-    let (bw, bh) = (360.0, 46.0);
+    let (bw, bh) = (520.0, 46.0);
     let win = tauri::WebviewWindowBuilder::new(app, BAR_LABEL, tauri::WebviewUrl::default())
         .title("Lastshot controls")
         .decorations(false)
@@ -254,6 +443,7 @@ fn open_bar(app: &AppHandle) -> tauri::Result<()> {
         .inner_size(bw, bh)
         .background_color(tauri::window::Color(24, 26, 32, 255))
         .build()?;
+    hide_from_alt_tab(&win);
     if let Ok(Some(m)) = win.primary_monitor() {
         let scale = m.scale_factor();
         let x = m.position().x + ((m.size().width as f64 - bw * scale) / 2.0) as i32;

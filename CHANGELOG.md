@@ -7,7 +7,8 @@ All notable changes to **Lastshot** (and, before 1.7.1, to **ClipFlow**, which L
 ### Added
 
 - **Screen recording.** Press **Alt+R** (or **Start recording** on Home) to record the screen until you stop, with pause and resume and no time limit. Recordings land in Clips like replays. Turning instant replay off or quitting finishes a running recording first.
-- **On-screen control bar** with the timer, pause, stop, microphone mute, screenshot and a button back to Lastshot. Windows leaves it out of every capture, so it never appears in recordings, replays or screenshots. Show it while recording (default), always, or never (Settings › Screen recording, or right on Home).
+- **Snip bar: Screenshot | Record.** **Alt+S** opens the snipping overlay with a bar at the top to switch between *Screenshot* and *Record*. In Record, drag a box or click a window (or *Full screen*), then **Start recording**: only that area is kept. Also on Home (*Record screen › Area / window*), on the control bar (*Area*) and in the tray (*Snip: record an area*). The area is cut out when you stop (on the GPU, full quality); if that fails, the whole-screen recording is kept.
+- **On-screen control bar** with the timer, pause, stop, microphone mute, screenshot and a button back to Lastshot. While recording it also shows the area and the file size so far, and has **Mark moment** (marks show on the editor timeline), **Delete** (asks first) and a button to hide it until the next recording. Windows leaves it out of every capture, so it never appears in recordings, replays or screenshots. Show it while recording (default), always, or never (Settings › Screen recording, or right on Home).
 - **New Home.** Three clear actions, each with its shortcut in view: *Save replay* (with how much to keep), *Record screen* and *Screenshot*. A status line says whether instant replay is on. Compact *PC sound* and *Microphone* tiles explain what they record and open their settings when clicked.
 - **Folders and space in Clips.** A sidebar lists all clips, the Lastshot folder and its game subfolders, and your extra folders, each with its clip count and size, plus a bar per drive showing clips, other files and free space. Click a folder to show only its clips; open it in Explorer or remove it from there. Home warns when the drive with your clips runs low.
 - **Move to Lastshot folder** in the editor for clips from an extra folder (keeps stars and tags, works across drives).
@@ -31,6 +32,8 @@ All notable changes to **Lastshot** (and, before 1.7.1, to **ClipFlow**, which L
 
 ### Fixed
 
+- Alt+Tab away from Lastshot needed two presses while the control bar was up: the bar (and the snip overlay) are no longer in the Alt+Tab list.
+- Recordings are titled "Recording …" in Clips instead of "Clip Recording_…".
 - Privacy mode now recognises Lastshot's own window (it still looked for ClipFlow's).
 
 ## [1.8.0] - 2026-11-15

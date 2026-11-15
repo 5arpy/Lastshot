@@ -5,17 +5,21 @@ import { cn } from "../utils/cn";
 
 /**
  * Full-screen snipping overlay. It runs in its own borderless window that
- * covers one monitor and shows a frozen picture of it.
+ * covers one monitor and shows a frozen picture of it. The bar at the top
+ * switches between Screenshot and Record.
  *
  * 1. Pick: drag a box, click a window, or press F for the whole screen.
- * 2. Mark up (optional): box, arrow, pen, blur. Ctrl+Z undoes.
- * 3. Enter / Ctrl+C copies, Ctrl+S saves (and copies), Esc cancels.
+ * 2. Screenshot: mark up (box, arrow, pen, blur; Ctrl+Z undoes), then
+ *    Enter / Ctrl+C copies, Ctrl+S saves (and copies).
+ *    Record: Enter / Start recording records that area until stopped.
+ * Esc cancels.
  *
  * All coordinates below are in the captured image's physical pixels; the page
  * scales them to CSS pixels only for display.
  */
 
 type Tool = "box" | "arrow" | "pen" | "blur";
+type Mode = "shot" | "rec";
 type Rect = { x: number; y: number; w: number; h: number };
 type Shape =
   | { kind: "box" | "arrow" | "blur"; x1: number; y1: number; x2: number; y2: number; color: string; width: number }
@@ -140,6 +144,7 @@ export default function SnipOverlay() {
   const [shapes, setShapes] = useState<Shape[]>([]);
   const [draft, setDraft] = useState<Shape | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [mode, setMode] = useState<Mode>("shot");
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const shown = useRef(false);
@@ -160,6 +165,7 @@ export default function SnipOverlay() {
         image.onload = () => {
           if (!alive) return;
           setCapture(c);
+          setMode(c.start_mode === "rec" ? "rec" : "shot");
           setImg(image);
         };
         image.onerror = () => setError("Could not read the screen picture.");
@@ -256,6 +262,18 @@ export default function SnipOverlay() {
     [sel, busy],
   );
 
+  const startRecording = useCallback(async () => {
+    if (!sel || busy) return;
+    setBusy("Starting…");
+    try {
+      if (isTauri()) await lastshot.snipRecord(sel);
+      else window.close();
+    } catch (e) {
+      setError(String(e));
+      setBusy(null);
+    }
+  }, [sel, busy]);
+
   // ------------------------------------------------------------ keyboard
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -267,6 +285,13 @@ export default function SnipOverlay() {
       if (!sel) {
         if (e.key === "f" || e.key === "F") selectAll();
         if (e.key === "Enter" && hover) select(hover);
+        return;
+      }
+      if (mode === "rec") {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          void startRecording();
+        }
         return;
       }
       const k = e.key.toLowerCase();
@@ -286,7 +311,7 @@ export default function SnipOverlay() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [sel, hover, cancel, finish, select, selectAll]);
+  }, [sel, hover, mode, cancel, finish, startRecording, select, selectAll]);
 
   // ------------------------------------------------------------ picking pointer
   const onPickDown = (e: React.PointerEvent) => {
@@ -320,7 +345,7 @@ export default function SnipOverlay() {
     return [x - (sel?.x ?? 0), y - (sel?.y ?? 0)];
   };
   const onEditDown = (e: React.PointerEvent) => {
-    if (e.button !== 0 || busy) return;
+    if (e.button !== 0 || busy || mode === "rec") return;
     (e.target as Element).setPointerCapture(e.pointerId);
     const [x, y] = toSel(e);
     if (tool === "pen") setDraft({ kind: "pen", points: [[x, y]], color, width: strokeWidth });
@@ -366,7 +391,9 @@ export default function SnipOverlay() {
     return (
       <div className="fixed inset-0 grid place-items-center bg-black/80 text-white">
         <div className="max-w-md rounded-xl border border-white/10 bg-[#1c1e25] p-5 text-center">
-          <div className="text-[14px] font-semibold">Screenshot failed</div>
+          <div className="text-[14px] font-semibold">
+            {mode === "rec" ? "Could not start recording" : "Screenshot failed"}
+          </div>
           <p className="mt-2 text-[12px] text-white/70">{error}</p>
           <button
             type="button"
@@ -419,12 +446,74 @@ export default function SnipOverlay() {
               {live.w} × {live.h}
             </div>
           )}
-          {!drag && (
-            <div className="pointer-events-none absolute left-1/2 top-4 -translate-x-1/2 rounded-full border border-white/10 bg-[#1c1e25]/95 px-4 py-1.5 text-[12px] text-white/85 shadow-lg">
-              Drag a box · click a window{hover ? ` (${hover.title.slice(0, 40)})` : ""} · <b>F</b> whole screen · <b>Esc</b> cancel
-            </div>
-          )}
         </>
+      )}
+
+      {!drag && (
+        <div
+          className="absolute left-1/2 top-4 z-20 flex max-w-[calc(100vw-16px)] -translate-x-1/2 items-center gap-1 rounded-xl border border-white/10 bg-[#1c1e25]/95 p-1.5 text-[12px] text-white shadow-2xl"
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          <div className="flex rounded-lg bg-black/30 p-0.5">
+            {(
+              [
+                ["shot", "Screenshot", "M2 5h3l1.5-2h3L11 5h3v8H2zM8 11.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z"],
+                ["rec", "Record", "M8 13A5 5 0 1 0 8 3a5 5 0 0 0 0 10z"],
+              ] as const
+            ).map(([id, label, icon]) => (
+              <button
+                key={id}
+                type="button"
+                disabled={!!busy}
+                onClick={() => setMode(id)}
+                className={cn(
+                  "flex items-center gap-1.5 rounded-md px-3 py-1.5 font-medium transition-colors",
+                  mode === id
+                    ? id === "rec"
+                      ? "bg-[#e5484d] text-white"
+                      : "bg-[#5d72db] text-white"
+                    : "text-white/70 hover:bg-white/10",
+                )}
+              >
+                <svg
+                  viewBox="0 0 16 16"
+                  className={cn("h-3.5 w-3.5", id === "rec" ? "fill-current" : "fill-none stroke-current")}
+                  strokeWidth="1.5"
+                >
+                  <path d={icon} />
+                </svg>
+                {label}
+              </button>
+            ))}
+          </div>
+          <div className="mx-1 h-6 w-px bg-white/15" />
+          <span className="whitespace-nowrap px-1 text-white/75">
+            {sel
+              ? mode === "rec"
+                ? "Click outside to pick again"
+                : "Draw on it, or click outside to pick again"
+              : hover
+                ? `Click: ${mode === "rec" ? "record" : "snip"} “${hover.title.slice(0, 32)}”`
+                : `Drag a box or click a window to ${mode === "rec" ? "record" : "snip"}`}
+          </span>
+          <button
+            type="button"
+            title="The whole screen (F)"
+            disabled={!!busy}
+            onClick={selectAll}
+            className="whitespace-nowrap rounded-lg px-2 py-1.5 text-white/85 hover:bg-white/10"
+          >
+            Full screen <span className="text-white/45">F</span>
+          </button>
+          <button
+            type="button"
+            title="Cancel (Esc)"
+            onClick={cancel}
+            className="rounded-lg px-2 py-1.5 text-white/70 hover:bg-white/10"
+          >
+            ✕
+          </button>
+        </div>
       )}
 
       {sel && (
@@ -444,12 +533,41 @@ export default function SnipOverlay() {
           <canvas
             ref={canvasRef}
             className="absolute"
-            style={{ ...css(sel), cursor: "crosshair" }}
+            style={{ ...css(sel), cursor: mode === "rec" ? "default" : "crosshair" }}
             onPointerDown={onEditDown}
             onPointerMove={onEditMove}
             onPointerUp={onEditUp}
             onDoubleClick={() => void finish(false)}
           />
+          {mode === "rec" ? (
+            <div
+              className="absolute z-10 flex items-center gap-1.5 rounded-xl border border-white/10 bg-[#1c1e25]/95 p-1.5 text-white shadow-2xl"
+              style={toolbarStyle}
+              onPointerDown={(e) => e.stopPropagation()}
+            >
+              <span className="px-2 text-[12px] text-white/80">
+                Record this area · <span className="font-mono">{sel.w} × {sel.h}</span>
+              </span>
+              <button
+                type="button"
+                title="Cancel (Esc)"
+                onClick={cancel}
+                className="rounded-lg px-2 py-1.5 text-[12px] text-white/80 hover:bg-white/10"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                title="Start recording (Enter). Stop it from the control bar, the Home page or the record shortcut."
+                disabled={!!busy}
+                onClick={() => void startRecording()}
+                className="flex items-center gap-1.5 rounded-lg bg-[#e5484d] px-3 py-1.5 text-[12px] font-semibold hover:bg-[#ec5d62] disabled:opacity-60"
+              >
+                <span className="h-2 w-2 rounded-full bg-white" />
+                {busy ?? "Start recording"}
+              </button>
+            </div>
+          ) : (
           <div
             className="absolute z-10 flex items-center gap-1 rounded-xl border border-white/10 bg-[#1c1e25]/95 p-1.5 text-white shadow-2xl"
             style={toolbarStyle}
@@ -522,6 +640,7 @@ export default function SnipOverlay() {
               {busy ?? "Copy"}
             </button>
           </div>
+          )}
         </>
       )}
     </div>

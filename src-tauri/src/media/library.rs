@@ -42,6 +42,9 @@ pub struct ClipMetadata {
     /// folder.
     #[serde(default)]
     pub folder: Option<String>,
+    /// Moments marked while recording (sidecar `clip_meta.json`), seconds.
+    #[serde(default)]
+    pub markers: Vec<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -255,6 +258,7 @@ fn scan_into(
             favorite: false,
             tags: Vec::new(),
             folder: None,
+            markers: Vec::new(),
         });
     }
     Ok(())
@@ -274,7 +278,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     h
 }
 
-fn pretty_title(file_name: &str) -> String {
+pub(crate) fn pretty_title(file_name: &str) -> String {
     file_name
         .trim_end_matches(".mp4")
         .replace("Lastshot_Recording_", "Recording ")

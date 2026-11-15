@@ -19,9 +19,9 @@
 
 **Instant replay.** Lastshot keeps the last few seconds or minutes (up to an hour) of your screen in memory, encoded on your graphics card. Press **Alt+C** and it saves them as an MP4, without leaving your game. Nothing is written to disk until you ask.
 
-**Screen recording.** Press **Alt+R** (or **Start recording** on Home) to record until you stop, with pause and resume. A small control bar with the timer, pause, stop, mic mute and screenshot sits at the top of the screen; Windows leaves it out of every capture, so it never shows up in your videos. Choose *while recording*, *always* or *off* in **Settings › Screen recording**.
+**Screen recording.** Press **Alt+R** (or **Start recording** on Home) to record until you stop, with pause and resume. A small control bar with the timer, file size, pause, stop, mark moment, delete, mic mute and screenshot sits at the top of the screen; Windows leaves it out of every capture, so it never shows up in your videos. Choose *while recording*, *always* or *off* in **Settings › Screen recording**.
 
-**Screenshots.** Press **Alt+S**, then drag a box, click a window, or press **F** for the whole screen. Mark it up with a box, arrow, pen or blur, and press **Enter**. It is on your clipboard, ready to paste.
+**Snipping.** Press **Alt+S**, then drag a box, click a window, or press **F** for the whole screen. Mark it up with a box, arrow, pen or blur, and press **Enter**. It is on your clipboard, ready to paste. Switch the bar at the top to **Record** to record just that area or window instead.
 
 **Sharing that fits Discord.** Every clip has a **Shrink & copy** button. It makes a copy small enough for Discord (10 MB by default) and puts it on your clipboard: switch to Discord and press **Ctrl+V**. You can also drag a clip straight out of Lastshot into Discord or a folder. If Discord changes its limit, or you have Nitro, change the number in **Settings › Sharing**. You don't need to wait for an app update.
 
@@ -49,7 +49,7 @@ Lastshot checks for updates only if you turn that on in **Settings › App › A
 | --- | --- |
 | Alt+C | Save replay |
 | Alt+R | Start / stop screen recording |
-| Alt+S | Take a screenshot |
+| Alt+S | Snip: screenshot, or record an area |
 | Alt+Shift+C | Turn instant replay on / off |
 
 Change them in **Settings › Shortcuts**.

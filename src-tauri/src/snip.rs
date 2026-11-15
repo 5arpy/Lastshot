@@ -35,6 +35,9 @@ pub struct SnipCapture {
     pub width: u32,
     pub height: u32,
     pub windows: Vec<WinRect>,
+    /// "shot" (screenshot) or "rec" (record an area): which tab the snip bar
+    /// opens on.
+    pub start_mode: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -47,18 +50,21 @@ struct Pending {
     capture: SnipCapture,
     restore_main: bool,
     opened: std::time::Instant,
+    /// The snipped monitor on the desktop (x, y, w, h), physical pixels.
+    rect: (i32, i32, u32, u32),
 }
 
 static PENDING: Mutex<Option<Pending>> = Mutex::new(None);
 
 /// Hotkey entry point: snip whatever is on screen right now.
 pub fn begin(app: AppHandle) {
-    begin_with(app, false);
+    begin_with(app, false, "shot");
 }
 
 /// `hide_main`: the request came from Lastshot's own window, which would
 /// otherwise be in the picture. It is hidden first and shown again after.
-pub fn begin_with(app: AppHandle, hide_main: bool) {
+/// `mode`: "shot" or "rec", the tab the snip bar opens on.
+pub fn begin_with(app: AppHandle, hide_main: bool, mode: &'static str) {
     tauri::async_runtime::spawn(async move {
         if let Some(w) = app.get_webview_window(SNIP_LABEL) {
             // The overlay shows itself once its page has painted. One that is
@@ -95,15 +101,17 @@ pub fn begin_with(app: AppHandle, hide_main: bool) {
         }
 
         let grabbed = tauri::async_runtime::spawn_blocking(imp::capture_under_cursor).await;
-        let (capture, rect) = match grabbed {
+        let (mut capture, rect) = match grabbed {
             Ok(Ok(v)) => v,
             Ok(Err(e)) => return fail(&app, restore_main, format!("Snip failed: {e}")),
             Err(e) => return fail(&app, restore_main, format!("Snip failed: {e}")),
         };
+        capture.start_mode = mode.to_string();
         *PENDING.lock() = Some(Pending {
             capture,
             restore_main,
             opened: std::time::Instant::now(),
+            rect,
         });
         if let Err(e) = open_overlay(&app, rect) {
             PENDING.lock().take();
@@ -138,6 +146,7 @@ fn open_overlay(app: &AppHandle, rect: (i32, i32, u32, u32)) -> tauri::Result<()
         .visible(false)
         .background_color(tauri::window::Color(0, 0, 0, 255))
         .build()?;
+    crate::recording::hide_from_alt_tab(&win);
     win.set_position(tauri::PhysicalPosition::new(x, y))?;
     win.set_size(tauri::PhysicalSize::new(w, h))?;
     // The page shows the window once the frozen image has painted.
@@ -165,9 +174,93 @@ pub fn snip_get_capture() -> Result<SnipCapture, String> {
 }
 
 /// Starts a snip from Lastshot's own window (the window hides itself first).
+/// `mode`: "shot" (default) or "rec" to record an area.
 #[tauri::command]
-pub fn start_snip(app: AppHandle) {
-    begin_with(app, true);
+pub fn start_snip(app: AppHandle, mode: Option<String>) {
+    let mode = if mode.as_deref() == Some("rec") { "rec" } else { "shot" };
+    begin_with(app, true, mode);
+}
+
+/// Region in the snip picture's physical pixels.
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+pub struct SnipRegion {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+/// Closes the overlay and records the picked area (the whole screen when
+/// the area covers it). Lastshot's window stays hidden so it is not in the
+/// recording; the control bar brings it back.
+#[tauri::command]
+pub async fn snip_record(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    region: SnipRegion,
+) -> Result<crate::media::recorder::RecordingStatus, String> {
+    let (cap_w, cap_h, mon, restore_main) = {
+        let p = PENDING.lock();
+        let p = p.as_ref().ok_or("nothing to record")?;
+        (p.capture.width as f32, p.capture.height as f32, p.rect, p.restore_main)
+    };
+    // The engine records one monitor (Settings › Screen): it must be this one.
+    let wanted = state.settings.read().monitor_index;
+    let monitors = crate::media::recorder::enumerate_monitors();
+    let recorded = monitors
+        .iter()
+        .find(|m| m.index == wanted)
+        .or_else(|| monitors.iter().find(|m| m.primary))
+        .or(monitors.first());
+    if let Some(m) = recorded {
+        if m.x != mon.0 || m.y != mon.1 {
+            return Err(format!(
+                "Lastshot records the screen {} ({}×{}). To record on this one, choose it in Settings › Instant replay › Screen.",
+                m.name.trim_start_matches("\\\\.\\"),
+                m.width,
+                m.height
+            ));
+        }
+    }
+    let x = region.x.clamp(0, cap_w as i32);
+    let y = region.y.clamp(0, cap_h as i32);
+    let w = region.w.clamp(1, cap_w as i32 - x);
+    let h = region.h.clamp(1, cap_h as i32 - y);
+    let whole = w as f32 >= cap_w - 2.0 && h as f32 >= cap_h - 2.0;
+    let area = (!whole).then(|| crate::recording::Area {
+        crop: crate::media::shrink::Crop {
+            x: x as f32 / cap_w,
+            y: y as f32 / cap_h,
+            w: w as f32 / cap_w,
+            h: h as f32 / cap_h,
+        },
+        label: format!("{w}×{h}"),
+    });
+    // Close the overlay without bringing Lastshot's window back.
+    PENDING.lock().take();
+    if let Some(win) = app.get_webview_window(SNIP_LABEL) {
+        let _ = win.close();
+    }
+    // Let the overlay leave the screen before the first frame.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let started = crate::recording::start_with(&app, area).await;
+    match &started {
+        // Keep Lastshot on the taskbar but out of the picture.
+        Ok(_) if restore_main => {
+            if let Some(w) = app.get_webview_window("main") {
+                // SW_MINIMIZE also un-hides the window.
+                let _ = w.minimize();
+            }
+        }
+        Ok(_) => {}
+        Err(e) => {
+            if restore_main {
+                show_main(&app);
+            }
+            let _ = app.emit(EVT_ERROR, format!("Could not start recording: {e}"));
+        }
+    }
+    started
 }
 
 #[tauri::command]
@@ -306,7 +399,7 @@ mod imp {
                 base64::engine::general_purpose::STANDARD.encode(&png)
             );
             Ok((
-                SnipCapture { image, width: w as u32, height: h as u32, windows },
+                SnipCapture { image, width: w as u32, height: h as u32, windows, start_mode: "shot".into() },
                 (x, y, w as u32, h as u32),
             ))
         }

@@ -296,6 +296,9 @@ pub fn run() {
             recording::get_bar_state,
             recording::set_mic_muted,
             recording::show_main_window,
+            recording::discard_recording,
+            recording::add_marker,
+            recording::hide_bar,
             files::get_disk_info,
             files::move_clip_to_library,
             files::open_video_file,
@@ -304,6 +307,7 @@ pub fn run() {
             snip::start_snip,
             snip::snip_get_capture,
             snip::snip_finish,
+            snip::snip_record,
             snip::snip_cancel,
             snip::open_screenshots_folder,
         ])
@@ -361,10 +365,12 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let snip_item = MenuItem::with_id(
         app,
         "snip",
-        format!("Take a screenshot\t{snip_key}"),
+        format!("Snip: screenshot\t{snip_key}"),
         true,
         None::<&str>,
     )?;
+    let snip_rec_item =
+        MenuItem::with_id(app, "snip_rec", "Snip: record an area", true, None::<&str>)?;
     let show = MenuItem::with_id(app, "show", "Open Lastshot", true, None::<&str>)?;
     let folder = MenuItem::with_id(app, "folder", "Open clips folder", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Lastshot", true, None::<&str>)?;
@@ -375,7 +381,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         "capture",
         "Capture",
         true,
-        &[&save, &last30, &record_item, &snip_item, &toggle],
+        &[&save, &last30, &record_item, &snip_item, &snip_rec_item, &toggle],
     )?;
     let menu = Menu::with_items(app, &[&capture, &sep, &show, &folder, &sep, &quit])?;
 
@@ -428,6 +434,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             }
             "toggle" => hotkeys::trigger_toggle(app.clone()),
             "snip" => snip::begin(app.clone()),
+            "snip_rec" => snip::begin_with(app.clone(), false, "rec"),
             "record" => recording::toggle(app.clone()),
             "show" => {
                 if let Some(w) = app.get_webview_window("main") {

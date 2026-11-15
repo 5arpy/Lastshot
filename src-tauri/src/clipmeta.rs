@@ -21,6 +21,9 @@ pub struct ClipMetaEntry {
     pub favorite: bool,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Moments marked while recording, in seconds from the start.
+    #[serde(default)]
+    pub markers: Vec<f32>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -96,6 +99,15 @@ impl ClipMetaStore {
         }
         self.save()?;
         Ok(self.entries.get(path).cloned().unwrap_or_default())
+    }
+
+    /// Stores the moments marked while recording a clip.
+    pub fn set_markers(&mut self, path: &str, mut markers: Vec<f32>) -> Result<(), String> {
+        markers.retain(|m| m.is_finite() && *m >= 0.0);
+        markers.sort_by(|a, b| a.total_cmp(b));
+        markers.truncate(500);
+        self.entries.entry(path.to_string()).or_default().markers = markers;
+        self.save()
     }
 
     /// Stars / unstars many clips with a single persist. Returns how many
@@ -175,6 +187,7 @@ impl ClipMetaStore {
             if let Some(e) = self.entries.get(&clip.path) {
                 clip.favorite = e.favorite;
                 clip.tags = e.tags.clone();
+                clip.markers = e.markers.clone();
             }
         }
         if dirty {

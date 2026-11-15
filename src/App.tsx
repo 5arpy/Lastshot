@@ -491,6 +491,34 @@ export default function App() {
     }
   }, [pushToast]);
 
+  const recordArea = useCallback(async () => {
+    try {
+      await lastshot.startSnip("rec");
+    } catch (e) {
+      pushToast("err", "Could not open the snip bar", String(e));
+    }
+  }, [pushToast]);
+
+  const addMarker = useCallback(async () => {
+    try {
+      const n = await lastshot.addMarker();
+      setBarState(await lastshot.getBarState());
+      pushToast("ok", "Moment marked", `${n} so far. Marks show on the editor timeline.`);
+    } catch (e) {
+      pushToast("err", "Could not mark", String(e));
+    }
+  }, [pushToast]);
+
+  const discardRecording = useCallback(async () => {
+    try {
+      await lastshot.discardRecording();
+      setBarState(await lastshot.getBarState());
+      pushToast("ok", "Recording deleted");
+    } catch (e) {
+      pushToast("err", "Could not delete the recording", String(e));
+    }
+  }, [pushToast]);
+
   const pauseRecording = useCallback(
     async (paused: boolean) => {
       try {
@@ -1776,6 +1804,9 @@ export default function App() {
               onStartRecording={() => void startRecording()}
               onStopRecording={() => void stopRecording()}
               onPauseRecording={(p) => void pauseRecording(p)}
+              onRecordArea={() => void recordArea()}
+              onMarker={() => void addMarker()}
+              onDiscardRecording={() => void discardRecording()}
               onScreenshot={takeScreenshot}
               onOpenSettings={openSettingsAt}
               onControlBar={(m) => void patchSettings({ controlBar: m })}

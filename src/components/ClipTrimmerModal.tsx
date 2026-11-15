@@ -738,6 +738,18 @@ export default function ClipTrimmerModal({
                 />
               ))}
 
+              {/* Moments marked while recording */}
+              {(clip.markers ?? []).map((t, i) => (
+                <div
+                  key={`m${i}`}
+                  title={`Marked moment at ${t.toFixed(1)} s`}
+                  className="pointer-events-none absolute -top-1 h-[calc(100%+4px)] w-px bg-sky-400"
+                  style={{ left: pct(t) }}
+                >
+                  <span className="absolute -left-[4px] -top-0.5 h-0 w-0 border-x-[4.5px] border-t-[6px] border-x-transparent border-t-sky-400" />
+                </div>
+              ))}
+
               {/* Playhead */}
               <div
                 className="pointer-events-none absolute inset-y-0 w-0.5 bg-ink shadow-[0_0_0_1px_rgba(255,255,255,0.9)]"

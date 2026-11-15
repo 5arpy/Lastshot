@@ -664,6 +664,21 @@ export const lastshot = {
     }
     emitLocal(CHANNELS.recording, simBarState());
   },
+  /** Stops the running recording and deletes it. */
+  async discardRecording(): Promise<void> {
+    if (isTauri()) return invoke("discard_recording");
+    simRec.on = false;
+    emitLocal(CHANNELS.recording, simBarState());
+  },
+  /** Marks this moment of the recording; returns how many marks there are. */
+  async addMarker(): Promise<number> {
+    if (isTauri()) return invoke<number>("add_marker");
+    return 1;
+  },
+  /** Hides the control bar until the next recording. */
+  async hideBar(): Promise<void> {
+    if (isTauri()) await invoke("hide_bar");
+  },
   async getBarState(): Promise<BarState> {
     if (isTauri()) return invoke<BarState>("get_bar_state");
     return simBarState();
@@ -717,9 +732,10 @@ export const lastshot = {
   },
 
   // ------------------------------------------------------------ snipping
-  async startSnip(): Promise<void> {
+  /** `mode` "rec" opens the snip bar on Record (pick an area to record). */
+  async startSnip(mode: "shot" | "rec" = "shot"): Promise<void> {
     if (isTauri()) {
-      await invoke("start_snip");
+      await invoke("start_snip", { mode });
       return;
     }
     emitLocal(
@@ -733,6 +749,10 @@ export const lastshot = {
   /** `jpg` (optional) is what gets saved when the format is JPG; `png` goes on the clipboard. */
   async snipFinish(png: string, copy: boolean, save: boolean, jpg?: string): Promise<SnipDone> {
     return invoke<SnipDone>("snip_finish", { png, copy, save, jpg: jpg ?? null });
+  },
+  /** Records the picked area (snip picture pixels). */
+  async snipRecord(region: { x: number; y: number; w: number; h: number }): Promise<RecordingStatus> {
+    return invoke<RecordingStatus>("snip_record", { region });
   },
   async snipCancel(): Promise<void> {
     if (isTauri()) await invoke("snip_cancel");

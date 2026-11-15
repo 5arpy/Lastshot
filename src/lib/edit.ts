@@ -82,3 +82,60 @@ export function cropRect(srcW: number, srcH: number, s: CropState): CropRect {
 export function isFullFrame(r: CropRect): boolean {
   return r.w >= 0.995 && r.h >= 0.995;
 }
+
+// ------------------------------------------------------------------ parts
+
+/** Splits ranges at the given times (only splits inside a range count). */
+export function splitRanges(ranges: Range[], splits: number[]): Range[] {
+  const out: Range[] = [];
+  const pts = [...splits].sort((a, b) => a - b);
+  for (const r of ranges) {
+    let t = r.start;
+    for (const p of pts) {
+      if (p - t >= MIN_PIECE && r.end - p >= MIN_PIECE) {
+        out.push({ start: t, end: p });
+        t = p;
+      }
+    }
+    out.push({ start: t, end: r.end });
+  }
+  return out;
+}
+
+/** Stable id of a part: where it starts, to the millisecond. */
+export function partKey(r: Range): string {
+  return r.start.toFixed(3);
+}
+
+/**
+ * Parts in the user's order. Parts not in `order` yet (new after a split)
+ * go right after the part before them in time; parts that no longer exist
+ * are dropped.
+ */
+export function orderParts(parts: Range[], order: string[] | null): Range[] {
+  if (!order || order.length === 0) return parts;
+  const byKey = new Map(parts.map((p) => [partKey(p), p]));
+  const out: Range[] = order.map((k) => byKey.get(k)).filter((p): p is Range => !!p);
+  const placed = new Set(out.map(partKey));
+  parts.forEach((p, i) => {
+    if (placed.has(partKey(p))) return;
+    const prev = i > 0 ? parts[i - 1] : null;
+    const at = prev ? out.findIndex((q) => partKey(q) === partKey(prev)) : -1;
+    out.splice(at + 1, 0, p);
+    placed.add(partKey(p));
+  });
+  return out;
+}
+
+/** True when the parts play in time order. */
+export function inTimeOrder(parts: Range[]): boolean {
+  return parts.every((p, i) => i === 0 || p.start >= parts[i - 1].start);
+}
+
+/** Moves the part at `from` to index `to`. */
+export function moveItem<T>(list: T[], from: number, to: number): T[] {
+  const next = [...list];
+  const [it] = next.splice(from, 1);
+  next.splice(Math.max(0, Math.min(to, next.length)), 0, it);
+  return next;
+}

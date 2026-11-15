@@ -277,6 +277,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 fn pretty_title(file_name: &str) -> String {
     file_name
         .trim_end_matches(".mp4")
+        .replace("Lastshot_Recording_", "Recording ")
         .replace("Lastshot_", "Clip ")
         .replace("ClipFlow_", "Clip ")
         .replace('_', " ")

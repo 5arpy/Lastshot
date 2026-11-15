@@ -102,7 +102,7 @@ pub async fn start_replay_buffer(
 ) -> Result<EngineStats, String> {
     let cfg = {
         let mut s = state.settings.write();
-        s.buffer_seconds = buffer_seconds.clamp(5, 600);
+        s.buffer_seconds = buffer_seconds.clamp(5, crate::settings::MAX_BUFFER_SECONDS);
         s.target_fps = target_fps.clamp(24, 240);
         let _ = s.save();
         s.to_recorder_config()
@@ -127,6 +127,10 @@ pub async fn stop_replay_buffer(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<EngineStats, String> {
+    // A running screen recording is finished and added to Clips first.
+    if state.engine.recording_status().is_some() {
+        crate::recording::stop(&app).await?;
+    }
     let engine = Arc::clone(&state.engine);
     let stats = tauri::async_runtime::spawn_blocking(move || {
         engine.stop();
@@ -150,7 +154,7 @@ pub fn set_buffer_seconds(state: State<'_, AppState>, seconds: u32) -> Result<()
     // persisted setting — persisting is `update_settings`' job. Adaptive ECO
     // mode relies on this: it shrinks the ring on battery/RAM pressure and
     // restores it afterwards without clobbering the user's configured value.
-    state.engine.set_buffer_seconds(seconds.clamp(5, 600));
+    state.engine.set_buffer_seconds(seconds.clamp(5, crate::settings::MAX_BUFFER_SECONDS));
     Ok(())
 }
 
@@ -328,13 +332,7 @@ pub async fn get_recorded_clips(
     with_thumbnails: Option<bool>,
 ) -> Result<Vec<ClipMetadata>, String> {
     let dir = state.output_dir();
-    let extra: Vec<std::path::PathBuf> = state
-        .settings
-        .read()
-        .library_folders
-        .iter()
-        .map(std::path::PathBuf::from)
-        .collect();
+    let extra: Vec<std::path::PathBuf> = state.settings.read().scan_folders();
     let thumbs = with_thumbnails.unwrap_or(true);
     let mut clips = tauri::async_runtime::spawn_blocking(move || {
         library::scan_library(&dir, &extra, thumbs).map_err(|e| e.to_string())
@@ -740,6 +738,15 @@ pub struct SettingsPatch {
     pub hotkey_snip: Option<String>,
     pub snip_save_to_folder: Option<bool>,
     pub library_folders: Option<Vec<String>>,
+    pub hotkey_record: Option<String>,
+    pub control_bar: Option<String>,
+    pub explorer_open_with: Option<bool>,
+    pub screenshot_dir: Option<String>,
+    pub screenshot_format: Option<String>,
+    pub screenshot_quality: Option<u8>,
+    pub screenshot_copy: Option<bool>,
+    pub recording_dir: Option<String>,
+    pub streamer_mode: Option<bool>,
 }
 
 #[tauri::command]
@@ -763,15 +770,19 @@ pub fn update_settings(
         let save = patch.hotkey_save.as_ref().unwrap_or(&s.hotkey_save);
         let toggle = patch.hotkey_toggle.as_ref().unwrap_or(&s.hotkey_toggle);
         let snip = patch.hotkey_snip.as_ref().unwrap_or(&s.hotkey_snip);
-        let same = |a: &String, b: &String| a.eq_ignore_ascii_case(b);
-        if same(save, toggle) {
-            return Err(format!("'{save}' is already used by the arm/disarm hotkey"));
-        }
-        if same(snip, save) {
-            return Err(format!("'{snip}' is already used by the save hotkey"));
-        }
-        if same(snip, toggle) {
-            return Err(format!("'{snip}' is already used by the arm/disarm hotkey"));
+        let record = patch.hotkey_record.as_ref().unwrap_or(&s.hotkey_record);
+        let keys = [
+            (save, "Save replay"),
+            (toggle, "Instant replay on/off"),
+            (snip, "Screenshot"),
+            (record, "Screen recording"),
+        ];
+        for (i, (a, an)) in keys.iter().enumerate() {
+            for (b, bn) in keys.iter().skip(i + 1) {
+                if a.eq_ignore_ascii_case(b) {
+                    return Err(format!("'{a}' is used twice: {an} and {bn}"));
+                }
+            }
         }
     }
     if let Some(v) = patch.hotkey_save.clone() {
@@ -786,9 +797,44 @@ pub fn update_settings(
         crate::hotkeys::rebind(&app, &s.hotkey_snip, &v)?;
         s.hotkey_snip = v;
     }
+    if let Some(v) = patch.hotkey_record.clone() {
+        crate::hotkeys::rebind(&app, &s.hotkey_record, &v)?;
+        s.hotkey_record = v;
+    }
+    if let Some(v) = patch.control_bar.clone() {
+        if !["recording", "always", "off"].contains(&v.as_str()) {
+            return Err(format!("unknown control bar mode {v}"));
+        }
+        s.control_bar = v;
+    }
+    if let Some(v) = patch.screenshot_dir.as_ref() {
+        s.screenshot_dir = v.trim().to_string();
+    }
+    if let Some(v) = patch.screenshot_format.as_ref() {
+        if !["png", "jpg"].contains(&v.as_str()) {
+            return Err(format!("unknown screenshot format {v}"));
+        }
+        s.screenshot_format = v.clone();
+    }
+    if let Some(v) = patch.screenshot_quality {
+        s.screenshot_quality = v.clamp(50, 100);
+    }
+    if let Some(v) = patch.screenshot_copy {
+        s.screenshot_copy = v;
+    }
+    if let Some(v) = patch.recording_dir.as_ref() {
+        s.recording_dir = v.trim().to_string();
+    }
+    if let Some(v) = patch.streamer_mode {
+        s.streamer_mode = v;
+    }
+    if let Some(v) = patch.explorer_open_with {
+        crate::files::set_explorer_verb(v)?;
+        s.explorer_open_with = v;
+    }
 
     if let Some(v) = patch.buffer_seconds {
-        s.buffer_seconds = v.clamp(5, 600);
+        s.buffer_seconds = v.clamp(5, crate::settings::MAX_BUFFER_SECONDS);
     }
     if let Some(v) = patch.target_fps {
         s.target_fps = v.clamp(24, 240);
@@ -929,6 +975,9 @@ pub fn update_settings(
             crate::allow_asset_dir(&app, dir);
         }
     }
+    if patch.recording_dir.is_some() && !s.recording_dir.is_empty() {
+        crate::allow_asset_dir(&app, &s.recording_dir);
+    }
     if let Some(v) = patch.always_on_top {
         if let Some(w) = app.get_webview_window("main") {
             let _ = w.set_always_on_top(v);
@@ -944,13 +993,20 @@ pub fn update_settings(
         }
     }
     if patch.game_volume.is_some() || patch.mic_volume.is_some() {
-        state.engine.set_audio_volumes(s.game_volume, s.mic_volume);
+        state
+            .engine
+            .set_audio_volumes(s.game_volume, crate::recording::effective_mic_volume(s.mic_volume));
     }
     if patch.mic_device_id.is_some() {
         state.engine.set_mic_device(s.mic_device_id.clone());
     }
 
     *state.settings.write() = s.clone();
+    // After the write: the bar reads the new mode and hotkey.
+    if patch.control_bar.is_some() || patch.hotkey_record.is_some() {
+        crate::recording::sync_bar(&app);
+        crate::recording::emit_state(&app);
+    }
     Ok(s)
 }
 
@@ -1073,7 +1129,7 @@ pub fn save_profile(
     } else {
         profile.name = profile.name.trim().to_string();
     }
-    profile.buffer_seconds = profile.buffer_seconds.clamp(5, 600);
+    profile.buffer_seconds = profile.buffer_seconds.clamp(5, crate::settings::MAX_BUFFER_SECONDS);
     profile.target_fps = profile.target_fps.clamp(24, 240);
     profile.bitrate_kbps = profile.bitrate_kbps.clamp(1_000, 150_000);
 

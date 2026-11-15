@@ -128,6 +128,34 @@ pub struct Settings {
     /// and auto-cleanup / "Delete all" never touch these.
     #[serde(default)]
     pub library_folders: Vec<String>,
+    /// Starts / stops a screen recording.
+    #[serde(default = "default_record_hotkey")]
+    pub hotkey_record: String,
+    /// Small on-screen control bar: "recording" (while recording), "always"
+    /// or "off". It is never captured.
+    #[serde(default = "default_control_bar")]
+    pub control_bar: String,
+    /// "Open with Lastshot" on MP4 files in Explorer's right-click menu.
+    #[serde(default)]
+    pub explorer_open_with: bool,
+    /// Where screenshots are saved; empty = `<save location>\Screenshots`.
+    #[serde(default)]
+    pub screenshot_dir: String,
+    /// "png" (lossless) or "jpg" (smaller).
+    #[serde(default = "default_screenshot_format")]
+    pub screenshot_format: String,
+    /// JPG quality 50-100.
+    #[serde(default = "default_screenshot_quality")]
+    pub screenshot_quality: u8,
+    /// Put screenshots on the clipboard (otherwise they are only saved).
+    #[serde(default = "default_true")]
+    pub screenshot_copy: bool,
+    /// Where screen recordings are saved; empty = the save location.
+    #[serde(default)]
+    pub recording_dir: String,
+    /// Hides folder paths in the window (for streaming / screen sharing).
+    #[serde(default)]
+    pub streamer_mode: bool,
 }
 
 fn default_share_mb() -> f32 {
@@ -136,6 +164,26 @@ fn default_share_mb() -> f32 {
 
 fn default_snip_hotkey() -> String {
     "Alt+S".into()
+}
+
+fn default_screenshot_format() -> String {
+    "png".into()
+}
+
+fn default_screenshot_quality() -> u8 {
+    90
+}
+
+/// Longest instant replay (60 min). It only costs RAM, and the ring's byte
+/// cap (half the PC's memory at most) keeps a big number from eating it all.
+pub const MAX_BUFFER_SECONDS: u32 = 3600;
+
+fn default_record_hotkey() -> String {
+    "Alt+R".into()
+}
+
+fn default_control_bar() -> String {
+    "recording".into()
 }
 
 fn default_30() -> u32 {
@@ -148,6 +196,35 @@ fn default_4() -> u32 {
 
 fn default_100() -> u32 {
     100
+}
+
+impl Settings {
+    /// Folders Clips scans besides the save location: the extra library
+    /// folders, plus the recordings folder when it lies outside the save
+    /// location (so recordings always show up in Clips).
+    pub fn scan_folders(&self) -> Vec<std::path::PathBuf> {
+        let mut out: Vec<std::path::PathBuf> =
+            self.library_folders.iter().map(std::path::PathBuf::from).collect();
+        let rec = self.recording_dir.trim();
+        if !rec.is_empty() {
+            let p = std::path::PathBuf::from(rec);
+            let inside = p.starts_with(&self.output_dir);
+            let listed = out.iter().any(|d| d.to_string_lossy().eq_ignore_ascii_case(rec));
+            if !inside && !listed {
+                out.push(p);
+            }
+        }
+        out
+    }
+
+    /// Where screenshots are saved.
+    pub fn screenshots_dir(&self) -> std::path::PathBuf {
+        if self.screenshot_dir.trim().is_empty() {
+            std::path::PathBuf::from(&self.output_dir).join("Screenshots")
+        } else {
+            std::path::PathBuf::from(self.screenshot_dir.trim())
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -192,6 +269,15 @@ impl Default for Settings {
             hotkey_snip: default_snip_hotkey(),
             snip_save_to_folder: true,
             library_folders: Vec::new(),
+            hotkey_record: default_record_hotkey(),
+            control_bar: default_control_bar(),
+            explorer_open_with: false,
+            screenshot_dir: String::new(),
+            screenshot_format: default_screenshot_format(),
+            screenshot_quality: default_screenshot_quality(),
+            screenshot_copy: true,
+            recording_dir: String::new(),
+            streamer_mode: false,
         }
     }
 }
@@ -257,7 +343,7 @@ impl Settings {
 
     /// Copies a profile's capture values into the global settings.
     pub fn apply_profile_values(&mut self, profile: &CaptureProfile) {
-        self.buffer_seconds = profile.buffer_seconds.clamp(5, 600);
+        self.buffer_seconds = profile.buffer_seconds.clamp(5, MAX_BUFFER_SECONDS);
         self.target_fps = profile.target_fps.clamp(24, 240);
         self.bitrate_kbps = profile.bitrate_kbps.clamp(1_000, 150_000);
         self.codec = profile.codec;
@@ -267,7 +353,7 @@ impl Settings {
     /// auto-switch profile should be armed from the very first frame).
     pub fn to_profile_config(&self, profile: &CaptureProfile) -> RecorderConfig {
         let mut cfg = self.to_recorder_config();
-        cfg.buffer_seconds = profile.buffer_seconds.clamp(5, 600);
+        cfg.buffer_seconds = profile.buffer_seconds.clamp(5, MAX_BUFFER_SECONDS);
         cfg.target_fps = profile.target_fps.clamp(24, 240);
         cfg.bitrate_kbps = profile.bitrate_kbps.clamp(1_000, 150_000);
         cfg.codec = profile.codec;
@@ -277,7 +363,7 @@ impl Settings {
 
     pub fn to_recorder_config(&self) -> RecorderConfig {
         let mut cfg = RecorderConfig {
-            buffer_seconds: self.buffer_seconds.clamp(5, 600),
+            buffer_seconds: self.buffer_seconds.clamp(5, MAX_BUFFER_SECONDS),
             target_fps: self.target_fps.clamp(24, 240),
             width: 0,
             height: 0,

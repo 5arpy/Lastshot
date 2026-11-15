@@ -6,7 +6,6 @@
 //! UI, window label "snip") lets the user pick a region or a window, mark it
 //! up, and hands the finished PNG back here to be copied and/or saved.
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 use parking_lot::Mutex;
@@ -185,30 +184,40 @@ pub async fn snip_finish(
     png: String,
     copy: bool,
     save: bool,
+    jpg: Option<String>,
 ) -> Result<SnipDone, String> {
-    let (save_setting, out_dir) = {
+    let (save_setting, dir, copy_setting) = {
         let s = state.settings.read();
-        (s.snip_save_to_folder, s.output_dir.clone())
+        (s.snip_save_to_folder, s.screenshots_dir(), s.screenshot_copy)
     };
-    let save = save || save_setting;
+    let copy = copy && copy_setting;
+    // Not copying and not saving would lose the picture: save it then.
+    let save = save || save_setting || !copy;
     let result = tauri::async_runtime::spawn_blocking(move || -> Result<SnipDone, String> {
         use base64::Engine;
-        let b64 = png.split_once(',').map(|(_, d)| d).unwrap_or(&png);
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(b64.trim())
-            .map_err(|e| format!("bad image data: {e}"))?;
+        let decode = |data: &str| -> Result<Vec<u8>, String> {
+            let b64 = data.split_once(',').map(|(_, d)| d).unwrap_or(data);
+            base64::engine::general_purpose::STANDARD
+                .decode(b64.trim())
+                .map_err(|e| format!("bad image data: {e}"))
+        };
+        let bytes = decode(&png)?;
         let mut path = None;
         if save {
-            let dir = PathBuf::from(out_dir).join("Screenshots");
+            // JPG when the overlay sent one (Settings › Screenshots › Format).
+            let (file_bytes, ext) = match jpg.as_deref() {
+                Some(j) => (decode(j)?, "jpg"),
+                None => (bytes.clone(), "png"),
+            };
             std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
             let stem = format!("Lastshot_{}", chrono::Local::now().format("%Y-%m-%d_%H-%M-%S"));
-            let mut p = dir.join(format!("{stem}.png"));
+            let mut p = dir.join(format!("{stem}.{ext}"));
             let mut n = 2;
             while p.exists() {
-                p = dir.join(format!("{stem}_{n}.png"));
+                p = dir.join(format!("{stem}_{n}.{ext}"));
                 n += 1;
             }
-            std::fs::write(&p, &bytes).map_err(|e| e.to_string())?;
+            std::fs::write(&p, &file_bytes).map_err(|e| e.to_string())?;
             path = Some(p.to_string_lossy().to_string());
         }
         if copy {
@@ -229,7 +238,7 @@ pub async fn snip_finish(
 #[tauri::command]
 pub fn open_screenshots_folder(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
-    let dir = PathBuf::from(state.settings.read().output_dir.clone()).join("Screenshots");
+    let dir = state.settings.read().screenshots_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     app.opener()
         .open_path(dir.to_string_lossy().to_string(), None::<&str>)

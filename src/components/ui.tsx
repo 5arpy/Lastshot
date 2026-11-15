@@ -8,7 +8,7 @@ export function Row({
   children,
 }: {
   label: string;
-  hint?: string;
+  hint?: ReactNode;
   children: ReactNode;
 }) {
   return (
@@ -84,7 +84,7 @@ export function Section({
 }) {
   const [open, setOpen] = useState(() => readOpen(id));
   return (
-    <section className="panel rounded-xl px-5 pt-4 pb-2">
+    <section id={`settings-${id}`} className="panel scroll-mt-4 rounded-xl px-5 pt-4 pb-2">
       <div className="flex items-start justify-between gap-3 border-b border-line pb-3">
         <div className="min-w-0">
           <h3 className="text-[14px] font-semibold text-ink">{title}</h3>

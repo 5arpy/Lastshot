@@ -6,10 +6,27 @@ All notable changes to **Lastshot** (and, before 1.7.1, to **ClipFlow**, which L
 
 ### Added
 
+- **Screen recording.** Press **Alt+R** (or **Start recording** on Home) to record the screen until you stop, with pause and resume and no time limit. Recordings land in Clips like replays. Turning instant replay off or quitting finishes a running recording first.
+- **On-screen control bar** with the timer, pause, stop, microphone mute, screenshot and a button back to Lastshot. Windows leaves it out of every capture, so it never appears in recordings, replays or screenshots. Show it while recording (default), always, or never (Settings › Screen recording, or right on Home).
+- **New Home.** Three clear actions, each with its shortcut in view: *Save replay* (with how much to keep), *Record screen* and *Screenshot*. A status line says whether instant replay is on. Compact *PC sound* and *Microphone* tiles explain what they record and open their settings when clicked.
+- **Folders and space in Clips.** A sidebar lists all clips, the Lastshot folder and its game subfolders, and your extra folders, each with its clip count and size, plus a bar per drive showing clips, other files and free space. Click a folder to show only its clips; open it in Explorer or remove it from there. Home warns when the drive with your clips runs low.
+- **Move to Lastshot folder** in the editor for clips from an extra folder (keeps stars and tags, works across drives).
+- **Open any video.** Drop an MP4/MOV/M4V on the window, or turn on **Open with Lastshot** (Settings › Clips & storage › Advanced) to get it in Explorer's right-click menu.
+- Clips refreshes by itself while it is open and when you come back to the window.
+- Tray menu: *Start / stop screen recording*.
+- **Parts in the editor.** Press **S** (or *Split here*) to split the clip into parts, drag parts to change their order, and play, save, share or remove any single part. Playback and *Save as new clip* follow your order. (The old *Split* button, which saves two files, is now *Split into 2 files*.)
+- **Instant replay up to 60 minutes.** Type any length in seconds (Settings › Instant replay), next to the presets. It only uses RAM; Settings shows how much and warns when it is more than is free. The memory cap is now half your RAM instead of a fixed 1.5 GB.
+- **Screenshot settings:** your own folder, PNG or JPG (with quality), and whether to copy to the clipboard. The shortcut can be changed right there too.
+- **Screen recording settings:** your own folder for recordings (they still show up in Clips), and the shortcut.
+- **Streamer mode** (Settings › App) hides folder paths everywhere in the window, since they can show your Windows user name. Only folder names are shown.
+- *Open screenshots folder* on Home shows where that is.
+
 - **More folders in Clips.** Settings › Clips & storage › *Also show clips from*: add any folder (another recorder's clips, an old archive, a second drive). Its videos show up in Clips with a 📁 badge and a folder filter, and can be edited, shared, starred and joined like your own. Lastshot keeps saving only to its save location; edits of those clips land there too, and auto-delete / Delete all never touch the extra folders.
 
 ### Changed
 
+- **Settings are easier to find.** Frame rate and screen are main settings now; Sound has no hidden part (volumes and microphone choice are right there, with what each one records). Shortcuts list all four actions. Labels say "instant replay" instead of "buffer".
+- App icon: the play triangle is centred between the corner marks.
 - **Lastshot is fully separate from ClipFlow.** It no longer copies ClipFlow's settings, favorites or tags on first run, no longer has access to the ClipFlow clips folder, and new installs save to `Videos\Lastshot`. Existing Lastshot settings are kept; to see old ClipFlow clips, add `Videos\ClipFlow` as an extra folder.
 
 ### Fixed

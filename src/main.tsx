@@ -10,14 +10,21 @@ import { initTheme } from "./lib/theme";
 // a plain browser for testing. It is loaded separately so the main window
 // does not carry its code.
 const SnipOverlay = lazy(() => import("./components/SnipOverlay"));
-const isSnip = currentWindowLabel() === "snip" || new URLSearchParams(location.search).has("snip");
+const ControlBar = lazy(() => import("./components/ControlBar"));
+const params = new URLSearchParams(location.search);
+const isSnip = currentWindowLabel() === "snip" || params.has("snip");
+const isBar = currentWindowLabel() === "bar" || params.has("bar");
 
 initTheme();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <ErrorBoundary>
-      {isSnip ? (
+      {isBar ? (
+        <Suspense fallback={null}>
+          <ControlBar />
+        </Suspense>
+      ) : isSnip ? (
         <Suspense fallback={<div className="fixed inset-0 bg-black" />}>
           <SnipOverlay />
         </Suspense>

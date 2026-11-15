@@ -4,7 +4,8 @@
   "description": "Capabilities for the Lastshot main window and the snip overlay.",
   "windows": [
     "main",
-    "snip"
+    "snip",
+    "bar"
   ],
   "permissions": [
     "core:default",

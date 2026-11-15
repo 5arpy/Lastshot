@@ -47,7 +47,7 @@ export default function TitleBar({ armed, native, version }: Props) {
               armed ? "bg-emerald-400 animate-rec" : "bg-ink-4",
             )}
           />
-          {armed ? "Recording Buffer Active" : "Ready on Standby"}
+          {armed ? "Instant replay on" : "Instant replay off"}
         </span>
 
         {!native && (

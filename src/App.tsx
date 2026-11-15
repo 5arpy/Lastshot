@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import BufferStatusCard from "./components/BufferStatusCard";
+import HomeDashboard from "./components/HomeDashboard";
+import FolderSidebar, { matchesFolder } from "./components/FolderSidebar";
 import ClipTrimmerModal from "./components/ClipTrimmerModal";
 import GalleryGrid from "./components/GalleryGrid";
 import PipelinePanel from "./components/PipelinePanel";
@@ -20,10 +21,12 @@ import { isIntegratedAdapter } from "./lib/gpu";
 import { cacheThumbnail, getCachedThumbnail } from "./lib/thumbCache";
 import type {
   AppSettings,
+  BarState,
   CaptureProfile,
   ClipMetadata,
   ClipSavedPayload,
   CropRect,
+  DiskInfo,
   EngineStats,
   ExportSegment,
   ForegroundGame,
@@ -33,6 +36,7 @@ import type {
   UpdateProgress,
 } from "./lib/types";
 import { cn } from "./utils/cn";
+import { screenshotsDir, setStreamerMode, shownPath } from "./lib/pathDisplay";
 
 const APP_VERSION = "1.8.0";
 
@@ -110,11 +114,19 @@ const TONE_STYLES: Record<ToastTone, string> = {
 export default function App() {
   const [stats, setStats] = useState<EngineStats>(IDLE_STATS);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
+  setStreamerMode(settings.streamerMode);
   const [monitors, setMonitors] = useState<MonitorInfo[]>([]);
   const [clips, setClips] = useState<ClipMetadata[]>([]);
   const [loadingClips, setLoadingClips] = useState(true);
   const [busy, setBusy] = useState(false);
   const [tab, setTab] = useState<"home" | "clips" | "settings">("home");
+  /** Settings section to scroll to when the Settings tab opens. */
+  const [settingsFocus, setSettingsFocus] = useState<string | null>(null);
+  const [barState, setBarState] = useState<BarState | null>(null);
+  // Recording clock: backend seconds at a moment, advanced locally.
+  const recClock = useRef({ seconds: 0, at: Date.now() });
+  const [, setRecTick] = useState(0);
+  const [disks, setDisks] = useState<DiskInfo[]>([]);
   const [activeClip, setActiveClip] = useState<ClipMetadata | null>(null);
   const [activeFlushMs, setActiveFlushMs] = useState<number | undefined>(undefined);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -344,7 +356,9 @@ export default function App() {
           if (settingsRef.current.playSaveSound) playSaveSound();
           pushToast(
             "ok",
-            `Clip saved in ${payload.flushMs.toFixed(1)} ms`,
+            payload.triggeredBy === "recording"
+              ? "Recording saved"
+              : `Clip saved in ${payload.flushMs.toFixed(1)} ms`,
             `${payload.clip.file_name} · ${formatDuration(payload.clip.duration_seconds)} · ${formatBytes(
               payload.clip.size_bytes,
             )}`,
@@ -363,6 +377,33 @@ export default function App() {
     attach(
       Promise.resolve(lastshot.onError((msg) => pushToast("err", "Engine error", String(msg)))),
     );
+    const applyBar = (b: BarState) => {
+      setBarState(b);
+      recClock.current = { seconds: b.recording?.seconds ?? 0, at: Date.now() };
+    };
+    void lastshot.getBarState().then(applyBar).catch(() => undefined);
+    attach(Promise.resolve(lastshot.onRecording(applyBar)));
+    // Videos dropped on the window, or opened with "Open with Lastshot".
+    const openFile = async (path: string) => {
+      try {
+        const clip = await lastshot.openVideoFile(path);
+        setActiveClip(clip);
+        setActiveFlushMs(undefined);
+      } catch (e) {
+        pushToast("err", "Could not open the video", String(e));
+      }
+    };
+    attach(Promise.resolve(lastshot.onOpenFile((p) => void openFile(p))));
+    attach(
+      Promise.resolve(
+        lastshot.onFilesDropped((paths) => {
+          const video = paths.find((p) => /\.(mp4|mov|m4v)$/i.test(p));
+          if (video) void openFile(video);
+          else if (paths.length) pushToast("warn", "Not a video", "Lastshot opens MP4, MOV and M4V files.");
+        }),
+      ),
+    );
+    void lastshot.takePendingOpen().then((p) => p && void openFile(p)).catch(() => undefined);
     attach(
       lastshot.onShrinkProgress((p) =>
         setShareProgress((m) => (m.has(p.path) ? new Map(m).set(p.path, p.progress) : m)),
@@ -375,7 +416,7 @@ export default function App() {
         } else if (d.copied) {
           pushToast("ok", "Screenshot copied", "Paste it with Ctrl+V.");
         } else if (d.path) {
-          pushToast("ok", "Screenshot saved", d.path);
+          pushToast("ok", "Screenshot saved", shownPath(d.path));
         }
       }),
     );
@@ -417,14 +458,131 @@ export default function App() {
         ? await lastshot.stopBuffer()
         : await lastshot.startBuffer(settings.bufferSeconds, settings.targetFps);
       setStats(next);
-      pushToast(armed ? "warn" : "ok", armed ? "Buffer disarmed" : "Buffer armed", 
-        armed ? "Rolling history released from RAM." : `${settings.bufferSeconds}s rolling window is live.`);
+      pushToast(armed ? "warn" : "ok", armed ? "Instant replay off" : "Instant replay on", 
+        armed ? "Nothing is being kept now." : `Press ${settings.hotkeySave} to save the last ${settings.bufferSeconds} s.`);
     } catch (e) {
       pushToast("err", "Engine failed to start", String(e));
     } finally {
       setBusy(false);
     }
   }, [stats.state, settings.bufferSeconds, settings.targetFps, pushToast]);
+
+  const startRecording = useCallback(async () => {
+    try {
+      await lastshot.startRecording();
+      const b = await lastshot.getBarState();
+      setBarState(b);
+      recClock.current = { seconds: b.recording?.seconds ?? 0, at: Date.now() };
+    } catch (e) {
+      pushToast("err", "Could not start recording", String(e));
+    }
+  }, [pushToast]);
+
+  const stopRecording = useCallback(async () => {
+    setBusy(true);
+    try {
+      const clip = await lastshot.stopRecording();
+      setClips((prev) => [clip, ...prev.filter((c) => c.path !== clip.path)]);
+      setBarState(await lastshot.getBarState());
+    } catch (e) {
+      pushToast("err", "Could not save the recording", String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [pushToast]);
+
+  const pauseRecording = useCallback(
+    async (paused: boolean) => {
+      try {
+        await lastshot.pauseRecording(paused);
+        const b = await lastshot.getBarState();
+        setBarState(b);
+        recClock.current = { seconds: b.recording?.seconds ?? 0, at: Date.now() };
+      } catch (e) {
+        pushToast("err", paused ? "Could not pause" : "Could not resume", String(e));
+      }
+    },
+    [pushToast],
+  );
+
+  const openSettingsAt = useCallback((section: string) => {
+    setSettingsFocus(section);
+    setTab("settings");
+  }, []);
+
+  // Tick the recording timer on Home.
+  const recordingNow = !!barState?.recording && !barState.recording.paused;
+  useEffect(() => {
+    if (!recordingNow) return;
+    const t = window.setInterval(() => setRecTick((n) => n + 1), 500);
+    return () => window.clearInterval(t);
+  }, [recordingNow]);
+  const recordingSeconds = barState?.recording
+    ? recClock.current.seconds + (recordingNow ? (Date.now() - recClock.current.at) / 1000 : 0)
+    : 0;
+
+  // Scroll to the section Home linked to.
+  useEffect(() => {
+    if (tab !== "settings" || !settingsFocus) return;
+    const t = window.setTimeout(() => {
+      const el = document.getElementById(`settings-${settingsFocus}`);
+      el?.scrollIntoView({ behavior: "smooth", block: "start" });
+      el?.classList.add("ring-2", "ring-accent/60");
+      window.setTimeout(() => el?.classList.remove("ring-2", "ring-accent/60"), 1600);
+      setSettingsFocus(null);
+    }, 60);
+    return () => window.clearTimeout(t);
+  }, [tab, settingsFocus]);
+
+  // Drive space for the save folder and extra folders.
+  const diskKey = [settings.outputDir, ...(settings.libraryFolders ?? [])].join("|");
+  const refreshDisks = useCallback(() => {
+    void lastshot
+      .getDiskInfo(diskKey.split("|").filter(Boolean))
+      .then(setDisks)
+      .catch(() => undefined);
+  }, [diskKey]);
+  useEffect(() => {
+    refreshDisks();
+    const t = window.setInterval(refreshDisks, 60_000);
+    return () => window.clearInterval(t);
+  }, [refreshDisks, clips.length]);
+
+  // Keep Clips current while it is on screen (files added or removed outside
+  // Lastshot, e.g. in an extra folder), and when the window comes back.
+  useEffect(() => {
+    if (tab !== "clips") return;
+    const t = window.setInterval(() => {
+      if (document.visibilityState === "visible") void refreshClips();
+    }, 20_000);
+    const onFocus = () => void refreshClips();
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.clearInterval(t);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [tab, refreshClips]);
+
+  const moveToLibrary = useCallback(
+    async (clip: ClipMetadata) => {
+      try {
+        const dest = await lastshot.moveClipToLibrary(clip.path);
+        const moved = { ...clip, path: dest, folder: undefined, file_name: dest.split(/[\\/]/).pop() ?? clip.file_name };
+        setClips((prev) => prev.map((c) => (c.path === clip.path ? moved : c)));
+        setActiveClip((a) => (a && a.path === clip.path ? moved : a));
+        pushToast("ok", "Moved to the Lastshot folder", shownPath(dest));
+        void refreshClips();
+      } catch (e) {
+        pushToast("err", "Could not move the clip", String(e));
+      }
+    },
+    [pushToast, refreshClips],
+  );
+
+  const saveDisk = useMemo(() => {
+    const d = disks.find((x) => settings.outputDir.toLowerCase().startsWith(x.root.toLowerCase()));
+    return d ?? disks[0] ?? null;
+  }, [disks, settings.outputDir]);
 
   // Browser shim for the global hotkey (Tauri registers the real one in Rust).
   useEffect(() => {
@@ -832,12 +990,29 @@ export default function App() {
       const dir = await open({ directory: true, multiple: false, title: "Choose where Lastshot saves clips" });
       if (typeof dir === "string" && dir.length > 0) {
         await patchSettings({ outputDir: dir });
-        pushToast("ok", "Output folder changed", dir);
+        pushToast("ok", "Output folder changed", shownPath(dir));
       }
     } catch (e) {
       pushToast("err", "Could not change folder", String(e));
     }
   }, [native, patchSettings, pushToast]);
+
+  const pickFolder = useCallback(
+    async (title: string): Promise<string | null> => {
+      if (!native) {
+        pushToast("info", "Browser preview", "Use the installed app to pick folders.");
+        return null;
+      }
+      try {
+        const dir = await open({ directory: true, multiple: false, title });
+        return typeof dir === "string" && dir ? dir : null;
+      } catch (e) {
+        pushToast("err", "Could not pick a folder", String(e));
+        return null;
+      }
+    },
+    [native, pushToast],
+  );
 
   const addLibraryFolder = useCallback(async () => {
     if (!native) {
@@ -1215,7 +1390,7 @@ export default function App() {
     const activeTagFilter =
       tagFilter && clips.some((c) => c.tags.includes(tagFilter)) ? tagFilter : null;
     const activeFolderFilter =
-      folderFilter === "all" || folderFilter === "save" || clips.some((c) => c.folder === folderFilter)
+      folderFilter === "all" || folderFilter === "save" || clips.some((c) => matchesFolder(c, folderFilter))
         ? folderFilter
         : "all";
     const list = clips.filter((c) => {
@@ -1225,10 +1400,8 @@ export default function App() {
       const matchesGame = activeGameFilter === "all" || c.game === activeGameFilter;
       const matchesFav = !favOnly || c.favorite;
       const matchesTag = !activeTagFilter || c.tags.includes(activeTagFilter);
-      const matchesFolder =
-        activeFolderFilter === "all" ||
-        (activeFolderFilter === "save" ? !c.folder : c.folder === activeFolderFilter);
-      return matchesQuery && matchesAudio && matchesGame && matchesFav && matchesTag && matchesFolder;
+      const inFolder = matchesFolder(c, activeFolderFilter);
+      return matchesQuery && matchesAudio && matchesGame && matchesFav && matchesTag && inFolder;
     });
     const sorted = [...list];
     switch (sortKey) {
@@ -1589,16 +1762,24 @@ export default function App() {
         {tab === "home" ? (
           /* ================================================== HOME VIEW */
           <div className="mx-auto max-w-[1440px] p-5 space-y-5">
-            {/* Friendly Hero Recording Dashboard */}
-            <BufferStatusCard
+            <HomeDashboard
               stats={stats}
-              hotkey={settings.hotkeySave}
+              settings={settings}
+              bar={barState}
               busy={busy}
               eco={ecoState}
-              onToggle={handleToggle}
-              onSave={() => void handleSave()}
+              disk={saveDisk}
+              recordingSeconds={recordingSeconds}
+              onToggleReplay={() => void handleToggle()}
+              onSaveReplay={() => void handleSave()}
               onSelectDuration={(sec) => void patchSettings({ bufferSeconds: sec })}
-              onOpenSettings={() => setTab("settings")}
+              onStartRecording={() => void startRecording()}
+              onStopRecording={() => void stopRecording()}
+              onPauseRecording={(p) => void pauseRecording(p)}
+              onScreenshot={takeScreenshot}
+              onOpenSettings={openSettingsAt}
+              onControlBar={(m) => void patchSettings({ controlBar: m })}
+              onOpenClips={() => setTab("clips")}
             />
 
             {/* Split Section: Recent Replays (Left) & Live Pipeline Summary (Right) */}
@@ -1632,7 +1813,7 @@ export default function App() {
                       Ready for your first clip
                     </div>
                     <p className="max-w-xs text-[12px] text-ink-3 leading-relaxed">
-                      Start recording above, play, and press{" "}
+                      Turn on instant replay above, play, and press{" "}
                       <kbd className="rounded border border-line-3 bg-surface-2 px-1.5 py-0.5 font-mono text-[10px] text-ink">
                         {settings.hotkeySave}
                       </kbd>{" "}
@@ -1705,12 +1886,6 @@ export default function App() {
                 </div>
                 <div className="mt-3 space-y-2">
                   <QuickAction
-                    title="Take a screenshot"
-                    hint="Drag a box, click a window, or press F for the whole screen."
-                    kbd={settings.hotkeySnip}
-                    onClick={takeScreenshot}
-                  />
-                  <QuickAction
                     title={`Share the newest clip · ${settings.shareSizeMb} MB`}
                     hint={
                       clips[0]
@@ -1724,21 +1899,50 @@ export default function App() {
                   />
                   <QuickAction
                     title="Open clips folder"
-                    hint={settings.outputDir}
+                    hint={shownPath(settings.outputDir)}
                     onClick={() => void lastshot.openOutputFolder()}
                   />
                   <QuickAction
                     title="Open screenshots folder"
+                    hint={shownPath(screenshotsDir(settings))}
                     onClick={() => void lastshot.openScreenshotsFolder()}
                   />
                 </div>
+                {saveDisk && (
+                  <button
+                    type="button"
+                    onClick={() => setTab("clips")}
+                    title="See which folders take the space"
+                    className="mt-3 block w-full rounded-lg border border-line bg-surface-3 px-3.5 py-2.5 text-left hover:border-accent/50"
+                  >
+                    <span className="flex items-baseline justify-between text-[12px]">
+                      <span className="font-medium text-ink">Space on {saveDisk.root.replace(/\\$/, "")}</span>
+                      <span className="font-mono text-[11px] text-ink-3">
+                        {formatBytes(saveDisk.freeBytes)} free of {formatBytes(saveDisk.totalBytes)}
+                      </span>
+                    </span>
+                    <span className="mt-1.5 flex h-1.5 overflow-hidden rounded-full bg-surface-4">
+                      <span
+                        className="h-full bg-accent"
+                        style={{ width: `${(totalBytes / Math.max(1, saveDisk.totalBytes)) * 100}%` }}
+                      />
+                      <span
+                        className="h-full bg-ink-4/60"
+                        style={{
+                          width: `${(Math.max(0, saveDisk.totalBytes - saveDisk.freeBytes - totalBytes) / Math.max(1, saveDisk.totalBytes)) * 100}%`,
+                        }}
+                      />
+                    </span>
+                    <span className="mt-1 block text-[11px] text-ink-3">Your clips take {formatBytes(totalBytes)}</span>
+                  </button>
+                )}
                 {(stats.last_error || stats.audio_error) && (
                   <button
                     type="button"
-                    onClick={() => setTab("settings")}
+                    onClick={() => openSettingsAt(stats.last_error ? "recording" : "audio")}
                     className="mt-3 w-full rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-left text-[11px] text-warn"
                   >
-                    {stats.last_error ?? stats.audio_error} · details in Settings › Instant replay › Advanced
+                    {stats.last_error ?? stats.audio_error} · open Settings ›
                   </button>
                 )}
               </div>
@@ -1746,8 +1950,25 @@ export default function App() {
           </div>
         ) : tab === "clips" ? (
           /* ================================================== CLIPS LIBRARY VIEW */
-          <div className="mx-auto max-w-[1440px] p-5 space-y-4">
-            <section className="space-y-3.5">
+          <div className="mx-auto grid max-w-[1600px] gap-4 p-5 lg:grid-cols-[250px_minmax(0,1fr)]">
+            <div className="hidden lg:block">
+              <div className="sticky top-0">
+                <FolderSidebar
+                  clips={clips}
+                  outputDir={settings.outputDir}
+                  libraryFolders={settings.libraryFolders ?? []}
+                  disks={disks}
+                  value={folderFilter}
+                  onChange={setFolderFilter}
+                  onOpenFolder={(p) => void lastshot.openFolder(p)}
+                  onAddFolder={() => void addLibraryFolder()}
+                  onRemoveFolder={(f) =>
+                    void patchSettings({ libraryFolders: settings.libraryFolders.filter((x) => x !== f) })
+                  }
+                />
+              </div>
+            </div>
+            <section className="min-w-0 space-y-3.5">
               {/* Library Primary Header */}
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line pb-3.5">
                 <div className="flex items-center gap-2.5">
@@ -1797,10 +2018,10 @@ export default function App() {
 
                   {(settings.libraryFolders ?? []).length > 0 && (
                     <select
-                      value={folderFilter}
+                      value={folderFilter.startsWith("dir:") ? "save" : folderFilter}
                       onChange={(e) => setFolderFilter(e.target.value)}
                       title="Which folder's clips to show"
-                      className="max-w-[12rem] rounded-lg border border-line bg-surface px-2.5 py-1.5 text-[11px] text-ink outline-none transition-colors hover:border-line-3 focus:border-accent"
+                      className="max-w-[12rem] lg:hidden rounded-lg border border-line bg-surface px-2.5 py-1.5 text-[11px] text-ink outline-none transition-colors hover:border-line-3 focus:border-accent"
                     >
                       <option value="all" className="bg-app">All folders</option>
                       <option value="save" className="bg-app">Lastshot clips</option>
@@ -2173,6 +2394,8 @@ export default function App() {
               onOpenFolder={() => void lastshot.openOutputFolder()}
               onChooseFolder={() => void chooseOutputFolder()}
               onAddLibraryFolder={() => void addLibraryFolder()}
+              onPickFolder={pickFolder}
+              onOpenPath={(p) => void lastshot.openFolder(p)}
               updateProgress={updateProgress}
               onCheckForUpdates={() => void checkForUpdates()}
               onOpenScreenshots={() => void lastshot.openScreenshotsFolder()}
@@ -2252,6 +2475,7 @@ export default function App() {
           onUpdateTags={(tags) => updateTags(activeClip, tags)}
           onShare={(start, end) => shareClip(activeClip, { start, end })}
           onExport={(segments, crop, mode) => exportEdit(segments, crop, mode, activeClip.path)}
+          onMoveToLibrary={activeClip.folder ? () => moveToLibrary(activeClip) : undefined}
           shareLimitMb={settings.shareSizeMb}
           shareProgress={shareProgress.get(activeClip.path)}
         />

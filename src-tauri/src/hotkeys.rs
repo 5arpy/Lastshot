@@ -40,7 +40,13 @@ pub fn validate(accelerator: &str) -> Result<Shortcut, String> {
 }
 
 /// Registers the save, arm/disarm and snip shortcuts. Called once from `setup`.
-pub fn register_all(app: &AppHandle, save: &str, toggle: &str, snip: &str) -> Result<(), String> {
+pub fn register_all(
+    app: &AppHandle,
+    save: &str,
+    toggle: &str,
+    snip: &str,
+    record: &str,
+) -> Result<(), String> {
     let gs = app.global_shortcut();
     let save_sc = validate(save)?;
     let toggle_sc = validate(toggle)?;
@@ -57,6 +63,11 @@ pub fn register_all(app: &AppHandle, save: &str, toggle: &str, snip: &str) -> Re
     if !gs.is_registered(snip_sc) {
         gs.register(snip_sc)
             .map_err(|e| format!("could not register {snip}: {e} (another app may own it)"))?;
+    }
+    let record_sc = validate(record)?;
+    if !gs.is_registered(record_sc) {
+        gs.register(record_sc)
+            .map_err(|e| format!("could not register {record}: {e} (another app may own it)"))?;
     }
     Ok(())
 }
@@ -93,9 +104,14 @@ pub fn on_shortcut(app: &AppHandle, shortcut: &Shortcut, state: ShortcutState) {
     // Read only the two hotkey strings — cloning the full Settings (which
     // includes Vec<CaptureProfile> and Vec<ProfileMapEntry>) on every global
     // shortcut event is wasteful and holds the read lock longer than needed.
-    let (save_key, toggle_key, snip_key) = {
+    let (save_key, toggle_key, snip_key, record_key) = {
         let s = app_state.settings.read();
-        (s.hotkey_save.clone(), s.hotkey_toggle.clone(), s.hotkey_snip.clone())
+        (
+            s.hotkey_save.clone(),
+            s.hotkey_toggle.clone(),
+            s.hotkey_snip.clone(),
+            s.hotkey_record.clone(),
+        )
     };
 
     let save_matches = parse(&save_key)
@@ -113,6 +129,8 @@ pub fn on_shortcut(app: &AppHandle, shortcut: &Shortcut, state: ShortcutState) {
         trigger_toggle(app.clone());
     } else if parse(&snip_key).map(|s| &s == shortcut).unwrap_or(false) {
         crate::snip::begin(app.clone());
+    } else if parse(&record_key).map(|s| &s == shortcut).unwrap_or(false) {
+        crate::recording::toggle(app.clone());
     }
 }
 
@@ -304,6 +322,11 @@ pub fn trigger_toggle(app: AppHandle) {
         let Some(state) = app.try_state::<AppState>() else {
             return;
         };
+        if state.engine.recording_status().is_some() {
+            if let Err(e) = crate::recording::stop(&app).await {
+                let _ = app.emit(EVT_ERROR, e);
+            }
+        }
         let engine = Arc::clone(&state.engine);
         let cfg = state.settings.read().to_recorder_config();
 

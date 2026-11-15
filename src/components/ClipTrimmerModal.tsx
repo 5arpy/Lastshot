@@ -1,13 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { shownPath } from "../lib/pathDisplay";
 import { assetUrl, lastshot } from "../lib/bridge";
 import type { ClipMetadata, CropRect, ExportSegment } from "../lib/types";
 import {
   addCut,
   CROP_ASPECTS,
   cropRect,
+  inTimeOrder,
   isFullFrame,
   keptRanges,
+  moveItem,
+  orderParts,
+  partKey,
   skipCuts,
+  splitRanges,
   totalLength,
   type CropAspect,
   type CropState,
@@ -56,6 +62,8 @@ interface Props {
     crop: CropRect | null,
     mode: "save" | "share",
   ) => Promise<void> | void;
+  /** Set for clips from another folder: moves the file into the Lastshot folder. */
+  onMoveToLibrary?: () => Promise<void> | void;
 }
 
 const HANDLE_W = 14;
@@ -69,6 +77,7 @@ export default function ClipTrimmerModal({
   shareLimitMb,
   shareProgress,
   onExport,
+  onMoveToLibrary,
   onCopy,
   onReveal,
   onOpenExternal,
@@ -95,6 +104,13 @@ export default function ClipTrimmerModal({
   const [nameDraft, setNameDraft] = useState(clip.file_name);
   const [tagDraft, setTagDraft] = useState("");
   const [cuts, setCuts] = useState<Range[]>([]);
+  /** Split points (seconds) that divide the kept video into parts. */
+  const [splits, setSplits] = useState<number[]>([]);
+  /** Part order chosen by dragging (part keys); null = time order. */
+  const [order, setOrder] = useState<string[] | null>(null);
+  const [dragPart, setDragPart] = useState<number | null>(null);
+  /** While set, playback stops at this time (playing one part). */
+  const stopAtRef = useRef<number | null>(null);
   const [crop, setCrop] = useState<CropState | null>(null);
   const [exportKind, setExportKind] = useState<"save" | "share">("share");
   const viewRef = useRef<HTMLDivElement | null>(null);
@@ -111,6 +127,8 @@ export default function ClipTrimmerModal({
     setNameDraft(clip.file_name);
     setRenaming(false);
     setCuts([]);
+    setSplits([]);
+    setOrder(null);
     setCrop(null);
   }, [clip.id, clip.duration_seconds, clip.file_name]);
 
@@ -181,14 +199,16 @@ export default function ClipTrimmerModal({
     const v = videoRef.current;
     if (!v) return;
     if (v.paused) {
-      if (v.currentTime >= end - 0.05 || v.currentTime < start) v.currentTime = start;
-      v.currentTime = skipCuts(v.currentTime, cuts);
+      const seq = seqRef.current;
+      const inside = seq.some((p) => v.currentTime >= p.start && v.currentTime < p.end - 0.05);
+      if (!inside && seq[0]) v.currentTime = seq[0].start;
       void v.play().catch(() => undefined);
     } else {
       v.pause();
     }
-  }, [cuts, end, start]);
+  }, []);
 
+  // Playback follows the parts in their order, skipping cuts.
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
@@ -196,23 +216,35 @@ export default function ClipTrimmerModal({
     const loop = () => {
       if (!v.paused) {
         let cur = v.currentTime;
-        const jump = skipCuts(cur, cuts);
-        if (jump !== cur) {
-          v.currentTime = jump;
-          cur = jump;
+        const seq = seqRef.current;
+        const stopAt = stopAtRef.current;
+        if (stopAt !== null && cur >= stopAt - 0.02) {
+          v.pause();
+          stopAtRef.current = null;
+        } else {
+          const inPart = seq.some((p) => cur >= p.start - 0.02 && cur < p.end - 0.02);
+          if (!inPart) {
+            // A part just ended: go on with the next one in order. In a cut
+            // (or before the start): the next part in time. Else stop.
+            const ended = seq.findIndex((p) => Math.abs(cur - p.end) < 0.1);
+            const next = ended >= 0 ? seq[ended + 1] : seq.find((p) => p.start > cur);
+            if (next) {
+              v.currentTime = next.start;
+              cur = next.start;
+            } else {
+              v.pause();
+              cur = seq[0]?.start ?? 0;
+              v.currentTime = cur;
+            }
+          }
         }
         setPlayhead(cur);
-        if (cur >= end) {
-          v.pause();
-          v.currentTime = start;
-          setPlayhead(start);
-        }
       }
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [cuts, end, start]);
+  }, []);
 
   const positionFromEvent = useCallback(
     (clientX: number): number => {
@@ -275,6 +307,10 @@ export default function ClipTrimmerModal({
       } else if (e.key === "x" || e.key === "X" || e.key === "Delete") {
         e.preventDefault();
         cutOutRef.current();
+      } else if (e.key === "s" || e.key === "S") {
+        if (e.ctrlKey || e.metaKey) return;
+        e.preventDefault();
+        splitHereRef.current();
       } else if (e.key === "ArrowLeft") {
         seek(clamp(playhead - (e.shiftKey ? 1 : 1 / 60), start, end));
       } else if (e.key === "ArrowRight") {
@@ -285,7 +321,12 @@ export default function ClipTrimmerModal({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose, togglePlay, playhead, start, end, duration, seek]);
 
-  const kept = useMemo(() => keptRanges(start, end, cuts), [start, end, cuts]);
+  const parts = useMemo(() => splitRanges(keptRanges(start, end, cuts), splits), [start, end, cuts, splits]);
+  /** The parts in the order they play and export. */
+  const kept = useMemo(() => orderParts(parts, order), [parts, order]);
+  const reordered = !inTimeOrder(kept);
+  const seqRef = useRef(kept);
+  seqRef.current = kept;
   const selectionSeconds = totalLength(kept);
   const estimatedBytes = useMemo(
     () =>
@@ -300,8 +341,8 @@ export default function ClipTrimmerModal({
   const cropBox = crop ? cropRect(srcW, srcH, crop) : null;
   const activeCrop = cropBox && !isFullFrame(cropBox) ? cropBox : null;
   /** One plain range and no crop: the lossless stream-copy path still works. */
-  const simple = !activeCrop && kept.length <= 1;
-  const plainRange = kept[0] ?? { start, end };
+  const simple = !activeCrop && keptRanges(start, end, cuts).length <= 1 && !reordered;
+  const plainRange = keptRanges(start, end, cuts)[0] ?? { start, end };
   const segments: ExportSegment[] = kept.map((r) => ({
     path: clip.path,
     start: r.start,
@@ -329,6 +370,48 @@ export default function ClipTrimmerModal({
   };
   const cutOutRef = useRef(cutOut);
   cutOutRef.current = cutOut;
+
+  const splitHere = () => {
+    const t = playhead;
+    if (!parts.some((p) => t - p.start >= 0.1 && p.end - t >= 0.1)) return;
+    // Keep the current order: freeze it before adding the new part.
+    setOrder(kept.map(partKey));
+    setSplits((s) => [...s.filter((x) => Math.abs(x - t) > 0.05), t]);
+  };
+  const splitHereRef = useRef(splitHere);
+  splitHereRef.current = splitHere;
+
+  const removePart = (p: Range) => {
+    const next = addCut(cuts, p.start, p.end);
+    if (keptRanges(0, duration, next).length === 0) return;
+    setCuts(next);
+  };
+
+  const playPart = (p: Range) => {
+    const v = videoRef.current;
+    if (!v) return;
+    stopAtRef.current = p.end;
+    v.currentTime = p.start;
+    setPlayhead(p.start);
+    void v.play().catch(() => undefined);
+  };
+
+  const exportPart = (p: Range, mode: "save" | "share") => {
+    setExportKind(mode);
+    if (!activeCrop) {
+      // One plain part: lossless and instant.
+      if (mode === "save") void run("Saving part…", () => onSaveTrimmed(p.start, p.end));
+      else void onShare(p.start, p.end);
+      return;
+    }
+    void onExport([{ path: clip.path, start: p.start, end: p.end }], activeCrop, mode);
+  };
+
+  const dropPart = (to: number) => {
+    if (dragPart === null || dragPart === to) return;
+    setOrder(moveItem(kept, dragPart, to).map(partKey));
+    setDragPart(null);
+  };
 
   const dragCrop = (e: React.PointerEvent) => {
     if (!crop || !pic) return;
@@ -537,7 +620,7 @@ export default function ClipTrimmerModal({
               <div className="grid h-full w-full place-items-center text-center">
                 <div>
                   <div className="font-mono text-[13px] text-ink-5">NO PREVIEW STREAM</div>
-                  <div className="mt-1 font-mono text-[11px] text-ink-5">{clip.path}</div>
+                  <div className="mt-1 font-mono text-[11px] text-ink-5">{shownPath(clip.path)}</div>
                 </div>
               </div>
             )}
@@ -646,6 +729,15 @@ export default function ClipTrimmerModal({
                 />
               ))}
 
+              {/* Split marks */}
+              {splits.map((t) => (
+                <div
+                  key={t}
+                  className="pointer-events-none absolute inset-y-1 w-px bg-amber-300"
+                  style={{ left: pct(t) }}
+                />
+              ))}
+
               {/* Playhead */}
               <div
                 className="pointer-events-none absolute inset-y-0 w-0.5 bg-ink shadow-[0_0_0_1px_rgba(255,255,255,0.9)]"
@@ -736,6 +828,110 @@ export default function ClipTrimmerModal({
                 </button>
                 <span>Space: Play · ←/→: Step · Esc: Close</span>
               </div>
+            </div>
+
+            {/* Parts: split, reorder by dragging, play / save / share one part */}
+            <div className="space-y-1.5 border-t border-line pt-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2 font-mono text-[10px] text-ink-3">
+                <span>
+                  PARTS{" "}
+                  {kept.length > 1 ? (
+                    <span className="normal-case">· drag to change the order{reordered ? " (playback and Save follow it)" : ""}</span>
+                  ) : (
+                    <span className="normal-case">· split the clip to rearrange or export parts on their own</span>
+                  )}
+                </span>
+                <span className="flex items-center gap-1.5">
+                  {reordered && (
+                    <button
+                      type="button"
+                      onClick={() => setOrder(null)}
+                      className="rounded border border-line bg-surface px-2 py-1 hover:text-ink"
+                    >
+                      Time order
+                    </button>
+                  )}
+                  {splits.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSplits([]);
+                        setOrder(null);
+                      }}
+                      title="Join all parts back together"
+                      className="rounded border border-line bg-surface px-2 py-1 hover:text-ink"
+                    >
+                      Unsplit all
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={splitHere}
+                    title="Splits the part under the playhead in two"
+                    className="rounded border border-line bg-surface px-2 py-1 text-ink hover:border-accent"
+                  >
+                    Split here [S]
+                  </button>
+                </span>
+              </div>
+              {kept.length > 1 && (
+                <div className="flex gap-1 overflow-x-auto pb-1">
+                  {kept.map((p, i) => {
+                    const active = playhead >= p.start && playhead < p.end;
+                    return (
+                      <div
+                        key={partKey(p)}
+                        draggable
+                        onDragStart={(e) => {
+                          setDragPart(i);
+                          e.dataTransfer.effectAllowed = "move";
+                        }}
+                        onDragOver={(e) => e.preventDefault()}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          dropPart(i);
+                        }}
+                        onDragEnd={() => setDragPart(null)}
+                        onClick={() => seek(p.start)}
+                        title={`${formatTimecode(p.start)} – ${formatTimecode(p.end)}`}
+                        style={{ flexGrow: Math.max(p.end - p.start, 0.5), flexBasis: 0 }}
+                        className={cn(
+                          "group min-w-[92px] cursor-grab rounded-md border px-2 py-1.5 font-mono text-[10px] transition-colors active:cursor-grabbing",
+                          active ? "border-accent bg-accent/15 text-ink" : "border-line-2 bg-surface-2 text-ink-3",
+                          dragPart === i && "opacity-40",
+                        )}
+                      >
+                        <div className="flex items-center justify-between gap-1">
+                          <span className="font-semibold text-ink">{i + 1}</span>
+                          <span>{formatTimecode(p.end - p.start)}</span>
+                        </div>
+                        <div className="mt-1 flex gap-0.5 opacity-60 group-hover:opacity-100">
+                          {[
+                            { l: "▶", t: "Play this part", f: () => playPart(p) },
+                            { l: "Save", t: "Save this part as a new clip", f: () => exportPart(p, "save") },
+                            { l: "Share", t: `Shrink this part under ${shareLimitMb} MB and copy it`, f: () => exportPart(p, "share") },
+                            { l: "✕", t: "Remove this part (it becomes a cut you can put back)", f: () => removePart(p) },
+                          ].map((b) => (
+                            <button
+                              key={b.l}
+                              type="button"
+                              title={b.t}
+                              disabled={busy || (b.l !== "▶" && shareProgress !== undefined)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                b.f();
+                              }}
+                              className="rounded px-1 hover:bg-surface-4 hover:text-ink disabled:opacity-40"
+                            >
+                              {b.l}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
             {/* Edit: cut parts out, crop the picture */}
@@ -831,7 +1027,7 @@ export default function ClipTrimmerModal({
                 <span>
                   {simple
                     ? "Save: stream copy, lossless, instant"
-                    : `Save: re-encodes at full quality${activeCrop ? " with the crop" : ""} (${kept.length} part${kept.length === 1 ? "" : "s"})`}
+                    : `Save: re-encodes at full quality${activeCrop ? " with the crop" : ""} (${kept.length} part${kept.length === 1 ? "" : "s"}${reordered ? ", in your order" : ""})`}
                 </span>
               )}
             </div>
@@ -864,6 +1060,18 @@ export default function ClipTrimmerModal({
               >
                 Reveal
               </button>
+
+              {onMoveToLibrary && (
+                <button
+                  type="button"
+                  onClick={() => run("Moving…", onMoveToLibrary)}
+                  disabled={busy}
+                  title="Move this file into the Lastshot folder (keeps its star and tags)"
+                  className="rounded-lg border border-line bg-surface px-3 py-1.5 text-[11px] text-ink hover:border-line-3 hover:text-ink disabled:opacity-40"
+                >
+                  Move to Lastshot folder
+                </button>
+              )}
 
               <button
                 type="button"
@@ -899,10 +1107,10 @@ export default function ClipTrimmerModal({
                 type="button"
                 onClick={() => run("Splitting at playhead…", () => onSplit(playhead))}
                 disabled={busy || playhead < 0.2 || playhead > duration - 0.2}
-                title="Cut the clip in two at the playhead without re-encoding"
+                title="Saves the clip as two files, split at the playhead, without re-encoding"
                 className="rounded-lg border border-line bg-surface px-3 py-1.5 text-[11px] text-ink hover:border-amber-400 hover:text-warn disabled:opacity-40"
               >
-                Split
+                Split into 2 files
               </button>
 
               <button

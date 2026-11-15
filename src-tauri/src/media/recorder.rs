@@ -376,8 +376,9 @@ pub struct RollingRingBuffer {
 impl RollingRingBuffer {
     pub fn new(window_seconds: u32, hard_byte_cap_mb: usize) -> Self {
         Self {
-            video: VecDeque::with_capacity(window_seconds as usize * 120),
-            audio: VecDeque::with_capacity(window_seconds as usize * 60),
+            // Grows as needed; long windows need not reserve it all up front.
+            video: VecDeque::with_capacity(window_seconds.min(600) as usize * 120),
+            audio: VecDeque::with_capacity(window_seconds.min(600) as usize * 60),
             window_hns: window_seconds as i64 * HNS_PER_SECOND,
             hard_byte_cap: hard_byte_cap_mb * 1024 * 1024,
             bytes: 0,
@@ -506,6 +507,48 @@ impl RollingRingBuffer {
 
     pub fn video_frames(&self) -> usize {
         self.video.len()
+    }
+
+    /// Generation and newest video timestamp, or `None` when empty.
+    pub fn newest_video(&self) -> Option<(u32, i64)> {
+        self.video.back().map(|p| (p.generation, p.pts_hns))
+    }
+
+    /// Timestamp of the newest key frame at or before `pts` (same generation).
+    pub fn keyframe_at_or_before(&self, generation: u32, pts: i64) -> Option<i64> {
+        self.video
+            .iter()
+            .rev()
+            .find(|p| p.generation == generation && p.keyframe && p.pts_hns <= pts)
+            .map(|p| p.pts_hns)
+    }
+
+    /// True when any audio is buffered.
+    pub fn has_audio(&self) -> bool {
+        !self.audio.is_empty()
+    }
+
+    /// Packets of `generation` newer than the given timestamps, oldest first.
+    /// Used by screen recording to stream the ring to disk as it fills.
+    pub fn packets_after(
+        &self,
+        generation: u32,
+        video_after: i64,
+        audio_after: i64,
+    ) -> (Vec<EncodedPacket>, Vec<EncodedPacket>) {
+        let video = self
+            .video
+            .iter()
+            .filter(|p| p.generation == generation && p.pts_hns > video_after)
+            .cloned()
+            .collect();
+        let audio = self
+            .audio
+            .iter()
+            .filter(|p| p.generation == generation && p.pts_hns > audio_after)
+            .cloned()
+            .collect();
+        (video, audio)
     }
 
     pub fn span_seconds(&self) -> f32 {
@@ -643,9 +686,17 @@ impl SharedState {
 
 fn ring_cap_mb(buffer_seconds: u32, bitrate_kbps: u32) -> usize {
     // 1.6x head room over the nominal bitrate covers VBV overshoot on scene
-    // cuts. Clamped so a mis-typed config can never eat the machine's RAM.
+    // cuts. Clamped so a long window can never eat the machine's RAM.
     let nominal = (buffer_seconds as u64 * bitrate_kbps as u64) / 8 / 1024;
-    ((nominal as f64 * 1.6) as usize).clamp(24, 1536)
+    ((nominal as f64 * 1.6) as usize).clamp(24, ring_ceiling_mb())
+}
+
+/// Most RAM the ring may take: half the PC's memory, never below 1.5 GB.
+fn ring_ceiling_mb() -> usize {
+    let total = crate::power::read_power_state()
+        .map(|p| p.total_ram_bytes)
+        .unwrap_or(0);
+    ((total / 2 / (1024 * 1024)) as usize).max(1536)
 }
 
 /// Heuristic for "the game and the encoder share one GPU". Dedicated VRAM is
@@ -682,7 +733,30 @@ pub fn default_output_dir() -> PathBuf {
 // CaptureEngine - the public facade used by `commands.rs`
 // ---------------------------------------------------------------------------
 
+/// What the UI shows about a running screen recording.
+#[derive(Debug, Clone, Serialize)]
+pub struct RecordingStatus {
+    pub path: String,
+    pub file_name: String,
+    /// Seconds written so far (pauses not counted).
+    pub seconds: f32,
+    pub paused: bool,
+    /// False once the recording thread has ended on its own (display change,
+    /// disk error); the caller should then collect it with `stop_recording`.
+    pub active: bool,
+}
+
+struct Recording {
+    stop: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+    written_hns: Arc<std::sync::atomic::AtomicI64>,
+    path: PathBuf,
+    started: Instant,
+    thread: Option<std::thread::JoinHandle<RResult<(i64, bool)>>>,
+}
+
 pub struct CaptureEngine {
+    recording: Mutex<Option<Recording>>,
     shared: Arc<SharedState>,
     config: RwLock<RecorderConfig>,
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -723,6 +797,7 @@ impl CaptureEngine {
         let cfg = RecorderConfig::default();
         let mic_dev = cfg.mic_device_id.clone();
         Self {
+            recording: Mutex::new(None),
             shared: Arc::new(SharedState::new(&cfg)),
             config: RwLock::new(cfg),
             worker: Mutex::new(None),
@@ -914,6 +989,11 @@ impl CaptureEngine {
     }
 
     pub fn stop(&self) {
+        // A recording must be finalised before the ring goes away, or the
+        // MP4 has no index and will not play.
+        if self.recording.lock().is_some() {
+            let _ = self.stop_recording();
+        }
         self.shared.stop_requested.store(true, Ordering::Release);
         if let Some(a) = self.audio.lock().take() {
             a.stop();
@@ -929,8 +1009,132 @@ impl CaptureEngine {
         *self.shared.integrated_gpu.write() = false;
     }
 
+    // ------------------------------------------------------------ recording
+
+    /// Starts writing everything the engine captures from now on to `path`
+    /// (screen recording). The engine must be running. The capture ring is
+    /// streamed to disk every half second, so no second encoder is needed.
+    pub fn start_recording(&self, path: PathBuf) -> RResult<RecordingStatus> {
+        if !self.is_running() {
+            return Err(RecorderError::NotRunning);
+        }
+        let mut slot = self.recording.lock();
+        if slot.as_ref().is_some_and(|r| r.thread.as_ref().is_some_and(|t| !t.is_finished())) {
+            return Err(RecorderError::Other("Already recording".into()));
+        }
+        let header = self
+            .video_format
+            .lock()
+            .clone()
+            .ok_or_else(|| RecorderError::Other("The recorder is still starting. Try again in a second.".into()))?;
+        let (generation, start) = {
+            let ring = self.shared.ring.lock();
+            let (generation, newest) = ring
+                .newest_video()
+                .ok_or_else(|| RecorderError::Other("The recorder is still starting. Try again in a second.".into()))?;
+            let kf = ring.keyframe_at_or_before(generation, newest).unwrap_or(newest);
+            (generation, kf)
+        };
+        let with_audio = self.shared.ring.lock().has_audio();
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let paused = Arc::new(AtomicBool::new(false));
+        let written = Arc::new(std::sync::atomic::AtomicI64::new(0));
+        let ring = Arc::clone(&self.shared.ring);
+        let (t_stop, t_paused, t_written, t_path) =
+            (Arc::clone(&stop), Arc::clone(&paused), Arc::clone(&written), path.clone());
+        let thread = std::thread::Builder::new()
+            .name("lastshot-recording".into())
+            .spawn(move || {
+                record_loop(&t_path, &header, &ring, generation, start, with_audio, &t_stop, &t_paused, &t_written)
+            })
+            .map_err(|e| RecorderError::Other(format!("could not start recording: {e}")))?;
+        *slot = Some(Recording {
+            stop,
+            paused,
+            written_hns: written,
+            path,
+            started: Instant::now(),
+            thread: Some(thread),
+        });
+        drop(slot);
+        Ok(self.recording_status().expect("just started"))
+    }
+
+    pub fn recording_status(&self) -> Option<RecordingStatus> {
+        let slot = self.recording.lock();
+        let r = slot.as_ref()?;
+        Some(RecordingStatus {
+            path: r.path.to_string_lossy().to_string(),
+            file_name: r
+                .path
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            seconds: r.written_hns.load(Ordering::Relaxed) as f32 / HNS_PER_SECOND as f32,
+            paused: r.paused.load(Ordering::Relaxed),
+            active: r.thread.as_ref().is_some_and(|t| !t.is_finished()),
+        })
+    }
+
+    pub fn set_recording_paused(&self, paused: bool) -> bool {
+        match self.recording.lock().as_ref() {
+            Some(r) => {
+                r.paused.store(paused, Ordering::Relaxed);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Finishes the recording and returns the written file.
+    pub fn stop_recording(&self) -> RResult<ClipWriteResult> {
+        let rec = self
+            .recording
+            .lock()
+            .take()
+            .ok_or_else(|| RecorderError::Other("Not recording".into()))?;
+        let t0 = Instant::now();
+        rec.stop.store(true, Ordering::Relaxed);
+        let mut rec = rec;
+        let joined = rec
+            .thread
+            .take()
+            .map(|t| t.join())
+            .unwrap_or(Ok(Ok((0, false))));
+        let (duration_hns, has_audio) = match joined {
+            Ok(r) => r,
+            Err(_) => Err(RecorderError::Other("the recording thread crashed".into())),
+        }
+        .inspect_err(|_| {
+            if std::fs::metadata(&rec.path).map(|m| m.len() == 0).unwrap_or(false) {
+                let _ = std::fs::remove_file(&rec.path);
+            }
+        })?;
+        let header = self.video_format.lock().clone().unwrap_or_default();
+        let _ = rec.started;
+        Ok(ClipWriteResult {
+            path: rec.path.to_string_lossy().to_string(),
+            file_name: rec
+                .path
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            duration_seconds: duration_hns as f32 / HNS_PER_SECOND as f32,
+            size_bytes: std::fs::metadata(&rec.path).map(|m| m.len()).unwrap_or(0),
+            flush_ms: t0.elapsed().as_secs_f32() * 1000.0,
+            width: header.width,
+            height: header.height,
+            fps: self.config.read().target_fps,
+            has_audio,
+        })
+    }
+
     pub fn set_buffer_seconds(&self, seconds: u32) {
-        let seconds = seconds.clamp(5, 600);
+        let seconds = seconds.clamp(5, crate::settings::MAX_BUFFER_SECONDS);
         let bitrate = {
             let mut cfg = self.config.write();
             cfg.buffer_seconds = seconds;
@@ -2041,6 +2245,29 @@ mod win {
         video: &[EncodedPacket],
         audio: &[EncodedPacket],
     ) -> RResult<()> {
+        let mut m = StreamMux::open(path, header, !audio.is_empty())?;
+        let base_pts = video.first().map(|p| p.pts_hns).unwrap_or(0);
+        for pkt in video {
+            m.write(TrackKind::Video, pkt, pkt.pts_hns - base_pts)?;
+        }
+        for pkt in audio {
+            m.write(TrackKind::Audio, pkt, pkt.pts_hns - base_pts)?;
+        }
+        m.finish()
+    }
+
+    /// An MP4 that encoded packets are appended to (pass-through, no
+    /// re-encode). Used for replays (all at once) and screen recordings
+    /// (streamed while they run). Must stay on the thread that opened it.
+    pub(super) struct StreamMux {
+        _session: MfSession,
+        writer: IMFSinkWriter,
+        vstream: u32,
+        astream: Option<u32>,
+    }
+
+    impl StreamMux {
+        pub(super) fn open(path: &Path, header: &VideoFormatHeader, with_audio: bool) -> RResult<Self> {
         unsafe {
             let _session = MfSession::new()?;
             let wide: Vec<u16> = path
@@ -2097,7 +2324,7 @@ mod win {
             writer.SetInputMediaType(vstream, &vtype, None).map_err(hr)?;
 
             // ---- audio stream (AAC pass-through) ----
-            let astream = if !audio.is_empty() {
+            let astream = if with_audio {
                 let atype = MFCreateMediaType().map_err(hr)?;
                 atype
                     .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)
@@ -2130,23 +2357,30 @@ mod win {
             };
 
             writer.BeginWriting().map_err(hr)?;
+            Ok(Self { _session, writer, vstream, astream })
+        }
+        }
 
-            let base_pts = video.first().map(|p| p.pts_hns).unwrap_or(0);
-            for pkt in video {
-                let sample = make_sample(&pkt.data, pkt.pts_hns - base_pts, pkt.duration_hns, pkt.keyframe)?;
-                writer.WriteSample(vstream, &sample).map_err(hr)?;
+        /// Appends one packet at `pts` (100 ns, file time).
+        pub(super) fn write(&mut self, track: TrackKind, pkt: &EncodedPacket, pts: i64) -> RResult<()> {
+            let stream = match track {
+                TrackKind::Video => self.vstream,
+                TrackKind::Audio => match self.astream {
+                    Some(s) => s,
+                    None => return Ok(()),
+                },
+            };
+            unsafe {
+                // Clamp negative stamps: WriteSample rejects them.
+                let key = matches!(track, TrackKind::Audio) || pkt.keyframe;
+                let sample = make_sample(&pkt.data, pts.max(0), pkt.duration_hns, key)?;
+                self.writer.WriteSample(stream, &sample).map_err(hr)?;
             }
-            if let Some(s) = astream {
-                for pkt in audio {
-                    // Clamp negative rebased stamps: WriteSample rejects them.
-                    let t = (pkt.pts_hns - base_pts).max(0);
-                    let sample = make_sample(&pkt.data, t, pkt.duration_hns, true)?;
-                    writer.WriteSample(s, &sample).map_err(hr)?;
-                }
-            }
-
-            writer.Finalize().map_err(hr)?;
             Ok(())
+        }
+
+        pub(super) fn finish(self) -> RResult<()> {
+            unsafe { self.writer.Finalize().map_err(hr) }
         }
     }
 
@@ -2535,6 +2769,32 @@ mod sim {
 
     pub(super) fn boost_thread(_performance_mode: bool) {}
 
+    pub(super) struct StreamMux {
+        path: PathBuf,
+        bytes: Vec<u8>,
+    }
+
+    impl StreamMux {
+        pub(super) fn open(path: &Path, header: &VideoFormatHeader, _with_audio: bool) -> RResult<Self> {
+            let mut bytes = vec![
+                0x00, 0x00, 0x00, 0x18, b'f', b't', b'y', b'p', b'i', b's', b'o', b'm', 0x00, 0x00,
+                0x02, 0x00, b'i', b's', b'o', b'm', b'i', b's', b'o', b'2',
+            ];
+            bytes.extend_from_slice(&header.sequence_header);
+            Ok(Self { path: path.to_path_buf(), bytes })
+        }
+        pub(super) fn write(&mut self, track: TrackKind, pkt: &EncodedPacket, _pts: i64) -> RResult<()> {
+            if matches!(track, TrackKind::Video) {
+                self.bytes.extend_from_slice(&pkt.data);
+            }
+            Ok(())
+        }
+        pub(super) fn finish(self) -> RResult<()> {
+            std::fs::write(&self.path, self.bytes)?;
+            Ok(())
+        }
+    }
+
     pub(super) fn mux(
         path: &Path,
         header: &VideoFormatHeader,
@@ -2651,6 +2911,100 @@ fn capture_thread_main(
     clock: Arc<QpcClock>,
 ) {
     platform::capture_loop(shared, cfg, fmt, clock);
+}
+
+/// One stretch of a recording between pauses: raw engine timestamps
+/// `start..end` are written shifted back by `offset`.
+struct RecSegment {
+    start: i64,
+    end: Option<i64>,
+    offset: i64,
+}
+
+/// The screen-recording thread: streams new ring packets into an MP4 until
+/// `stop`, skipping paused stretches (it resumes on a key frame so the file
+/// stays decodable). Returns the written duration and whether it has audio.
+#[allow(clippy::too_many_arguments)]
+fn record_loop(
+    path: &Path,
+    header: &VideoFormatHeader,
+    ring: &Arc<Mutex<RollingRingBuffer>>,
+    generation: u32,
+    start: i64,
+    with_audio: bool,
+    stop: &AtomicBool,
+    paused: &AtomicBool,
+    written: &std::sync::atomic::AtomicI64,
+) -> RResult<(i64, bool)> {
+    let mut mux = platform::StreamMux::open(path, header, with_audio)?;
+    let mut last_v = start - 1;
+    let mut last_a = start - 1;
+    let mut segs: Vec<RecSegment> = Vec::new();
+    let mut need_key = true;
+    let mut end_raw = start; // end of the last written video frame
+    let mut wrote_audio = false;
+    loop {
+        let stopping = stop.load(Ordering::Relaxed);
+        let (video, audio, gen_changed) = {
+            let r = ring.lock();
+            let changed = r.newest_video().is_some_and(|(g, _)| g != generation);
+            let (v, a) = r.packets_after(generation, last_v, last_a);
+            (v, a, changed)
+        };
+        let is_paused = paused.load(Ordering::Relaxed);
+        if is_paused {
+            if let Some(seg) = segs.last_mut() {
+                if seg.end.is_none() {
+                    seg.end = Some(end_raw);
+                }
+            }
+            need_key = true;
+        }
+        for p in &video {
+            last_v = p.pts_hns;
+            if is_paused {
+                continue;
+            }
+            if need_key {
+                if !p.keyframe {
+                    continue;
+                }
+                let offset = match segs.last() {
+                    Some(prev) => prev.offset + (p.pts_hns - prev.end.unwrap_or(end_raw)),
+                    None => start,
+                };
+                segs.push(RecSegment { start: p.pts_hns, end: None, offset });
+                need_key = false;
+            }
+            let seg = segs.last().expect("segment opened above");
+            mux.write(TrackKind::Video, p, p.pts_hns - seg.offset)?;
+            end_raw = p.pts_hns + p.duration_hns;
+            written.store(end_raw - seg.offset, Ordering::Relaxed);
+        }
+        for p in &audio {
+            last_a = p.pts_hns;
+            if !with_audio {
+                continue;
+            }
+            // Only audio that belongs to a written stretch of video.
+            let seg = segs.iter().find(|s| {
+                p.pts_hns >= s.start && s.end.map_or(p.pts_hns < end_raw + 2 * HNS_PER_SECOND, |e| p.pts_hns < e)
+            });
+            if let Some(seg) = seg {
+                mux.write(TrackKind::Audio, p, p.pts_hns - seg.offset)?;
+                wrote_audio = true;
+            }
+        }
+        if stopping || gen_changed {
+            if gen_changed {
+                log::warn!("[lastshot] recording ended: the display or GPU changed");
+            }
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    mux.finish()?;
+    Ok((written.load(Ordering::Relaxed), with_audio && wrote_audio))
 }
 
 fn mux_packets_to_mp4(
@@ -2875,8 +3229,9 @@ mod ring_buffer_tests {
 
     #[test]
     fn cap_never_exceeds_the_hard_ceiling() {
-        // `ring_cap_mb` clamps to 1536 MB so a mis-typed config cannot eat RAM.
-        assert!(ring_cap_mb(600, 150_000) <= 1536);
+        // `ring_cap_mb` clamps to half the RAM so a long window cannot eat it all.
+        assert!(ring_cap_mb(3600, 150_000) <= ring_ceiling_mb());
+        assert!(ring_ceiling_mb() >= 1536);
         assert!(ring_cap_mb(5, 1_000) >= 24);
     }
 

@@ -237,7 +237,10 @@ export default function SnipOverlay() {
       try {
         const png = c.toDataURL("image/png");
         if (isTauri()) {
-          await lastshot.snipFinish(png, true, save);
+          const s = await lastshot.getSettings().catch(() => null);
+          const jpg =
+            s?.screenshotFormat === "jpg" ? c.toDataURL("image/jpeg", (s.screenshotQuality ?? 90) / 100) : undefined;
+          await lastshot.snipFinish(png, true, save, jpg);
         } else {
           const a = document.createElement("a");
           a.href = png;

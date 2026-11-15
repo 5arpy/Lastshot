@@ -260,6 +260,51 @@ export interface AppSettings {
    * outputDir; auto-cleanup and "Delete all" never touch these.
    */
   libraryFolders: string[];
+  /** Starts / stops a screen recording. */
+  hotkeyRecord: string;
+  /** On-screen control bar: while recording, always, or never. */
+  controlBar: "recording" | "always" | "off";
+  /** "Open with Lastshot" on MP4 files in Explorer. */
+  explorerOpenWith: boolean;
+  /** Screenshot folder; empty = `<save location>\Screenshots`. */
+  screenshotDir: string;
+  screenshotFormat: "png" | "jpg";
+  /** JPG quality, 50-100. */
+  screenshotQuality: number;
+  /** Put screenshots on the clipboard. */
+  screenshotCopy: boolean;
+  /** Screen recording folder; empty = the save location. */
+  recordingDir: string;
+  /** Hides folder paths on screen. */
+  streamerMode: boolean;
+}
+
+/** A running screen recording. */
+export interface RecordingStatus {
+  path: string;
+  file_name: string;
+  seconds: number;
+  paused: boolean;
+  /** False once it ended on its own; collect it with stopRecording. */
+  active: boolean;
+}
+
+/** What the control bar and Home show. */
+export interface BarState {
+  recording: RecordingStatus | null;
+  micMuted: boolean;
+  micOn: boolean;
+  replayOn: boolean;
+  hotkeyRecord: string;
+  hotkeySave: string;
+  hotkeySnip: string;
+}
+
+/** Space on one drive. */
+export interface DiskInfo {
+  root: string;
+  totalBytes: number;
+  freeBytes: number;
 }
 
 /** A point-in-time snapshot of the machine's power / memory state. */

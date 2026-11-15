@@ -25,6 +25,9 @@ import type {
   CropRect,
   SnipCapture,
   SnipDone,
+  BarState,
+  DiskInfo,
+  RecordingStatus,
   SplitResult,
   TrimResult,
 } from "./types";
@@ -142,6 +145,9 @@ export const CHANNELS = {
   bufferState: "lastshot://buffer-state",
   shrinkProgress: "lastshot://shrink-progress",
   snipDone: "lastshot://snip-done",
+  recording: "lastshot://recording",
+  openFile: "lastshot://open-file",
+  dragDrop: "tauri://drag-drop",
 } as const;
 
 export const RELEASES_URL = "https://github.com/5arpy/Lastshot/releases";
@@ -225,7 +231,42 @@ export const DEFAULT_SETTINGS: AppSettings = {
   hotkeySnip: "Alt+S",
   snipSaveToFolder: true,
   libraryFolders: [],
+  hotkeyRecord: "Alt+R",
+  controlBar: "recording",
+  explorerOpenWith: false,
+  screenshotDir: "",
+  screenshotFormat: "png",
+  screenshotQuality: 90,
+  screenshotCopy: true,
+  recordingDir: "",
+  streamerMode: false,
 };
+
+// Browser preview stand-in for screen recording.
+const simRec = { startedAt: 0, pausedAt: 0, pausedMs: 0, on: false, muted: false };
+function simBarState(): BarState {
+  const now = Date.now();
+  const ms = simRec.on
+    ? (simRec.pausedAt || now) - simRec.startedAt - simRec.pausedMs
+    : 0;
+  return {
+    recording: simRec.on
+      ? {
+          path: "C:\\Users\\You\\Videos\\Lastshot\\Lastshot_Recording.mp4",
+          file_name: "Lastshot_Recording.mp4",
+          seconds: ms / 1000,
+          paused: simRec.pausedAt > 0,
+          active: true,
+        }
+      : null,
+    micMuted: simRec.muted,
+    micOn: browserSettings.captureMicrophone,
+    replayOn: simEngine.isRunning(),
+    hotkeyRecord: browserSettings.hotkeyRecord,
+    hotkeySave: browserSettings.hotkeySave,
+    hotkeySnip: browserSettings.hotkeySnip,
+  };
+}
 
 let browserSettings: AppSettings = { ...DEFAULT_SETTINGS };
 
@@ -598,6 +639,74 @@ export const lastshot = {
     };
   },
 
+  // ---------------------------------------------------- screen recording
+  async startRecording(): Promise<RecordingStatus> {
+    if (isTauri()) return invoke<RecordingStatus>("start_recording");
+    if (!simEngine.isRunning()) await simEngine.start(browserSettings.bufferSeconds, browserSettings.targetFps);
+    Object.assign(simRec, { on: true, startedAt: Date.now(), pausedAt: 0, pausedMs: 0 });
+    emitLocal(CHANNELS.recording, simBarState());
+    return simBarState().recording!;
+  },
+  async stopRecording(): Promise<ClipMetadata> {
+    if (isTauri()) return invoke<ClipMetadata>("stop_recording");
+    const secs = simBarState().recording?.seconds ?? 5;
+    simRec.on = false;
+    const { clip } = await simEngine.save(Math.max(2, secs));
+    emitLocal(CHANNELS.recording, simBarState());
+    return clip;
+  },
+  async pauseRecording(paused: boolean): Promise<void> {
+    if (isTauri()) return invoke("pause_recording", { paused });
+    if (paused && !simRec.pausedAt) simRec.pausedAt = Date.now();
+    if (!paused && simRec.pausedAt) {
+      simRec.pausedMs += Date.now() - simRec.pausedAt;
+      simRec.pausedAt = 0;
+    }
+    emitLocal(CHANNELS.recording, simBarState());
+  },
+  async getBarState(): Promise<BarState> {
+    if (isTauri()) return invoke<BarState>("get_bar_state");
+    return simBarState();
+  },
+  async setMicMuted(muted: boolean): Promise<void> {
+    if (isTauri()) return invoke("set_mic_muted", { muted });
+    simRec.muted = muted;
+    emitLocal(CHANNELS.recording, simBarState());
+  },
+  async showMainWindow(): Promise<void> {
+    if (isTauri()) await invoke("show_main_window");
+  },
+  onRecording(handler: Handler<BarState>) {
+    return listen<BarState>(CHANNELS.recording, handler);
+  },
+
+  // ---------------------------------------------------------- files/disk
+  async getDiskInfo(paths: string[]): Promise<DiskInfo[]> {
+    if (isTauri()) return invoke<DiskInfo[]>("get_disk_info", { paths });
+    return [{ root: "C:\\", totalBytes: 512e9, freeBytes: 143e9 }];
+  },
+  /** Moves a clip from an extra folder into the save folder; returns the new path. */
+  async moveClipToLibrary(path: string): Promise<string> {
+    if (isTauri()) return invoke<string>("move_clip_to_library", { path });
+    return path;
+  },
+  /** Clip info for any video file (drag & drop, Open with Lastshot). */
+  async openVideoFile(path: string): Promise<ClipMetadata> {
+    if (isTauri()) return invoke<ClipMetadata>("open_video_file", { path });
+    throw new Error("Opening files works in the installed app.");
+  },
+  async takePendingOpen(): Promise<string | null> {
+    if (isTauri()) return invoke<string | null>("take_pending_open");
+    return null;
+  },
+  onOpenFile(handler: Handler<string>) {
+    return listen<string>(CHANNELS.openFile, handler);
+  },
+  /** Files dropped onto the window from Explorer. */
+  onFilesDropped(handler: Handler<string[]>) {
+    return listen<{ paths: string[] }>(CHANNELS.dragDrop, (p) => handler(p?.paths ?? []));
+  },
+
   /** Native file drag (call from `dragstart`, after `preventDefault`). */
   async startClipDrag(path: string): Promise<void> {
     if (isTauri()) await invoke("start_clip_drag", { paths: [path] });
@@ -621,8 +730,9 @@ export const lastshot = {
   async snipGetCapture(): Promise<SnipCapture> {
     return invoke<SnipCapture>("snip_get_capture");
   },
-  async snipFinish(png: string, copy: boolean, save: boolean): Promise<SnipDone> {
-    return invoke<SnipDone>("snip_finish", { png, copy, save });
+  /** `jpg` (optional) is what gets saved when the format is JPG; `png` goes on the clipboard. */
+  async snipFinish(png: string, copy: boolean, save: boolean, jpg?: string): Promise<SnipDone> {
+    return invoke<SnipDone>("snip_finish", { png, copy, save, jpg: jpg ?? null });
   },
   async snipCancel(): Promise<void> {
     if (isTauri()) await invoke("snip_cancel");
@@ -658,6 +768,15 @@ export const lastshot = {
       return;
     }
     await navigator.clipboard?.writeText(browserSettings.outputDir);
+  },
+
+  /** Opens a folder in Explorer. */
+  async openFolder(path: string): Promise<void> {
+    if (isTauri()) {
+      await invoke("open_clip_external", { path });
+      return;
+    }
+    await navigator.clipboard?.writeText(path);
   },
 
   async openClip(path: string): Promise<void> {

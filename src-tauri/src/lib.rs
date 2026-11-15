@@ -5,12 +5,14 @@
 //! heartbeat and the IPC surface.
 
 pub mod clipmeta;
+pub mod files;
 pub mod commands;
 pub mod foreground;
 pub mod hotkeys;
 pub mod media;
 pub mod paths;
 pub mod power;
+pub mod recording;
 pub mod settings;
 pub mod share;
 pub mod snip;
@@ -38,7 +40,10 @@ pub fn run() {
         // A second launch focuses the existing window instead of fighting over
         // the output (Desktop Duplication only allows one duplicator per output,
         // so instance #2 used to fail with a confusing capture error).
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            if let Some(path) = files::video_arg(&argv) {
+                files::request_open(app, path);
+            }
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.show();
                 let _ = w.unminimize();
@@ -73,13 +78,18 @@ pub fn run() {
 
             build_tray(&handle)?;
 
-            let (save_key, toggle_key, snip_key, autostart, cfg) = {
+            if let Some(path) = files::video_arg(&std::env::args().collect::<Vec<_>>()) {
+                files::request_open(&handle, path);
+            }
+
+            let (save_key, toggle_key, snip_key, record_key, autostart, cfg) = {
                 let state = handle.state::<AppState>();
                 let s = state.settings.read();
                 (
                     s.hotkey_save.clone(),
                     s.hotkey_toggle.clone(),
                     s.hotkey_snip.clone(),
+                    s.hotkey_record.clone(),
                     s.autostart_buffer,
                     // If auto-switch is on and the game already in the foreground
                     // maps to a profile, arm the buffer with that profile's
@@ -103,7 +113,11 @@ pub fn run() {
                 }
             }
 
-            if let Err(e) = hotkeys::register_all(&handle, &save_key, &toggle_key, &snip_key) {
+            recording::sync_bar(&handle);
+
+            if let Err(e) =
+                hotkeys::register_all(&handle, &save_key, &toggle_key, &snip_key, &record_key)
+            {
                 log::warn!("[lastshot] hotkey registration: {e}");
                 let h = handle.clone();
                 let msg = e.clone();
@@ -139,6 +153,9 @@ pub fn run() {
                 allow_asset_dir(&handle, &s.output_dir);
                 for dir in &s.library_folders {
                     allow_asset_dir(&handle, dir);
+                }
+                if !s.recording_dir.is_empty() {
+                    allow_asset_dir(&handle, &s.recording_dir);
                 }
             }
 
@@ -213,7 +230,7 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() == snip::SNIP_LABEL {
+                if window.label() == snip::SNIP_LABEL || window.label() == recording::BAR_LABEL {
                     return;
                 }
                 let minimize = window
@@ -273,6 +290,16 @@ pub fn run() {
             commands::simulate_device_loss,
             share::shrink_clip,
             share::export_clip,
+            recording::start_recording,
+            recording::stop_recording,
+            recording::pause_recording,
+            recording::get_bar_state,
+            recording::set_mic_muted,
+            recording::show_main_window,
+            files::get_disk_info,
+            files::move_clip_to_library,
+            files::open_video_file,
+            files::take_pending_open,
             share::start_clip_drag,
             snip::start_snip,
             snip::snip_get_capture,
@@ -315,7 +342,18 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         .unwrap_or_else(|| "Alt+C".into());
     let save = MenuItem::with_id(app, "save", format!("Save replay\t{save_key}"), true, None::<&str>)?;
     let last30 = MenuItem::with_id(app, "save30", "Save last 30 s", true, None::<&str>)?;
-    let toggle = MenuItem::with_id(app, "toggle", "Arm / disarm buffer", true, None::<&str>)?;
+    let toggle = MenuItem::with_id(app, "toggle", "Instant replay on / off", true, None::<&str>)?;
+    let record_key = app
+        .try_state::<AppState>()
+        .map(|s| s.settings.read().hotkey_record.clone())
+        .unwrap_or_else(|| "Alt+R".into());
+    let record_item = MenuItem::with_id(
+        app,
+        "record",
+        format!("Start / stop screen recording\t{record_key}"),
+        true,
+        None::<&str>,
+    )?;
     let snip_key = app
         .try_state::<AppState>()
         .map(|s| s.settings.read().hotkey_snip.clone())
@@ -337,7 +375,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         "capture",
         "Capture",
         true,
-        &[&save, &last30, &toggle, &snip_item],
+        &[&save, &last30, &record_item, &snip_item, &toggle],
     )?;
     let menu = Menu::with_items(app, &[&capture, &sep, &show, &folder, &sep, &quit])?;
 
@@ -390,6 +428,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             }
             "toggle" => hotkeys::trigger_toggle(app.clone()),
             "snip" => snip::begin(app.clone()),
+            "record" => recording::toggle(app.clone()),
             "show" => {
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.show();

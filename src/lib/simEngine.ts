@@ -592,7 +592,7 @@ export class SimEngine {
       ...profile,
       id,
       name: profile.name.trim() || id,
-      bufferSeconds: Math.min(600, Math.max(5, profile.bufferSeconds)),
+      bufferSeconds: Math.min(3600, Math.max(5, profile.bufferSeconds)),
       targetFps: Math.min(240, Math.max(24, profile.targetFps)),
       bitrateKbps: Math.min(150_000, Math.max(1_000, profile.bitrateKbps)),
     };

@@ -12,6 +12,7 @@ import { formatBytes } from "../lib/format";
 import { isIntegratedAdapter } from "../lib/gpu";
 import { cn } from "../utils/cn";
 import { Choice, Row, Section, Toggle } from "./ui";
+import { screenshotsDir, shownPath } from "../lib/pathDisplay";
 import { getTheme, onThemeChange, setTheme, type ThemeChoice } from "../lib/theme";
 
 interface Props {
@@ -27,6 +28,10 @@ interface Props {
   onChooseFolder: () => void;
   /** Picks a folder to add to "Also show clips from". */
   onAddLibraryFolder: () => void;
+  /** Folder picker; resolves to null when cancelled. */
+  onPickFolder: (title: string) => Promise<string | null>;
+  /** Opens a folder in Explorer. */
+  onOpenPath: (path: string) => void;
   updateProgress?: UpdateProgress | null;
   onCheckForUpdates: () => void;
   onOpenScreenshots: () => void;
@@ -115,6 +120,60 @@ function HotkeyRecorder({
   );
 }
 
+/** Longest instant replay, in seconds (60 min). Matches the backend clamp. */
+const MAX_BUFFER_SECONDS = 3600;
+
+function lengthLabel(s: number): string {
+  if (s < 60) return `${s} s`;
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return r ? `${m} min ${r} s` : `${m} min`;
+}
+
+/** Replay length: presets plus any number of seconds typed in. */
+function BufferLengthInput({ value, onCommit }: { value: number; onCommit: (s: number) => void }) {
+  const [draft, setDraft] = useState(String(value));
+  useEffect(() => setDraft(String(value)), [value]);
+  const commit = () => {
+    const n = Math.round(Number(draft.replace(",", ".")));
+    if (Number.isFinite(n) && n >= 5) {
+      const s = Math.min(MAX_BUFFER_SECONDS, n);
+      setDraft(String(s));
+      if (s !== value) onCommit(s);
+    } else {
+      setDraft(String(value));
+    }
+  };
+  return (
+    <div className="flex flex-col items-end gap-2">
+      <Choice
+        options={BUFFER_PRESETS.map((s) => ({ value: s, label: s >= 60 ? `${s / 60} min` : `${s} s` }))}
+        value={value}
+        onPick={onCommit}
+      />
+      <label className="flex items-center gap-1.5 text-[12px] text-ink-3">
+        or
+        <input
+          type="number"
+          inputMode="numeric"
+          min={5}
+          max={MAX_BUFFER_SECONDS}
+          step={5}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+          }}
+          aria-label="Replay length in seconds"
+          className="w-20 rounded border border-line bg-app px-2 py-1 text-right font-mono text-[12px] text-ink outline-none focus:border-accent"
+        />
+        seconds
+      </label>
+    </div>
+  );
+}
+
 /** Size limit input: free number plus quick presets. */
 function ShareSizeInput({ value, onCommit }: { value: number; onCommit: (mb: number) => void }) {
   const [draft, setDraft] = useState(String(value));
@@ -168,6 +227,55 @@ function ShareSizeInput({ value, onCommit }: { value: number; onCommit: (mb: num
   );
 }
 
+/** A folder setting: shows where, with Open / Change / Default. */
+function FolderRow({
+  label,
+  hint,
+  path,
+  isDefault,
+  onOpen,
+  onChange,
+  onReset,
+}: {
+  label: string;
+  hint?: string;
+  path: string;
+  isDefault: boolean;
+  onOpen: () => void;
+  onChange: () => void;
+  onReset: () => void;
+}) {
+  const btn =
+    "rounded border border-line bg-surface-2 px-3 py-1 text-[11px] font-medium text-ink hover:border-accent";
+  return (
+    <Row
+      label={label}
+      hint={
+        <>
+          <span className="block truncate font-mono" title={shownPath(path)}>
+            {shownPath(path)}
+          </span>
+          {hint && <span className="block">{hint}</span>}
+        </>
+      }
+    >
+      <div className="flex gap-2">
+        <button type="button" onClick={onOpen} className={btn}>
+          Open
+        </button>
+        <button type="button" onClick={onChange} className={btn}>
+          Change
+        </button>
+        {!isDefault && (
+          <button type="button" onClick={onReset} className={btn} title="Back to the default folder">
+            Default
+          </button>
+        )}
+      </div>
+    </Row>
+  );
+}
+
 export default function SettingsPanel({
   settings,
   stats,
@@ -179,6 +287,8 @@ export default function SettingsPanel({
   onOpenFolder,
   onChooseFolder,
   onAddLibraryFolder,
+  onPickFolder,
+  onOpenPath,
   updateProgress,
   onCheckForUpdates,
   onOpenScreenshots,
@@ -186,7 +296,7 @@ export default function SettingsPanel({
   profiles,
   diagnostics,
 }: Props) {
-  const [recording, setRecording] = useState<"save" | "toggle" | "snip" | null>(null);
+  const [recording, setRecording] = useState<"save" | "toggle" | "snip" | "record" | null>(null);
   const [theme, setThemeState] = useState<ThemeChoice>(getTheme);
   useEffect(() => onThemeChange(setThemeState), []);
   const [bitrate, setBitrate] = useState(settings.bitrateKbps);
@@ -239,7 +349,9 @@ export default function SettingsPanel({
           ? { hotkeySave: accel }
           : recording === "toggle"
             ? { hotkeyToggle: accel }
-            : { hotkeySnip: accel };
+            : recording === "record"
+              ? { hotkeyRecord: accel }
+              : { hotkeySnip: accel };
       onChange(patch);
       setRecording(null);
     };
@@ -268,20 +380,6 @@ export default function SettingsPanel({
         description="What gets kept in memory, ready to save with a hotkey."
         advanced={
           <>
-            <Row
-              label="Frame rate"
-              hint={
-                settings.performanceMode && settings.targetFps > effectiveFps
-                  ? `Game Mode caps this at ${effectiveFps} FPS right now. Your choice is kept for when Game Mode is off.`
-                  : "30 FPS halves the encoder's work; clips still look sharp."
-              }
-            >
-              <Choice
-                options={FPS_PRESETS.map((f) => ({ value: f, label: `${f}` }))}
-                value={settings.targetFps}
-                onPick={(f) => onChange({ targetFps: f })}
-              />
-            </Row>
             <Row label="Video codec" hint="HEVC is smaller at the same quality, but some apps and phones cannot play it.">
               <Choice
                 options={[
@@ -307,19 +405,6 @@ export default function SettingsPanel({
                 onPointerUp={() => onChange({ bitrateKbps: bitrate })}
                 onKeyUp={() => onChange({ bitrateKbps: bitrate })}
               />
-            </Row>
-            <Row label="Monitor" hint="Which screen is recorded.">
-              <select
-                value={settings.monitorIndex}
-                onChange={(e) => onChange({ monitorIndex: Number(e.target.value) })}
-                className="max-w-[260px] rounded border border-line bg-app px-2.5 py-1.5 text-[11px] text-ink outline-none focus:border-accent"
-              >
-                {monitors.map((m) => (
-                  <option key={m.index} value={m.index} className="bg-app">
-                    {m.name} ({m.width}×{m.height}){m.primary ? " — primary" : ""}
-                  </option>
-                ))}
-              </select>
             </Row>
             <Row
               label="Save power under pressure (ECO)"
@@ -365,7 +450,7 @@ export default function SettingsPanel({
             )}
             <div className="flex flex-wrap items-center justify-between gap-2 py-3">
               <span className="text-[11px] text-ink-3">
-                Frame rate, codec and monitor apply after a restart. Buffer length and bitrate change live.
+                Frame rate, codec and screen apply after a restart. Buffer length and bitrate change live.
               </span>
               <button
                 type="button"
@@ -379,12 +464,23 @@ export default function SettingsPanel({
           </>
         }
       >
-        <Row label="Keep the last" hint="How much is always ready to save.">
-          <Choice
-            options={BUFFER_PRESETS.map((s) => ({ value: s, label: s >= 60 ? `${s / 60} min` : `${s} s` }))}
-            value={settings.bufferSeconds}
-            onPick={(s) => onChange({ bufferSeconds: s })}
-          />
+        <Row
+          label={`Keep the last ${lengthLabel(settings.bufferSeconds)}`}
+          hint={
+            <>
+              Up to 60 minutes. It only uses memory (about {formatBytes(projectedRam)} now), nothing is written
+              to disk until you save; then cut out what you need in the editor.
+              {power && projectedRam > power.availableRamBytes * 0.8 && (
+                <span className="mt-1 block text-warn">
+                  That is more than the {formatBytes(power.availableRamBytes)} of RAM free right now. Lastshot keeps
+                  as much as fits in half your RAM, so the replay may come out shorter. A lower bitrate (Advanced)
+                  fits more.
+                </span>
+              )}
+            </>
+          }
+        >
+          <BufferLengthInput value={settings.bufferSeconds} onCommit={(s) => onChange({ bufferSeconds: s })} />
         </Row>
         <Row
           label="Game Mode"
@@ -399,7 +495,48 @@ export default function SettingsPanel({
             onClick={() => onChange({ performanceMode: !settings.performanceMode })}
           />
         </Row>
-        <Row label="Start recording when Lastshot opens">
+        <Row
+          label="Frame rate"
+          hint={
+            settings.performanceMode && settings.targetFps > effectiveFps
+              ? `Game Mode caps this at ${effectiveFps} FPS right now. Your choice is kept for when Game Mode is off.`
+              : "Smoother clips at 60 and up; 30 halves the work for your PC."
+          }
+        >
+          <div className="flex items-center gap-2">
+            <Choice
+              options={FPS_PRESETS.map((f) => ({ value: f, label: `${f}` }))}
+              value={settings.targetFps}
+              onPick={(f) => onChange({ targetFps: f })}
+            />
+            {stats.target_fps > 0 && stats.target_fps !== effectiveFps && (
+              <button
+                type="button"
+                onClick={onRestartEngine}
+                title="The new frame rate starts after a restart"
+                className="rounded border border-accent/50 bg-accent/15 px-2 py-1 text-[11px] font-semibold text-accent-fg hover:bg-accent/25"
+              >
+                Apply
+              </button>
+            )}
+          </div>
+        </Row>
+        {monitors.length > 1 && (
+          <Row label="Screen" hint="Which monitor is recorded. Applies after a restart.">
+            <select
+              value={settings.monitorIndex}
+              onChange={(e) => onChange({ monitorIndex: Number(e.target.value) })}
+              className="max-w-[260px] rounded border border-line bg-app px-2.5 py-1.5 text-[11px] text-ink outline-none focus:border-accent"
+            >
+              {monitors.map((m) => (
+                <option key={m.index} value={m.index} className="bg-app">
+                  {m.name} ({m.width}×{m.height}){m.primary ? " — primary" : ""}
+                </option>
+              ))}
+            </select>
+          </Row>
+        )}
+        <Row label="Turn on instant replay when Lastshot opens">
           <Toggle
             on={settings.autostartBuffer}
             onClick={() => onChange({ autostartBuffer: !settings.autostartBuffer })}
@@ -411,84 +548,85 @@ export default function SettingsPanel({
       <Section
         id="audio"
         title="Sound"
-        advanced={
-          <>
-            {settings.captureSystemAudio && (
-              <Row label={`Game sound volume: ${settings.gameVolume}%`}>
-                <input
-                  type="range"
-                  className="cf-range w-44"
-                  min={0}
-                  max={100}
-                  step={5}
-                  value={settings.gameVolume}
-                  onChange={(e) => onChange({ gameVolume: Number(e.target.value) })}
-                />
-              </Row>
-            )}
-            {settings.captureMicrophone ? (
-              <>
-                <Row label="Microphone" hint={`In use: ${micName}${stats.audio_mic ? " (active)" : ""}`}>
-                  <div className="flex items-center gap-2">
-                    <select
-                      className="max-w-[220px] truncate rounded border border-line bg-app px-2.5 py-1.5 text-[11px] text-ink focus:border-accent focus:outline-none"
-                      value={settings.micDeviceId || "default"}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        onChange({ micDeviceId: val === "default" ? null : val });
-                      }}
-                    >
-                      <option value="default">Default</option>
-                      {audioDevices.map((dev) => (
-                        <option key={dev.id} value={dev.id}>
-                          {dev.name}
-                        </option>
-                      ))}
-                    </select>
-                    <button
-                      type="button"
-                      onClick={() => void refreshAudioDevices()}
-                      title="Look for microphones again"
-                      disabled={scanningDevices}
-                      className="rounded border border-line bg-surface-2 px-2 py-1 text-[11px] text-ink-3 hover:text-ink disabled:opacity-50"
-                    >
-                      {scanningDevices ? "…" : "Rescan"}
-                    </button>
-                  </div>
-                </Row>
-                <Row
-                  label={`Microphone volume: ${settings.micVolume}%`}
-                  hint="No mic sound? Windows Settings › Privacy & security › Microphone must allow desktop apps."
-                >
-                  <input
-                    type="range"
-                    className="cf-range w-44"
-                    min={0}
-                    max={100}
-                    step={5}
-                    value={settings.micVolume}
-                    onChange={(e) => onChange({ micVolume: Number(e.target.value) })}
-                  />
-                </Row>
-              </>
-            ) : (
-              <p className="py-3 text-[12px] text-ink-3">Turn on the microphone to pick a device and volume.</p>
-            )}
-          </>
-        }
+        description="What you hear in your clips and recordings."
       >
-        <Row label="Record game and PC sound">
+        <Row
+          label="PC sound"
+          hint="Everything your PC plays: the game, Discord, music, videos."
+        >
           <Toggle
             on={settings.captureSystemAudio}
             onClick={() => onChange({ captureSystemAudio: !settings.captureSystemAudio })}
           />
         </Row>
-        <Row label="Record my microphone">
+        {settings.captureSystemAudio && (
+          <Row label={`PC sound volume: ${settings.gameVolume}%`}>
+            <input
+              type="range"
+              className="cf-range w-44"
+              min={0}
+              max={100}
+              step={5}
+              value={settings.gameVolume}
+              onChange={(e) => onChange({ gameVolume: Number(e.target.value) })}
+            />
+          </Row>
+        )}
+        <Row
+          label="Microphone"
+          hint="Your voice. You can mute it any time from the on-screen control bar."
+        >
           <Toggle
             on={settings.captureMicrophone}
             onClick={() => onChange({ captureMicrophone: !settings.captureMicrophone })}
           />
         </Row>
+        {settings.captureMicrophone && (
+          <>
+            <Row label="Which microphone" hint={`In use: ${micName}${stats.audio_mic ? " (active)" : ""}`}>
+              <div className="flex items-center gap-2">
+                <select
+                  className="max-w-[220px] truncate rounded border border-line bg-app px-2.5 py-1.5 text-[11px] text-ink focus:border-accent focus:outline-none"
+                  value={settings.micDeviceId || "default"}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    onChange({ micDeviceId: val === "default" ? null : val });
+                  }}
+                >
+                  <option value="default">Default</option>
+                  {audioDevices.map((dev) => (
+                    <option key={dev.id} value={dev.id}>
+                      {dev.name}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => void refreshAudioDevices()}
+                  title="Look for microphones again"
+                  disabled={scanningDevices}
+                  className="rounded border border-line bg-surface-2 px-2 py-1 text-[11px] text-ink-3 hover:text-ink disabled:opacity-50"
+                >
+                  {scanningDevices ? "…" : "Rescan"}
+                </button>
+              </div>
+            </Row>
+            <Row
+              label={`Microphone volume: ${settings.micVolume}%`}
+              hint="No mic sound? Windows Settings › Privacy & security › Microphone must allow desktop apps."
+            >
+              <input
+                type="range"
+                className="cf-range w-44"
+                min={0}
+                max={100}
+                step={5}
+                value={settings.micVolume}
+                onChange={(e) => onChange({ micVolume: Number(e.target.value) })}
+              />
+            </Row>
+          </>
+        )}
       </Section>
 
       {/* ---------------------------------------------------------- Shortcuts */}
@@ -504,6 +642,13 @@ export default function SettingsPanel({
             onStart={() => setRecording("save")}
           />
         </Row>
+        <Row label="Start / stop screen recording">
+          <HotkeyRecorder
+            value={settings.hotkeyRecord}
+            recording={recording === "record"}
+            onStart={() => setRecording("record")}
+          />
+        </Row>
         <Row label="Take a screenshot">
           <HotkeyRecorder
             value={settings.hotkeySnip}
@@ -511,11 +656,53 @@ export default function SettingsPanel({
             onStart={() => setRecording("snip")}
           />
         </Row>
-        <Row label="Start / pause recording">
+        <Row label="Turn instant replay on / off">
           <HotkeyRecorder
             value={settings.hotkeyToggle}
             recording={recording === "toggle"}
             onStart={() => setRecording("toggle")}
+          />
+        </Row>
+      </Section>
+
+      {/* --------------------------------------------------- Screen recording */}
+      <Section
+        id="screen"
+        title="Screen recording"
+        description="Records until you stop it. Uses the same quality as instant replay (frame rate here, bitrate under Instant replay › Advanced), and the same sound settings."
+      >
+        <Row label="Start / stop shortcut">
+          <HotkeyRecorder
+            value={settings.hotkeyRecord}
+            recording={recording === "record"}
+            onStart={() => setRecording("record")}
+          />
+        </Row>
+        <FolderRow
+          label="Save recordings to"
+          hint={settings.recordingDir ? "Recordings here still show up in Clips." : "The save location (same as replays)."}
+          path={settings.recordingDir || settings.outputDir}
+          isDefault={!settings.recordingDir}
+          onOpen={() => onOpenPath(settings.recordingDir || settings.outputDir)}
+          onChange={() =>
+            void onPickFolder("Where should screen recordings go?").then(
+              (d) => d && onChange({ recordingDir: d }),
+            )
+          }
+          onReset={() => onChange({ recordingDir: "" })}
+        />
+        <Row
+          label="On-screen control bar"
+          hint="A small bar at the top of the screen with the timer, pause, stop, mute and screenshot. It never shows up in recordings, replays or screenshots."
+        >
+          <Choice
+            options={[
+              { value: "recording" as const, label: "While recording" },
+              { value: "always" as const, label: "Always" },
+              { value: "off" as const, label: "Off" },
+            ]}
+            value={settings.controlBar}
+            onPick={(v) => onChange({ controlBar: v })}
           />
         </Row>
       </Section>
@@ -535,22 +722,65 @@ export default function SettingsPanel({
       </Section>
 
       {/* -------------------------------------------------------- Screenshots */}
-      <Section id="snip" title="Screenshots" description="Drag a box, click a window, or press F for the whole screen.">
-        <Row label="Also save screenshots to a folder" hint={`${settings.outputDir}\\Screenshots`}>
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={onOpenScreenshots}
-              className="rounded border border-line bg-surface-2 px-3 py-1 text-[11px] font-medium text-ink hover:border-accent"
-            >
-              Open folder
-            </button>
-            <Toggle
-              on={settings.snipSaveToFolder}
-              onClick={() => onChange({ snipSaveToFolder: !settings.snipSaveToFolder })}
-            />
-          </div>
+      <Section id="snip" title="Screenshots" description="Drag a box, click a window, or press F for the whole screen. Then draw on it, and press Enter.">
+        <Row label="Shortcut">
+          <HotkeyRecorder
+            value={settings.hotkeySnip}
+            recording={recording === "snip"}
+            onStart={() => setRecording("snip")}
+          />
         </Row>
+        <Row label="Copy to the clipboard" hint="Ready to paste with Ctrl+V.">
+          <Toggle
+            on={settings.screenshotCopy}
+            onClick={() => onChange({ screenshotCopy: !settings.screenshotCopy })}
+          />
+        </Row>
+        <Row
+          label="Also save as a file"
+          hint={settings.screenshotCopy ? "Ctrl+S in the screenshot tool always saves." : "On, because the clipboard is off."}
+        >
+          <Toggle
+            on={settings.snipSaveToFolder || !settings.screenshotCopy}
+            onClick={() => onChange({ snipSaveToFolder: !settings.snipSaveToFolder })}
+          />
+        </Row>
+        <FolderRow
+          label="Save screenshots to"
+          path={screenshotsDir(settings)}
+          isDefault={!settings.screenshotDir}
+          onOpen={onOpenScreenshots}
+          onChange={() =>
+            void onPickFolder("Where should screenshots go?").then((d) => d && onChange({ screenshotDir: d }))
+          }
+          onReset={() => onChange({ screenshotDir: "" })}
+        />
+        <Row
+          label="File format"
+          hint={settings.screenshotFormat === "png" ? "PNG keeps every pixel." : "JPG files are much smaller. The clipboard copy is always full quality."}
+        >
+          <Choice
+            options={[
+              { value: "png" as const, label: "PNG" },
+              { value: "jpg" as const, label: "JPG" },
+            ]}
+            value={settings.screenshotFormat}
+            onPick={(f) => onChange({ screenshotFormat: f })}
+          />
+        </Row>
+        {settings.screenshotFormat === "jpg" && (
+          <Row label={`JPG quality: ${settings.screenshotQuality}`}>
+            <input
+              type="range"
+              className="cf-range w-44"
+              min={50}
+              max={100}
+              step={5}
+              value={settings.screenshotQuality}
+              onChange={(e) => onChange({ screenshotQuality: Number(e.target.value) })}
+            />
+          </Row>
+        )}
       </Section>
 
       {/* ------------------------------------------------------ Clips/storage */}
@@ -581,11 +811,20 @@ export default function SettingsPanel({
                 onClick={() => onChange({ privacyPauseWhenUnfocused: !settings.privacyPauseWhenUnfocused })}
               />
             </Row>
+            <Row
+              label="“Open with Lastshot” in Explorer"
+              hint="Adds it to the right-click menu of MP4 files, so any video opens in the Lastshot editor. Nothing becomes the default player."
+            >
+              <Toggle
+                on={settings.explorerOpenWith}
+                onClick={() => onChange({ explorerOpenWith: !settings.explorerOpenWith })}
+              />
+            </Row>
             {profiles && <div className="py-3">{profiles}</div>}
           </>
         }
       >
-        <Row label="Save location" hint={settings.outputDir}>
+        <Row label="Save location" hint={shownPath(settings.outputDir)}>
           <div className="flex gap-2">
             <button
               type="button"
@@ -622,8 +861,8 @@ export default function SettingsPanel({
                 key={f}
                 className="flex items-center justify-between gap-2 rounded-md border border-line bg-surface-2 px-2.5 py-1.5 text-[11px] text-ink-2"
               >
-                <span className="truncate" title={f}>
-                  📁 {f}
+                <span className="truncate" title={shownPath(f)}>
+                  📁 {shownPath(f)}
                 </span>
                 <button
                   type="button"
@@ -709,6 +948,12 @@ export default function SettingsPanel({
               </button>
             ))}
           </div>
+        </Row>
+        <Row
+          label="Streamer mode"
+          hint="Hides folder paths (they can show your Windows user name) while you stream or share your screen. Only folder names are shown."
+        >
+          <Toggle on={settings.streamerMode} onClick={() => onChange({ streamerMode: !settings.streamerMode })} />
         </Row>
         <Row label="Start with Windows" hint="Opens quietly in the tray when you sign in.">
           <Toggle on={settings.launchAtStartup} onClick={() => onChange({ launchAtStartup: !settings.launchAtStartup })} />

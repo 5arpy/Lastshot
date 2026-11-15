@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { addCut, cropRect, isFullFrame, keptRanges, skipCuts, totalLength } from "./edit";
+import {
+  addCut,
+  cropRect,
+  inTimeOrder,
+  isFullFrame,
+  keptRanges,
+  moveItem,
+  orderParts,
+  partKey,
+  skipCuts,
+  splitRanges,
+  totalLength,
+} from "./edit";
 
 describe("cuts", () => {
   it("merges overlapping cuts and sorts them", () => {
@@ -57,5 +69,35 @@ describe("crop", () => {
     expect(isFullFrame(cropRect(1920, 1080, { aspect: "16:9", scale: 1, cx: 0.5, cy: 0.5 }))).toBe(
       true,
     );
+  });
+});
+
+describe("parts", () => {
+  const kept = [
+    { start: 0, end: 4 },
+    { start: 6, end: 10 },
+  ];
+
+  it("splits only inside parts", () => {
+    expect(splitRanges(kept, [2, 5, 6, 9.99])).toEqual([
+      { start: 0, end: 2 },
+      { start: 2, end: 4 },
+      { start: 6, end: 10 },
+    ]);
+  });
+
+  it("keeps the user's order and slots new parts after their neighbour", () => {
+    const parts = splitRanges(kept, [2]);
+    const order = [partKey(kept[1]), partKey(kept[0])]; // 6-10 first, then 0-4
+    // 0-4 was split into 0-2 and 2-4: 2-4 follows 0-2.
+    expect(orderParts(parts, order).map((p) => p.start)).toEqual([6, 0, 2]);
+    expect(inTimeOrder(orderParts(parts, order))).toBe(false);
+    expect(inTimeOrder(orderParts(parts, null))).toBe(true);
+  });
+
+  it("drops parts that are gone and moves items", () => {
+    expect(orderParts([kept[0]], [partKey(kept[1]), partKey(kept[0])])).toEqual([kept[0]]);
+    expect(moveItem(["a", "b", "c"], 0, 2)).toEqual(["b", "c", "a"]);
+    expect(moveItem(["a", "b", "c"], 2, 0)).toEqual(["c", "a", "b"]);
   });
 });

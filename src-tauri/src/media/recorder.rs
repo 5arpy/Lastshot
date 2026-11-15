@@ -1782,19 +1782,36 @@ mod win {
 
         /// Feeds one NV12 texture. `force_key` is used right after a device
         /// reset so the new generation always begins with an IDR.
+        ///
+        /// Returns `Ok(false)` when the encoder did not take the frame (it is
+        /// saturated), so the caller can count it as dropped.
         pub fn submit(
             &mut self,
             texture: &ID3D11Texture2D,
             pts_hns: i64,
             duration_hns: i64,
             force_key: bool,
-        ) -> RResult<()> {
+        ) -> RResult<bool> {
             unsafe {
                 if self.async_mode {
                     // Async MFTs must be driven by METransformNeedInput.
-                    self.pump_events(true)?;
+                    // Collect every event that is already queued, then, if the
+                    // encoder has not asked for input yet, give it up to half a
+                    // frame to do so. The old pump blocked for exactly one event
+                    // and dropped the frame whenever that event happened to be
+                    // METransformHaveOutput, which threw away about every other
+                    // frame (60 fps settings gave ~29 fps clips).
+                    self.pump_events()?;
                     if self.pending_input == 0 {
-                        return Ok(()); // encoder is saturated; caller drops the frame
+                        let deadline = Instant::now()
+                            + Duration::from_micros(500_000 / self.fps.max(1) as u64);
+                        while self.pending_input == 0 && Instant::now() < deadline {
+                            std::thread::sleep(Duration::from_millis(1));
+                            self.pump_events()?;
+                        }
+                    }
+                    if self.pending_input == 0 {
+                        return Ok(false); // encoder is saturated; caller drops the frame
                     }
                     self.pending_input -= 1;
                 }
@@ -1823,8 +1840,8 @@ mod win {
                 }
 
                 match self.transform.ProcessInput(0, &sample, 0) {
-                    Ok(()) => Ok(()),
-                    Err(e) if e.code() == MF_E_NOTACCEPTING => Ok(()),
+                    Ok(()) => Ok(true),
+                    Err(e) if e.code() == MF_E_NOTACCEPTING => Ok(false),
                     Err(e) => Err(hr(e)),
                 }
             }
@@ -1834,7 +1851,7 @@ mod win {
         pub fn drain(&mut self, mut sink: impl FnMut(&[u8], i64, i64, bool)) -> RResult<()> {
             unsafe {
                 if self.async_mode {
-                    self.pump_events(false)?;
+                    self.pump_events()?;
                 }
 
                 loop {
@@ -1894,30 +1911,27 @@ mod win {
             }
         }
 
-        /// Async MFT event pump. `block` waits (bounded) for the next event.
-        unsafe fn pump_events(&mut self, block: bool) -> RResult<()> {
+        /// Async MFT event pump. Never blocks: it takes every event that is
+        /// already queued and counts each METransformNeedInput, so no input
+        /// request is lost behind a METransformHaveOutput. Output itself is
+        /// collected by `drain`, which loops `ProcessOutput` until empty.
+        unsafe fn pump_events(&mut self) -> RResult<()> {
             let Some(gen) = self.events.clone() else {
                 self.pending_input = 1;
                 return Ok(());
             };
 
-            let flags = if block { 0 } else { MF_EVENT_FLAG_NO_WAIT.0 as u32 };
+            let flags = MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(MF_EVENT_FLAG_NO_WAIT.0 as u32);
             loop {
-                let evt = match gen.GetEvent(MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(flags)) {
+                let evt = match gen.GetEvent(flags) {
                     Ok(e) => e,
                     Err(e) if e.code() == MF_E_NO_EVENTS_AVAILABLE => return Ok(()),
                     Err(e) if e.code() == MF_E_MULTIPLE_SUBSCRIBERS => return Ok(()),
                     Err(e) => return Err(hr(e)),
                 };
                 let kind = evt.GetType().unwrap_or(0);
-                match me_transform_need_input_or(kind) {
-                    EventKind::NeedInput => {
-                        self.pending_input += 1;
-                        return Ok(());
-                    }
-                    EventKind::HaveOutput => return Ok(()),
-                    EventKind::DrainComplete => return Ok(()),
-                    EventKind::Other => continue,
+                if let EventKind::NeedInput = me_transform_need_input_or(kind) {
+                    self.pending_input += 1;
                 }
             }
         }
@@ -2424,17 +2438,8 @@ mod win {
                         let submit_ns = submit_start.elapsed().as_nanos() as u64;
                         let encode_start = Instant::now();
 
-                        if let Err(e) =
-                            encoder.submit(&converter.nv12, pts, frame_hns, force_key)
-                        {
-                            log::warn!("[clipflow] encoder submit failed: {e}");
-                            shared.dropped_frames.fetch_add(1, Ordering::Relaxed);
-                        } else {
-                            force_key = false;
-                        }
-
                         let ring = Arc::clone(&shared.ring);
-                        let drain = encoder.drain(|slice, pts, dur, key| {
+                        let mut push = |slice: &[u8], pts: i64, dur: i64, key: bool| {
                             let pkt = EncodedPacket {
                                 track: TrackKind::Video,
                                 data: Arc::from(slice),
@@ -2444,7 +2449,37 @@ mod win {
                                 generation,
                             };
                             ring.lock().push(pkt);
-                        });
+                        };
+
+                        // Collect anything the encoder finished since the last
+                        // frame first, so a full output queue never stops it
+                        // from asking for this frame.
+                        if let Err(e) = encoder.drain(&mut push) {
+                            if !shared.stop_requested.load(Ordering::Acquire) {
+                                log::warn!("[clipflow] encoder drain failed: {e}");
+                            }
+                        }
+
+                        // Only frames the encoder actually took count as
+                        // encoded; the rest are drops, and a pending key frame
+                        // request stays armed for the next frame.
+                        let accepted =
+                            match encoder.submit(&converter.nv12, pts, frame_hns, force_key) {
+                                Ok(true) => {
+                                    force_key = false;
+                                    true
+                                }
+                                Ok(false) => false,
+                                Err(e) => {
+                                    log::warn!("[clipflow] encoder submit failed: {e}");
+                                    false
+                                }
+                            };
+                        if !accepted {
+                            shared.dropped_frames.fetch_add(1, Ordering::Relaxed);
+                        }
+
+                        let drain = encoder.drain(&mut push);
 
                         if let Err(e) = drain {
                             if !shared.stop_requested.load(Ordering::Acquire) {
@@ -2452,12 +2487,14 @@ mod win {
                             }
                         }
 
-                        shared.frames_encoded.fetch_add(1, Ordering::Relaxed);
+                        if accepted {
+                            shared.frames_encoded.fetch_add(1, Ordering::Relaxed);
+                            fps_frames += 1;
+                        }
                         shared
                             .encode_ns_total
                             .fetch_add(encode_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
                         shared.submit_ns_total.fetch_add(submit_ns, Ordering::Relaxed);
-                        fps_frames += 1;
                     }
                 }
 

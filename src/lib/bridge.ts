@@ -21,6 +21,8 @@ import type {
   ProfileMapEntry,
   ShrinkProgress,
   ShrinkResult,
+  ExportSegment,
+  CropRect,
   SnipCapture,
   SnipDone,
   SplitResult,
@@ -548,6 +550,49 @@ export const clipflow = {
       fps: 30,
       video_kbps: 2400,
       elapsed_ms: 1200,
+      attempts: 1,
+    };
+  },
+
+  /**
+   * The clip editor's export: joins `segments` in order, optionally crops,
+   * and re-encodes. `save` keeps full quality as a new clip; `share` fits the
+   * size limit from Settings (and `copy` puts it on the clipboard).
+   * Progress arrives on onShrinkProgress under `progressKey`.
+   */
+  async exportClip(opts: {
+    segments: ExportSegment[];
+    crop: CropRect | null;
+    mode: "save" | "share";
+    copy: boolean;
+    progressKey: string;
+  }): Promise<ShrinkResult> {
+    if (isTauri()) {
+      return invoke<ShrinkResult>("export_clip", {
+        segments: opts.segments,
+        crop: opts.crop,
+        mode: opts.mode,
+        copy: opts.copy,
+        progressKey: opts.progressKey,
+      });
+    }
+    for (let i = 1; i <= 10; i++) {
+      await new Promise((r) => setTimeout(r, 150));
+      emitLocal(CHANNELS.shrinkProgress, { path: opts.progressKey, progress: i / 10 });
+    }
+    const first = opts.segments[0]?.path ?? "clip.mp4";
+    const secs = opts.segments.reduce((t, s) => t + ((s.end ?? s.start + 30) - s.start), 0);
+    const name = opts.mode === "save" ? first.replace(/\.mp4$/i, "_edit.mp4") : first.replace(/\.mp4$/i, "_share.mp4");
+    return {
+      path: name,
+      file_name: name.split(/[\\/]/).pop() ?? name,
+      size_bytes: Math.round(secs * 1_000_000),
+      duration_seconds: secs,
+      width: opts.crop ? 608 : 1920,
+      height: 1080,
+      fps: 60,
+      video_kbps: 11000,
+      elapsed_ms: 1500,
       attempts: 1,
     };
   },

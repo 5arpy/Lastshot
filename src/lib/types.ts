@@ -107,6 +107,21 @@ export interface ShrinkResult {
   attempts: number;
 }
 
+/** One piece of an export: `path` from `start` to `end` seconds (null = to the end). */
+export interface ExportSegment {
+  path: string;
+  start: number;
+  end: number | null;
+}
+
+/** Part of the picture to keep, as fractions (0-1) of the frame. */
+export interface CropRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 export interface ShrinkProgress {
   path: string;
   progress: number;

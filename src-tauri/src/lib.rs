@@ -269,6 +269,7 @@ pub fn run() {
             commands::quit_app,
             commands::simulate_device_loss,
             share::shrink_clip,
+            share::export_clip,
             share::start_clip_drag,
             snip::start_snip,
             snip::snip_get_capture,

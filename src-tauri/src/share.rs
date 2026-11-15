@@ -4,11 +4,11 @@
 
 use std::path::PathBuf;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::commands::{clipboard, AppState};
-use crate::media::shrink::{self, ShrinkResult};
+use crate::media::shrink::{self, Crop, Segment, ShrinkResult, Target};
 
 pub const EVT_SHRINK_PROGRESS: &str = "clipflow://shrink-progress";
 
@@ -71,6 +71,103 @@ pub async fn shrink_clip(
     })
     .await
     .map_err(|e| format!("shrink task failed: {e}"))?
+    .map_err(|e| e.to_string())?;
+
+    if copy {
+        clipboard::copy_files(&[PathBuf::from(&result.path)])?;
+    }
+    Ok(result)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SegmentArg {
+    path: String,
+    start: f32,
+    end: Option<f32>,
+}
+
+/// `dir/<stem>.mp4`, or `<stem>_2.mp4`, ... if taken.
+fn unique(dir: &std::path::Path, stem: &str) -> PathBuf {
+    let mut p = dir.join(format!("{stem}.mp4"));
+    let mut n = 2;
+    while p.exists() {
+        p = dir.join(format!("{stem}_{n}.mp4"));
+        n += 1;
+    }
+    p
+}
+
+/// The clip editor's export: joins `segments` (parts of one clip, or several
+/// clips) in order, optionally crops the picture, and re-encodes.
+///
+/// - `mode: "save"`: full quality, saved as a new clip (next to the original,
+///   or in the clips folder when several clips are joined).
+/// - `mode: "share"`: fits the size limit from Settings and goes to the temp
+///   share folder; `copy` puts it on the clipboard.
+///
+/// Progress is reported on the shrink-progress channel under `progressKey`.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn export_clip(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    segments: Vec<SegmentArg>,
+    crop: Option<Crop>,
+    mode: String,
+    copy: bool,
+    progress_key: Option<String>,
+) -> Result<ShrinkResult, String> {
+    let first = segments.first().ok_or("nothing to export")?;
+    let first_path = PathBuf::from(&first.path);
+    let key = progress_key.unwrap_or_else(|| first.path.clone());
+    let joined = segments.iter().any(|s| s.path != first.path);
+    let segs: Vec<Segment> = segments
+        .iter()
+        .map(|s| Segment { path: PathBuf::from(&s.path), start: s.start, end: s.end })
+        .collect();
+
+    let (target, dest) = match mode.as_str() {
+        "share" => {
+            let mb = state.settings.read().share_size_mb.clamp(1.0, 2000.0);
+            let bytes = (mb as f64 * 1_000_000.0) as u64;
+            let dir = crate::paths::share_temp_dir();
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            (Target::Size(bytes), shrink::output_path(&dir, &first_path, bytes))
+        }
+        "save" => {
+            if joined {
+                let dir = state.output_dir();
+                std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+                let stem = format!("Lastshot_{}_joined", chrono::Local::now().format("%Y-%m-%d_%H-%M-%S"));
+                (Target::Quality, unique(&dir, &stem))
+            } else {
+                let dir = first_path
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .ok_or("clip has no folder")?;
+                let stem = first_path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "clip".into());
+                (Target::Quality, unique(&dir, &format!("{stem}_edit")))
+            }
+        }
+        other => return Err(format!("unknown export mode {other}")),
+    };
+
+    let h = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let mut last = -1.0f32;
+        shrink::export(&segs, crop, target, &dest, &mut |progress| {
+            if progress - last >= 0.02 || progress >= 1.0 {
+                last = progress;
+                let _ = h.emit(EVT_SHRINK_PROGRESS, ShrinkProgress { path: key.clone(), progress });
+            }
+        })
+    })
+    .await
+    .map_err(|e| format!("export task failed: {e}"))?
     .map_err(|e| e.to_string())?;
 
     if copy {

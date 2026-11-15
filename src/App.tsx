@@ -23,7 +23,9 @@ import type {
   CaptureProfile,
   ClipMetadata,
   ClipSavedPayload,
+  CropRect,
   EngineStats,
+  ExportSegment,
   ForegroundGame,
   MonitorInfo,
   PowerState,
@@ -919,6 +921,62 @@ export default function App() {
     [copyClip, pushToast],
   );
 
+  /**
+   * Re-encodes an edit (kept parts of one clip, or several clips joined, with
+   * an optional crop). `save` makes a new full-quality clip; `share` fits the
+   * size limit and lands on the clipboard. Progress shows under `key`.
+   */
+  const exportEdit = useCallback(
+    async (
+      segments: ExportSegment[],
+      crop: CropRect | null,
+      mode: "save" | "share",
+      key: string,
+    ) => {
+      const limitMb = settingsRef.current.shareSizeMb;
+      setShareProgress((m) => new Map(m).set(key, 0));
+      pushToast(
+        "info",
+        mode === "share" ? `Shrinking to ${limitMb} MB…` : "Saving the edit…",
+        mode === "share"
+          ? "Keep playing or browsing; it lands on the clipboard when done."
+          : "Keep playing or browsing; the new clip shows up in Clips when done.",
+      );
+      try {
+        const r = await clipflow.exportClip({
+          segments,
+          crop,
+          mode,
+          copy: mode === "share",
+          progressKey: key,
+        });
+        if (mode === "share") {
+          pushToast(
+            "ok",
+            "Ready to paste",
+            `${formatBytes(r.size_bytes)} · ${r.height}p${r.fps} · press Ctrl+V in Discord.`,
+          );
+        } else {
+          pushToast(
+            "ok",
+            "Saved as a new clip",
+            `${r.file_name} · ${formatDuration(r.duration_seconds)} · ${r.width}×${r.height}`,
+          );
+          await refreshClips();
+        }
+      } catch (e) {
+        pushToast("err", mode === "share" ? "Could not shrink the clip" : "Could not save the edit", String(e));
+      } finally {
+        setShareProgress((m) => {
+          const n = new Map(m);
+          n.delete(key);
+          return n;
+        });
+      }
+    },
+    [pushToast, refreshClips],
+  );
+
   const takeScreenshot = useCallback(() => {
     void clipflow.startSnip().catch((e) => pushToast("err", "Screenshot failed", String(e)));
   }, [pushToast]);
@@ -1292,6 +1350,20 @@ export default function App() {
       pushToast("err", "Clipboard failed", String(e));
     }
   }, [selection.selected, native, pushToast]);
+
+  /** Joins the selected clips, oldest first, into one new clip. */
+  const joinSelected = useCallback(async () => {
+    const chosen = clips
+      .filter((c) => selection.selected.includes(c.path))
+      .sort((a, b) => a.created_unix_ms - b.created_unix_ms);
+    if (chosen.length < 2) return;
+    await exportEdit(
+      chosen.map((c) => ({ path: c.path, start: 0, end: null })),
+      null,
+      "save",
+      "join",
+    );
+  }, [clips, selection.selected, exportEdit]);
 
   // ESC clears the selection / exits select mode, file-manager style.
   useEffect(() => {
@@ -1844,6 +1916,17 @@ export default function App() {
                   </button>
                   <button
                     type="button"
+                    onClick={() => void joinSelected()}
+                    disabled={selectionCount(selection) < 2 || shareProgress.has("join")}
+                    title="Joins the selected clips, oldest first, into one new clip. The originals stay."
+                    className="rounded border border-line bg-surface-2 px-2 py-0.5 text-[11px] text-ink hover:text-ink disabled:opacity-40"
+                  >
+                    {shareProgress.has("join")
+                      ? `Joining ${Math.round((shareProgress.get("join") ?? 0) * 100)}%`
+                      : "Join"}
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => void copySelectedPaths()}
                     title="Copy paths of selected clips"
                     className="rounded border border-line bg-surface-2 px-2 py-0.5 text-[11px] text-ink hover:text-ink"
@@ -2104,6 +2187,7 @@ export default function App() {
           onToggleFavorite={() => toggleFavorite(activeClip)}
           onUpdateTags={(tags) => updateTags(activeClip, tags)}
           onShare={(start, end) => shareClip(activeClip, { start, end })}
+          onExport={(segments, crop, mode) => exportEdit(segments, crop, mode, activeClip.path)}
           shareLimitMb={settings.shareSizeMb}
           shareProgress={shareProgress.get(activeClip.path)}
         />

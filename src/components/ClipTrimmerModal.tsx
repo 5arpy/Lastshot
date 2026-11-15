@@ -1,6 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { assetUrl, clipflow } from "../lib/bridge";
-import type { ClipMetadata } from "../lib/types";
+import type { ClipMetadata, CropRect, ExportSegment } from "../lib/types";
+import {
+  addCut,
+  CROP_ASPECTS,
+  cropRect,
+  isFullFrame,
+  keptRanges,
+  skipCuts,
+  totalLength,
+  type CropAspect,
+  type CropState,
+  type Range,
+} from "../lib/edit";
 import { clamp, formatBytes, formatTimecode } from "../lib/format";
 import { cn } from "../utils/cn";
 
@@ -33,8 +45,17 @@ interface Props {
   /** Shrinks the selected part under the share limit and copies it. */
   onShare: (start: number, end: number) => Promise<void> | void;
   shareLimitMb: number;
-  /** 0-1 while this clip is being shrunk. */
+  /** 0-1 while this clip is being shrunk or exported. */
   shareProgress?: number;
+  /**
+   * Re-encodes the kept parts (after cuts) with an optional crop: `save` as
+   * a new full-quality clip, `share` under the size limit onto the clipboard.
+   */
+  onExport: (
+    segments: ExportSegment[],
+    crop: CropRect | null,
+    mode: "save" | "share",
+  ) => Promise<void> | void;
 }
 
 const HANDLE_W = 14;
@@ -47,6 +68,7 @@ export default function ClipTrimmerModal({
   onShare,
   shareLimitMb,
   shareProgress,
+  onExport,
   onCopy,
   onReveal,
   onOpenExternal,
@@ -72,6 +94,11 @@ export default function ClipTrimmerModal({
   const [renaming, setRenaming] = useState(false);
   const [nameDraft, setNameDraft] = useState(clip.file_name);
   const [tagDraft, setTagDraft] = useState("");
+  const [cuts, setCuts] = useState<Range[]>([]);
+  const [crop, setCrop] = useState<CropState | null>(null);
+  const [exportKind, setExportKind] = useState<"save" | "share">("share");
+  const viewRef = useRef<HTMLDivElement | null>(null);
+  const [view, setView] = useState({ w: 0, h: 0 });
 
   const src = clip.preview_url ?? assetUrl(clip.path);
   const hasVideo = src.length > 0;
@@ -83,7 +110,18 @@ export default function ClipTrimmerModal({
     setDuration(Math.max(clip.duration_seconds, 0.1));
     setNameDraft(clip.file_name);
     setRenaming(false);
+    setCuts([]);
+    setCrop(null);
   }, [clip.id, clip.duration_seconds, clip.file_name]);
+
+  // Size of the player area, to place the crop box over the picture.
+  useEffect(() => {
+    const el = viewRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setView({ w: el.clientWidth, h: el.clientHeight }));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -143,12 +181,13 @@ export default function ClipTrimmerModal({
     const v = videoRef.current;
     if (!v) return;
     if (v.paused) {
-      if (v.currentTime >= end) v.currentTime = start;
+      if (v.currentTime >= end - 0.05 || v.currentTime < start) v.currentTime = start;
+      v.currentTime = skipCuts(v.currentTime, cuts);
       void v.play().catch(() => undefined);
     } else {
       v.pause();
     }
-  }, [end, start]);
+  }, [cuts, end, start]);
 
   useEffect(() => {
     const v = videoRef.current;
@@ -156,7 +195,12 @@ export default function ClipTrimmerModal({
     let raf: number;
     const loop = () => {
       if (!v.paused) {
-        const cur = v.currentTime;
+        let cur = v.currentTime;
+        const jump = skipCuts(cur, cuts);
+        if (jump !== cur) {
+          v.currentTime = jump;
+          cur = jump;
+        }
         setPlayhead(cur);
         if (cur >= end) {
           v.pause();
@@ -168,7 +212,7 @@ export default function ClipTrimmerModal({
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [end, start]);
+  }, [cuts, end, start]);
 
   const positionFromEvent = useCallback(
     (clientX: number): number => {
@@ -228,6 +272,9 @@ export default function ClipTrimmerModal({
         setStart(clamp(playhead, 0, end - 0.2));
       } else if (e.key === "o" || e.key === "O") {
         setEnd(clamp(playhead, start + 0.2, duration));
+      } else if (e.key === "x" || e.key === "X" || e.key === "Delete") {
+        e.preventDefault();
+        cutOutRef.current();
       } else if (e.key === "ArrowLeft") {
         seek(clamp(playhead - (e.shiftKey ? 1 : 1 / 60), start, end));
       } else if (e.key === "ArrowRight") {
@@ -238,7 +285,8 @@ export default function ClipTrimmerModal({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose, togglePlay, playhead, start, end, duration, seek]);
 
-  const selectionSeconds = Math.max(end - start, 0);
+  const kept = useMemo(() => keptRanges(start, end, cuts), [start, end, cuts]);
+  const selectionSeconds = totalLength(kept);
   const estimatedBytes = useMemo(
     () =>
       clip.duration_seconds > 0
@@ -246,6 +294,78 @@ export default function ClipTrimmerModal({
         : clip.size_bytes,
     [clip.size_bytes, clip.duration_seconds, selectionSeconds],
   );
+
+  const srcW = clip.width || videoRef.current?.videoWidth || 1920;
+  const srcH = clip.height || videoRef.current?.videoHeight || 1080;
+  const cropBox = crop ? cropRect(srcW, srcH, crop) : null;
+  const activeCrop = cropBox && !isFullFrame(cropBox) ? cropBox : null;
+  /** One plain range and no crop: the lossless stream-copy path still works. */
+  const simple = !activeCrop && kept.length <= 1;
+  const plainRange = kept[0] ?? { start, end };
+  const segments: ExportSegment[] = kept.map((r) => ({
+    path: clip.path,
+    start: r.start,
+    end: r.end,
+  }));
+
+  // Where the picture sits inside the (letterboxed) player.
+  const pic = useMemo(() => {
+    if (!view.w || !view.h) return null;
+    const scale = Math.min(view.w / srcW, view.h / srcH);
+    const w = srcW * scale;
+    const h = srcH * scale;
+    return { x: (view.w - w) / 2, y: (view.h - h) / 2, w, h };
+  }, [view, srcW, srcH]);
+
+  const cutOut = () => {
+    // Cutting everything that is left would leave nothing: refuse.
+    const next = addCut(cuts, start, end);
+    if (end - start < 0.1 || keptRanges(0, duration, next).length === 0) return;
+    setCuts(next);
+    setStart(0);
+    setEnd(duration);
+    const after = skipCuts(end, next);
+    seek(after >= duration ? 0 : after);
+  };
+  const cutOutRef = useRef(cutOut);
+  cutOutRef.current = cutOut;
+
+  const dragCrop = (e: React.PointerEvent) => {
+    if (!crop || !pic) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const x0 = e.clientX;
+    const y0 = e.clientY;
+    // Start from where the box really is (it is clamped at the edges).
+    const box = cropRect(srcW, srcH, crop);
+    const from = { ...crop, cx: box.x + box.w / 2, cy: box.y + box.h / 2 };
+    const move = (ev: PointerEvent) =>
+      setCrop({
+        ...from,
+        cx: from.cx + (ev.clientX - x0) / pic.w,
+        cy: from.cy + (ev.clientY - y0) / pic.h,
+      });
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  const save = () => {
+    if (simple) {
+      void run("Trimming…", () => onSaveTrimmed(plainRange.start, plainRange.end));
+      return;
+    }
+    setExportKind("save");
+    void onExport(segments, activeCrop, "save");
+  };
+  const share = () => {
+    setExportKind("share");
+    if (simple) void onShare(plainRange.start, plainRange.end);
+    else void onExport(segments, activeCrop, "share");
+  };
 
   const pct = (t: number) => `${clamp((t / duration) * 100, 0, 100)}%`;
 
@@ -288,7 +408,7 @@ export default function ClipTrimmerModal({
               <span className="h-2.5 w-2.5 rounded-full bg-blue-400" />
               <div>
                 <div className="font-mono text-[11px] font-semibold tracking-wider text-ink-2">
-                  CLIP TRIMMER
+                  CLIP EDITOR
                 </div>
                 {renaming ? (
                   <input
@@ -398,7 +518,7 @@ export default function ClipTrimmerModal({
           </div>
 
           {/* Player Viewport */}
-          <div className="relative aspect-video w-full bg-[#0a0c10]">
+          <div ref={viewRef} className="relative aspect-video w-full overflow-hidden bg-[#0a0c10]">
             {hasVideo ? (
               <video
                 ref={videoRef}
@@ -442,6 +562,27 @@ export default function ClipTrimmerModal({
                 {playing ? "❚❚" : "▶"}
               </span>
             </button>
+
+            {/* Crop box: drag to move; the dimmed part is cut away. */}
+            {cropBox && pic && (
+              <div className="pointer-events-none absolute inset-0">
+                <div
+                  onPointerDown={dragCrop}
+                  className="pointer-events-auto absolute cursor-move rounded-sm border-2 border-white/90 shadow-[0_0_0_9999px_rgba(0,0,0,0.6)]"
+                  style={{
+                    left: pic.x + cropBox.x * pic.w,
+                    top: pic.y + cropBox.y * pic.h,
+                    width: cropBox.w * pic.w,
+                    height: cropBox.h * pic.h,
+                  }}
+                  title="Drag to move the crop"
+                >
+                  <span className="absolute left-1 top-1 rounded bg-black/70 px-1.5 py-0.5 font-mono text-[10px] text-white">
+                    {crop?.aspect} · {Math.round(cropBox.w * srcW) & ~1}×{Math.round(cropBox.h * srcH) & ~1}
+                  </span>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Timeline and scrubber */}
@@ -495,6 +636,15 @@ export default function ClipTrimmerModal({
                 className="pointer-events-none absolute inset-y-0 border-y-2 border-blue-400 bg-blue-500/15"
                 style={{ left: pct(start), width: pct(end - start) }}
               />
+
+              {/* Cut-out parts */}
+              {cuts.map((c, i) => (
+                <div
+                  key={i}
+                  className="pointer-events-none absolute inset-y-0 border-x border-red-400/70 bg-[repeating-linear-gradient(135deg,rgba(248,113,113,0.35)_0_6px,rgba(248,113,113,0.12)_6px_12px)]"
+                  style={{ left: pct(c.start), width: pct(c.end - c.start) }}
+                />
+              ))}
 
               {/* Playhead */}
               <div
@@ -587,6 +737,89 @@ export default function ClipTrimmerModal({
                 <span>Space: Play · ←/→: Step · Esc: Close</span>
               </div>
             </div>
+
+            {/* Edit: cut parts out, crop the picture */}
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line pt-2.5 font-mono text-[10px] text-ink-3">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={cutOut}
+                  disabled={end - start < 0.1 || (start <= 0.05 && end >= duration - 0.05)}
+                  title="Removes the selected part; playback skips it. Pick the part with the handles (or I / O) first."
+                  className="rounded border border-red-400/40 bg-red-500/10 px-2 py-1 text-danger hover:border-red-400 disabled:opacity-40"
+                >
+                  ✂ Cut out selection [X]
+                </button>
+                {cuts.map((c, i) => (
+                  <span
+                    key={i}
+                    className="flex items-center gap-1 rounded border border-line-2 bg-surface-2 px-1.5 py-0.5"
+                  >
+                    {formatTimecode(c.start)}–{formatTimecode(c.end)}
+                    <button
+                      type="button"
+                      onClick={() => setCuts(cuts.filter((_, j) => j !== i))}
+                      title="Put this part back"
+                      className="hover:text-ink"
+                    >
+                      ↺
+                    </button>
+                  </span>
+                ))}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span>CROP</span>
+                <button
+                  type="button"
+                  onClick={() => setCrop(null)}
+                  className={cn(
+                    "rounded border px-2 py-1",
+                    !crop
+                      ? "border-accent bg-accent/15 text-accent-fg"
+                      : "border-line bg-surface hover:text-ink",
+                  )}
+                >
+                  Off
+                </button>
+                {CROP_ASPECTS.map((a) => (
+                  <button
+                    key={a.id}
+                    type="button"
+                    title={a.hint}
+                    onClick={() =>
+                      setCrop((c) => ({
+                        aspect: a.id as CropAspect,
+                        scale: c?.scale ?? 1,
+                        cx: c?.cx ?? 0.5,
+                        cy: c?.cy ?? 0.5,
+                      }))
+                    }
+                    className={cn(
+                      "rounded border px-2 py-1",
+                      crop?.aspect === a.id
+                        ? "border-accent bg-accent/15 text-accent-fg"
+                        : "border-line bg-surface hover:text-ink",
+                    )}
+                  >
+                    {a.id}
+                  </button>
+                ))}
+                {crop && (
+                  <label className="flex items-center gap-1.5" title="Crop size (smaller = zoom in)">
+                    Size
+                    <input
+                      type="range"
+                      min={30}
+                      max={100}
+                      value={Math.round(crop.scale * 100)}
+                      onChange={(e) => setCrop({ ...crop, scale: Number(e.target.value) / 100 })}
+                      className="w-20 accent-[var(--color-accent)]"
+                    />
+                  </label>
+                )}
+              </div>
+            </div>
           </div>
 
           {/* Action footer */}
@@ -595,7 +828,11 @@ export default function ClipTrimmerModal({
               {status ? (
                 <span className="text-accent-fg font-semibold">{status}</span>
               ) : (
-                <span>Stream copy: keyframe snap, lossless, under 50 ms</span>
+                <span>
+                  {simple
+                    ? "Save: stream copy, lossless, instant"
+                    : `Save: re-encodes at full quality${activeCrop ? " with the crop" : ""} (${kept.length} part${kept.length === 1 ? "" : "s"})`}
+                </span>
               )}
             </div>
 
@@ -648,12 +885,12 @@ export default function ClipTrimmerModal({
 
               <button
                 type="button"
-                onClick={() => void onShare(start, end)}
+                onClick={share}
                 disabled={busy || shareProgress !== undefined || selectionSeconds < 0.2}
-                title={`Makes a copy of the selected part under ${shareLimitMb} MB and puts it on the clipboard, ready to paste into Discord.`}
+                title={`Makes a copy of the edit under ${shareLimitMb} MB and puts it on the clipboard, ready to paste into Discord.`}
                 className="rounded-lg border border-accent/50 bg-accent/15 px-3.5 py-1.5 text-[12px] font-semibold text-accent-fg hover:bg-accent/25 disabled:opacity-60"
               >
-                {shareProgress !== undefined
+                {shareProgress !== undefined && exportKind === "share"
                   ? `Shrinking ${Math.round(shareProgress * 100)}%`
                   : `Shrink & copy · ${shareLimitMb} MB`}
               </button>
@@ -670,11 +907,14 @@ export default function ClipTrimmerModal({
 
               <button
                 type="button"
-                onClick={() => run("Trimming…", () => onSaveTrimmed(start, end))}
-                disabled={busy || selectionSeconds < 0.2}
-                className="rounded-lg border border-accent bg-accent px-4 py-1.5 text-[12px] font-semibold text-white shadow-sm hover:bg-accent-hover disabled:opacity-40"
+                onClick={save}
+                disabled={busy || shareProgress !== undefined || selectionSeconds < 0.2}
+                title="Saves the edit as a new clip; the original stays as it is."
+                className="rounded-lg border border-accent bg-accent px-4 py-1.5 text-[12px] font-semibold text-white shadow-sm hover:bg-accent-hover disabled:opacity-60"
               >
-                Save Trimmed
+                {shareProgress !== undefined && exportKind === "save"
+                  ? `Saving ${Math.round(shareProgress * 100)}%`
+                  : "Save as new clip"}
               </button>
             </div>
           </div>

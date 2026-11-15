@@ -2,6 +2,17 @@
 
 All notable changes to **Lastshot** (and, before 1.7.1, to **ClipFlow**, which Lastshot is forked from) are documented here. The project follows [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Clip editor.** The trimmer is now an editor:
+  - **Cut out** any part (select it, press **X**). Cuts show on the timeline, and playback skips them. Undo a cut from its chip.
+  - **Crop** to 16:9, 9:16 (TikTok, Shorts), 1:1 or 4:3. Drag the box to place it, and use the size slider to zoom.
+  - **Save as new clip** stays lossless and instant for a plain trim. With cuts or a crop, it re-encodes once at full quality on the GPU (about a third of real time). The original is never changed.
+  - **Shrink & copy** shares the edit, cuts and crop included.
+- **Join clips.** Select two or more clips in Clips, then press **Join**. They are joined oldest first into a new clip in the clips folder.
+
 ## [1.7.1] - 2026-11-15 — first Lastshot release
 
 (1.7.0 was tagged but never published: its release build stopped on a workflow ordering mistake. 1.7.1 has the same app code.)

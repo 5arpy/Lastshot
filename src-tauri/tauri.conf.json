@@ -26,7 +26,8 @@
         "center": true,
         "visible": true,
         "dragDropEnabled": false,
-        "theme": "Light"
+        "theme": "Dark",
+        "backgroundColor": "#15161b"
       }
     ],
     "security": {

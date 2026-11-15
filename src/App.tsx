@@ -100,10 +100,10 @@ interface Toast {
 }
 
 const TONE_STYLES: Record<ToastTone, string> = {
-  ok: "border-emerald-500/40 bg-[#f8f9fa] text-[#0f172a] shadow-xl",
-  warn: "border-amber-500/40 bg-[#f8f9fa] text-[#0f172a] shadow-xl",
-  err: "border-red-500/40 bg-[#f8f9fa] text-[#0f172a] shadow-xl",
-  info: "border-[#2563eb]/40 bg-[#f8f9fa] text-[#0f172a] shadow-xl",
+  ok: "border-emerald-500/40 bg-surface text-ink shadow-xl",
+  warn: "border-amber-500/40 bg-surface text-ink shadow-xl",
+  err: "border-red-500/40 bg-surface text-ink shadow-xl",
+  info: "border-accent/40 bg-surface text-ink shadow-xl",
 };
 
 export default function App() {
@@ -1343,11 +1343,11 @@ export default function App() {
   }, [monitors, settings.monitorIndex]);
 
   return (
-    <div className="relative flex h-screen w-screen flex-col overflow-hidden bg-[#e9ecef] text-[#0f172a]">
+    <div className="relative flex h-screen w-screen flex-col overflow-hidden bg-app text-ink">
       <TitleBar armed={armed} native={native} version={APP_VERSION} />
 
       {/* Top Desktop Navigation Bar */}
-      <nav className="flex h-11 shrink-0 items-center justify-between border-b border-[#d3d9e0] bg-[#f8f9fa] px-5 select-none">
+      <nav className="flex h-11 shrink-0 items-center justify-between border-b border-line bg-surface px-5 select-none">
         <div className="flex items-center gap-1">
           {[
             { id: "home" as const, label: "Home" },
@@ -1363,8 +1363,8 @@ export default function App() {
               className={cn(
                 "flex items-center gap-2 rounded-lg px-3.5 py-1.5 text-[12px] font-semibold transition-all",
                 tab === item.id
-                  ? "border border-[#2563eb]/40 bg-[#2563eb]/15 text-[#2563eb] shadow-sm"
-                  : "text-[#475569] hover:bg-[#eceff2] hover:text-slate-900",
+                  ? "border border-accent/40 bg-accent/15 text-accent-fg shadow-sm"
+                  : "text-ink-3 hover:bg-surface-2 hover:text-ink",
               )}
             >
               <span>{item.label}</span>
@@ -1373,8 +1373,8 @@ export default function App() {
                   className={cn(
                     "rounded-full px-1.5 py-0.5 font-mono text-[10px]",
                     tab === item.id
-                      ? "bg-[#2563eb]/25 text-[#2563eb]"
-                      : "bg-[#eceff2] text-[#475569]",
+                      ? "bg-accent/25 text-accent-fg"
+                      : "bg-surface-2 text-ink-3",
                   )}
                 >
                   {item.count}
@@ -1388,7 +1388,7 @@ export default function App() {
           {foreground && (
             <span
               title={`Focused Game: ${foreground.title}`}
-              className="flex items-center gap-1.5 rounded-md border border-[#d3d9e0] bg-[#f8f9fa] px-2.5 py-1 text-[#475569]"
+              className="flex items-center gap-1.5 rounded-md border border-line bg-surface px-2.5 py-1 text-ink-3"
             >
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
               <span className="max-w-[140px] truncate">{foreground.title || foreground.exe}</span>
@@ -1399,7 +1399,7 @@ export default function App() {
             type="button"
             onClick={() => void clipflow.openOutputFolder()}
             title="Open ClipFlow folder in File Explorer"
-            className="flex items-center gap-1.5 rounded-md border border-[#d3d9e0] bg-[#f8f9fa] px-2.5 py-1 text-[#475569] hover:border-[#2563eb] hover:text-slate-900 transition-colors"
+            className="flex items-center gap-1.5 rounded-md border border-line bg-surface px-2.5 py-1 text-ink-3 hover:border-accent hover:text-ink transition-colors"
           >
             <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 fill-none stroke-current" strokeWidth="1.5">
               <path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5H12.5A1.5 1.5 0 0 1 14 6v6.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12.5v-8z" />
@@ -1434,17 +1434,17 @@ export default function App() {
             <div className="grid gap-5 lg:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]">
               {/* Recent Replays preview */}
               <div className="panel rounded-xl p-5 space-y-4">
-                <div className="flex items-center justify-between border-b border-[#d3d9e0] pb-3">
+                <div className="flex items-center justify-between border-b border-line pb-3">
                   <div className="flex items-center gap-2">
-                    <h3 className="text-[13px] font-semibold text-[#0f172a]">Recent Replays</h3>
-                    <span className="rounded-full border border-[#d3d9e0] bg-[#eceff2] px-2 py-0.5 font-mono text-[10px] text-[#475569]">
+                    <h3 className="text-[13px] font-semibold text-ink">Recent Replays</h3>
+                    <span className="rounded-full border border-line bg-surface-2 px-2 py-0.5 font-mono text-[10px] text-ink-3">
                       {clips.length} total{sessionSaves > 0 ? ` · ${sessionSaves} this session (${formatBytes(sessionBytes)})` : ""}
                     </span>
                   </div>
                   <button
                     type="button"
                     onClick={() => setTab("clips")}
-                    className="text-[12px] font-semibold text-[#2563eb] hover:text-[#1d4ed8] transition-colors"
+                    className="text-[12px] font-semibold text-accent-fg hover:text-accent-fg transition-colors"
                   >
                     View All Clips →
                   </button>
@@ -1452,17 +1452,17 @@ export default function App() {
 
                 {clips.length === 0 ? (
                   <div className="flex flex-col items-center justify-center gap-2.5 py-12 text-center">
-                    <div className="flex h-11 w-11 items-center justify-center rounded-xl border border-[#d3d9e0] bg-[#eceff2] text-[#475569]">
+                    <div className="flex h-11 w-11 items-center justify-center rounded-xl border border-line bg-surface-2 text-ink-3">
                       <svg viewBox="0 0 24 24" className="h-5 w-5 fill-none stroke-current" strokeWidth="1.5">
                         <path d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
                       </svg>
                     </div>
-                    <div className="text-[13px] font-semibold text-[#0f172a]">
+                    <div className="text-[13px] font-semibold text-ink">
                       Ready for your first clip
                     </div>
-                    <p className="max-w-xs text-[12px] text-[#475569] leading-relaxed">
+                    <p className="max-w-xs text-[12px] text-ink-3 leading-relaxed">
                       Start the buffer above, play your game, and press{" "}
-                      <kbd className="rounded border border-[#bcc5cf] bg-[#eceff2] px-1.5 py-0.5 font-mono text-[10px] text-[#0f172a]">
+                      <kbd className="rounded border border-line-3 bg-surface-2 px-1.5 py-0.5 font-mono text-[10px] text-ink">
                         {settings.hotkeySave}
                       </kbd>{" "}
                       to save recent gameplay.
@@ -1474,9 +1474,9 @@ export default function App() {
                       <div
                         key={clip.id}
                         onClick={() => setActiveClip(clip)}
-                        className="group relative cursor-pointer rounded-lg border border-[#d3d9e0] bg-[#f1f3f5] overflow-hidden hover:border-[#2563eb]/60 transition-all"
+                        className="group relative cursor-pointer rounded-lg border border-line bg-surface-3 overflow-hidden hover:border-accent/60 transition-all"
                       >
-                        <div className="aspect-video w-full bg-[#e3e7eb] relative">
+                        <div className="aspect-video w-full bg-surface-4 relative">
                           <LazyThumbnail clip={clip} />
                           <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-transparent to-transparent pointer-events-none" />
                           <span className="absolute bottom-1.5 left-2 font-mono text-[10px] text-white bg-black/75 px-1.5 py-0.5 rounded border border-white/10">
@@ -1494,8 +1494,8 @@ export default function App() {
                           )}
                         </div>
                         <div className="p-2.5">
-                          <div className="truncate text-[12px] font-medium text-[#0f172a]">{clip.title}</div>
-                          <div className="mt-1 flex items-center justify-between font-mono text-[10px] text-[#475569]">
+                          <div className="truncate text-[12px] font-medium text-ink">{clip.title}</div>
+                          <div className="mt-1 flex items-center justify-between font-mono text-[10px] text-ink-3">
                             <span>{formatRelativeTime(clip.created_unix_ms)}</span>
                             <span>{formatBytes(clip.size_bytes)}</span>
                           </div>
@@ -1523,12 +1523,12 @@ export default function App() {
           <div className="mx-auto max-w-[1440px] p-5 space-y-4">
             <section className="space-y-3.5">
               {/* Library Primary Header */}
-              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#d3d9e0] pb-3.5">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line pb-3.5">
                 <div className="flex items-center gap-2.5">
-                  <h2 className="text-[15px] font-semibold tracking-normal text-[#0f172a]">
+                  <h2 className="text-[15px] font-semibold tracking-normal text-ink">
                     Clip Library
                   </h2>
-                  <span className="rounded-full border border-[#d3d9e0] bg-[#eceff2] px-2.5 py-0.5 font-mono text-[10px] text-[#475569]">
+                  <span className="rounded-full border border-line bg-surface-2 px-2.5 py-0.5 font-mono text-[10px] text-ink-3">
                     {clips.length} {clips.length === 1 ? "clip" : "clips"} · {formatBytes(totalBytes)}
                   </span>
                 </div>
@@ -1537,7 +1537,7 @@ export default function App() {
                   {/* Search box */}
                   <div className="relative">
                     <svg
-                      className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#475569]"
+                      className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-3"
                       viewBox="0 0 16 16"
                       fill="none"
                       stroke="currentColor"
@@ -1551,7 +1551,7 @@ export default function App() {
                       value={query}
                       onChange={(e) => setQuery(e.target.value)}
                       placeholder="Search title, filename…"
-                      className="w-52 rounded-lg border border-[#d3d9e0] bg-[#f8f9fa] pl-8 pr-2.5 py-1.5 text-[11px] text-[#0f172a] outline-none placeholder:text-[#475569] focus:border-[#2563eb]"
+                      className="w-52 rounded-lg border border-line bg-surface pl-8 pr-2.5 py-1.5 text-[11px] text-ink outline-none placeholder:text-ink-3 focus:border-accent"
                     />
                   </div>
 
@@ -1560,11 +1560,11 @@ export default function App() {
                     value={gameFilter}
                     onChange={(e) => setGameFilter(e.target.value)}
                     title="Filter by game"
-                    className="rounded-lg border border-[#d3d9e0] bg-[#f8f9fa] px-2.5 py-1.5 text-[11px] text-[#0f172a] outline-none transition-colors hover:border-[#bcc5cf] focus:border-[#2563eb]"
+                    className="rounded-lg border border-line bg-surface px-2.5 py-1.5 text-[11px] text-ink outline-none transition-colors hover:border-line-3 focus:border-accent"
                   >
-                    <option value="all" className="bg-[#e9ecef]">All Games</option>
+                    <option value="all" className="bg-app">All Games</option>
                     {games.map((g) => (
-                      <option key={g} value={g} className="bg-[#e9ecef]">
+                      <option key={g} value={g} className="bg-app">
                         {g}
                       </option>
                     ))}
@@ -1575,14 +1575,14 @@ export default function App() {
                     value={sortKey}
                     onChange={(e) => setSortKey(e.target.value as SortKey)}
                     title="Sort clips"
-                    className="rounded-lg border border-[#d3d9e0] bg-[#f8f9fa] px-2.5 py-1.5 text-[11px] text-[#0f172a] outline-none transition-colors hover:border-[#bcc5cf] focus:border-[#2563eb]"
+                    className="rounded-lg border border-line bg-surface px-2.5 py-1.5 text-[11px] text-ink outline-none transition-colors hover:border-line-3 focus:border-accent"
                   >
-                    <option value="newest" className="bg-[#e9ecef]">Newest First</option>
-                    <option value="oldest" className="bg-[#e9ecef]">Oldest First</option>
-                    <option value="largest" className="bg-[#e9ecef]">Largest Size</option>
-                    <option value="smallest" className="bg-[#e9ecef]">Smallest Size</option>
-                    <option value="longest" className="bg-[#e9ecef]">Longest Duration</option>
-                    <option value="shortest" className="bg-[#e9ecef]">Shortest Duration</option>
+                    <option value="newest" className="bg-app">Newest First</option>
+                    <option value="oldest" className="bg-app">Oldest First</option>
+                    <option value="largest" className="bg-app">Largest Size</option>
+                    <option value="smallest" className="bg-app">Smallest Size</option>
+                    <option value="longest" className="bg-app">Longest Duration</option>
+                    <option value="shortest" className="bg-app">Shortest Duration</option>
                   </select>
                 </div>
               </div>
@@ -1598,8 +1598,8 @@ export default function App() {
                     className={cn(
                       "rounded-lg border px-2.5 py-1 text-[11px] transition-colors",
                       audioOnly
-                        ? "border-[#2563eb] bg-[#2563eb]/15 text-[#2563eb] font-semibold"
-                        : "border-[#d3d9e0] bg-[#f8f9fa] text-[#475569] hover:text-slate-900",
+                        ? "border-accent bg-accent/15 text-accent-fg font-semibold"
+                        : "border-line bg-surface text-ink-3 hover:text-ink",
                     )}
                   >
                     With Audio
@@ -1612,8 +1612,8 @@ export default function App() {
                     className={cn(
                       "rounded-lg border px-2.5 py-1 text-[11px] transition-colors",
                       favOnly
-                        ? "border-amber-400/50 bg-amber-400/15 text-amber-800 font-semibold"
-                        : "border-[#d3d9e0] bg-[#f8f9fa] text-[#475569] hover:text-slate-900",
+                        ? "border-amber-400/50 bg-amber-400/15 text-warn font-semibold"
+                        : "border-line bg-surface text-ink-3 hover:text-ink",
                     )}
                   >
                     ★ Favorites
@@ -1629,8 +1629,8 @@ export default function App() {
                     className={cn(
                       "rounded-lg border px-2.5 py-1 text-[11px] transition-colors",
                       selectMode || selectionCount(selection) > 0
-                        ? "border-[#2563eb] bg-[#2563eb]/15 text-[#2563eb] font-semibold"
-                        : "border-[#d3d9e0] bg-[#f8f9fa] text-[#475569] hover:text-slate-900",
+                        ? "border-accent bg-accent/15 text-accent-fg font-semibold"
+                        : "border-line bg-surface text-ink-3 hover:text-ink",
                     )}
                   >
                     Select Mode
@@ -1643,8 +1643,8 @@ export default function App() {
                     className={cn(
                       "rounded-lg border px-2.5 py-1 text-[11px] transition-colors",
                       compact
-                        ? "border-[#bcc5cf] bg-[#eceff2] text-[#0f172a] font-semibold"
-                        : "border-[#d3d9e0] bg-[#f8f9fa] text-[#475569] hover:text-slate-900",
+                        ? "border-line-3 bg-surface-2 text-ink font-semibold"
+                        : "border-line bg-surface text-ink-3 hover:text-ink",
                     )}
                   >
                     Compact View
@@ -1656,7 +1656,7 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => void refreshClips()}
-                    className="rounded-lg border border-[#d3d9e0] bg-[#f8f9fa] px-2.5 py-1 text-[11px] text-[#475569] hover:border-[#bcc5cf] hover:text-slate-900 transition-colors"
+                    className="rounded-lg border border-line bg-surface px-2.5 py-1 text-[11px] text-ink-3 hover:border-line-3 hover:text-ink transition-colors"
                   >
                     Rescan
                   </button>
@@ -1664,7 +1664,7 @@ export default function App() {
                   <button
                     type="button"
                     onClick={() => void clipflow.openOutputFolder()}
-                    className="rounded-lg border border-[#d3d9e0] bg-[#f8f9fa] px-2.5 py-1 text-[11px] text-[#475569] hover:border-[#bcc5cf] hover:text-slate-900 transition-colors"
+                    className="rounded-lg border border-line bg-surface px-2.5 py-1 text-[11px] text-ink-3 hover:border-line-3 hover:text-ink transition-colors"
                   >
                     Open Folder
                   </button>
@@ -1674,7 +1674,7 @@ export default function App() {
                     onClick={() => setConfirmClear(true)}
                     disabled={clips.length === 0}
                     title="Delete all clips in library"
-                    className="rounded-lg border border-red-500/30 bg-[#f8f9fa] px-2.5 py-1 text-[11px] text-red-600/80 hover:border-red-400/60 hover:bg-red-500/10 hover:text-red-700 disabled:opacity-30 transition-colors"
+                    className="rounded-lg border border-red-500/30 bg-surface px-2.5 py-1 text-[11px] text-danger/80 hover:border-red-400/60 hover:bg-red-500/10 hover:text-danger disabled:opacity-30 transition-colors"
                   >
                     Clear All
                   </button>
@@ -1683,16 +1683,16 @@ export default function App() {
 
               {/* Batch selection toolbar */}
               {(selectMode || selectionCount(selection) > 0) && (
-                <div className="flex flex-wrap items-center gap-2 rounded-lg border border-[#2563eb]/40 bg-[#e7eef9] px-3.5 py-2">
-                  <span className="font-mono text-[11px] font-semibold text-[#2563eb]">
+                <div className="flex flex-wrap items-center gap-2 rounded-lg border border-accent/40 bg-accent-wash px-3.5 py-2">
+                  <span className="font-mono text-[11px] font-semibold text-accent-fg">
                     {selectionCount(selection)} selected
                   </span>
-                  <div className="h-4 w-px bg-[#d3d9e0]" />
+                  <div className="h-4 w-px bg-line" />
                   <button
                     type="button"
                     onClick={() => void setSelectedFavorite(true)}
                     title="Star all selected clips"
-                    className="rounded border border-[#d3d9e0] bg-[#eceff2] px-2 py-0.5 text-[11px] text-[#0f172a] hover:text-amber-700"
+                    className="rounded border border-line bg-surface-2 px-2 py-0.5 text-[11px] text-ink hover:text-warn"
                   >
                     ★ Star
                   </button>
@@ -1700,7 +1700,7 @@ export default function App() {
                     type="button"
                     onClick={() => void setSelectedFavorite(false)}
                     title="Unstar all selected clips"
-                    className="rounded border border-[#d3d9e0] bg-[#eceff2] px-2 py-0.5 text-[11px] text-[#0f172a] hover:text-slate-900"
+                    className="rounded border border-line bg-surface-2 px-2 py-0.5 text-[11px] text-ink hover:text-ink"
                   >
                     ☆ Unstar
                   </button>
@@ -1711,8 +1711,8 @@ export default function App() {
                     className={cn(
                       "rounded border px-2 py-0.5 text-[11px] transition-colors",
                       tagAction === "add"
-                        ? "border-[#2563eb] bg-[#2563eb]/20 text-[#2563eb]"
-                        : "border-[#d3d9e0] bg-[#eceff2] text-[#0f172a] hover:text-slate-900",
+                        ? "border-accent bg-accent/20 text-accent-fg"
+                        : "border-line bg-surface-2 text-ink hover:text-ink",
                     )}
                   >
                     + Tag
@@ -1724,8 +1724,8 @@ export default function App() {
                     className={cn(
                       "rounded border px-2 py-0.5 text-[11px] transition-colors",
                       tagAction === "remove"
-                        ? "border-[#2563eb] bg-[#2563eb]/20 text-[#2563eb]"
-                        : "border-[#d3d9e0] bg-[#eceff2] text-[#0f172a] hover:text-slate-900",
+                        ? "border-accent bg-accent/20 text-accent-fg"
+                        : "border-line bg-surface-2 text-ink hover:text-ink",
                     )}
                   >
                     − Tag
@@ -1734,7 +1734,7 @@ export default function App() {
                     type="button"
                     onClick={() => void copySelectedPaths()}
                     title="Copy paths of selected clips"
-                    className="rounded border border-[#d3d9e0] bg-[#eceff2] px-2 py-0.5 text-[11px] text-[#0f172a] hover:text-slate-900"
+                    className="rounded border border-line bg-surface-2 px-2 py-0.5 text-[11px] text-ink hover:text-ink"
                   >
                     Copy Paths
                   </button>
@@ -1742,27 +1742,27 @@ export default function App() {
                     type="button"
                     onClick={selectAllVisible}
                     disabled={selectionCount(selection) >= filtered.length}
-                    className="rounded border border-[#d3d9e0] bg-[#eceff2] px-2 py-0.5 text-[11px] text-[#0f172a] hover:text-slate-900 disabled:opacity-40"
+                    className="rounded border border-line bg-surface-2 px-2 py-0.5 text-[11px] text-ink hover:text-ink disabled:opacity-40"
                   >
                     Select All
                   </button>
 
                   {confirmDeleteSelection ? (
                     <span className="flex items-center gap-1.5">
-                      <span className="text-[11px] text-red-600">
+                      <span className="text-[11px] text-danger">
                         Delete {selectionCount(selection)} clip{selectionCount(selection) === 1 ? "" : "s"}?
                       </span>
                       <button
                         type="button"
                         onClick={() => void deleteSelected()}
-                        className="rounded border border-red-500/70 bg-red-500/20 px-2 py-0.5 text-[11px] font-semibold text-red-700 hover:bg-red-500/30"
+                        className="rounded border border-red-500/70 bg-red-500/20 px-2 py-0.5 text-[11px] font-semibold text-danger hover:bg-red-500/30"
                       >
                         Confirm
                       </button>
                       <button
                         type="button"
                         onClick={() => setConfirmDeleteSelection(false)}
-                        className="rounded border border-[#d3d9e0] bg-[#eceff2] px-2 py-0.5 text-[11px] text-[#475569] hover:text-slate-900"
+                        className="rounded border border-line bg-surface-2 px-2 py-0.5 text-[11px] text-ink-3 hover:text-ink"
                       >
                         Cancel
                       </button>
@@ -1771,7 +1771,7 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => setConfirmDeleteSelection(true)}
-                      className="rounded border border-red-500/40 bg-red-500/10 px-2 py-0.5 text-[11px] text-red-600 hover:border-red-400 hover:bg-red-500/20"
+                      className="rounded border border-red-500/40 bg-red-500/10 px-2 py-0.5 text-[11px] text-danger hover:border-red-400 hover:bg-red-500/20"
                     >
                       Delete
                     </button>
@@ -1792,11 +1792,11 @@ export default function App() {
                         value={tagInput}
                         onChange={(e) => setTagInput(e.target.value)}
                         placeholder={tagAction === "add" ? "tag to add…" : "tag to remove…"}
-                        className="w-32 rounded border border-[#d3d9e0] bg-[#e9ecef] px-2 py-0.5 text-[11px] text-[#0f172a] outline-none placeholder:text-[#475569] focus:border-[#2563eb]"
+                        className="w-32 rounded border border-line bg-app px-2 py-0.5 text-[11px] text-ink outline-none placeholder:text-ink-3 focus:border-accent"
                       />
                       <button
                         type="submit"
-                        className="rounded border border-[#2563eb] bg-[#2563eb] px-2 py-0.5 text-[11px] font-semibold text-white hover:bg-[#1d4ed8]"
+                        className="rounded border border-accent bg-accent px-2 py-0.5 text-[11px] font-semibold text-white hover:bg-accent-hover"
                       >
                         Apply
                       </button>
@@ -1807,7 +1807,7 @@ export default function App() {
                     type="button"
                     onClick={clearSelection}
                     title="Deselect all (Esc)"
-                    className="rounded border border-[#d3d9e0] bg-[#eceff2] px-2 py-0.5 text-[11px] text-[#475569] hover:text-slate-900"
+                    className="rounded border border-line bg-surface-2 px-2 py-0.5 text-[11px] text-ink-3 hover:text-ink"
                   >
                     ✕
                   </button>
@@ -1817,7 +1817,7 @@ export default function App() {
               {/* Tags Filter Row */}
               {allTags.length > 0 && (
                 <div className="flex flex-wrap items-center gap-1.5">
-                  <span className="font-mono text-[10px] text-[#475569]">TAGS:</span>
+                  <span className="font-mono text-[10px] text-ink-3">TAGS:</span>
                   {allTags.map((t) => (
                     <button
                       key={t}
@@ -1826,8 +1826,8 @@ export default function App() {
                       className={cn(
                         "rounded-full border px-2.5 py-0.5 font-mono text-[10px] transition-colors",
                         tagFilter === t
-                          ? "border-[#2563eb] bg-[#2563eb]/20 text-[#2563eb]"
-                          : "border-[#d3d9e0] bg-[#f8f9fa] text-[#475569] hover:text-slate-900",
+                          ? "border-accent bg-accent/20 text-accent-fg"
+                          : "border-line bg-surface text-ink-3 hover:text-ink",
                       )}
                     >
                       #{t}
@@ -1837,7 +1837,7 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => setTagFilter(null)}
-                      className="rounded-full border border-[#d3d9e0] bg-[#f8f9fa] px-2 py-0.5 font-mono text-[9px] text-[#475569] hover:text-slate-900"
+                      className="rounded-full border border-line bg-surface px-2 py-0.5 font-mono text-[9px] text-ink-3 hover:text-ink"
                     >
                       Clear filter
                     </button>
@@ -1877,19 +1877,19 @@ export default function App() {
                       <button
                         type="button"
                         onClick={() => setVisibleCount((c) => c + GALLERY_PAGE_SIZE)}
-                        className="rounded-lg border border-[#2563eb]/40 bg-[#2563eb]/10 px-4 py-2 text-[12px] font-semibold text-[#2563eb] transition-colors hover:bg-[#2563eb]/20"
+                        className="rounded-lg border border-accent/40 bg-accent/10 px-4 py-2 text-[12px] font-semibold text-accent-fg transition-colors hover:bg-accent/20"
                       >
                         Load More (+{Math.min(GALLERY_PAGE_SIZE, filtered.length - visibleClips.length)})
                       </button>
                       <button
                         type="button"
                         onClick={() => setVisibleCount(filtered.length)}
-                        className="rounded-lg border border-[#d3d9e0] bg-[#f8f9fa] px-3.5 py-2 text-[12px] text-[#475569] hover:text-slate-900"
+                        className="rounded-lg border border-line bg-surface px-3.5 py-2 text-[12px] text-ink-3 hover:text-ink"
                       >
                         Load All ({filtered.length})
                       </button>
                     </div>
-                    <span className="font-mono text-[10px] text-[#475569]">
+                    <span className="font-mono text-[10px] text-ink-3">
                       Showing {visibleClips.length} of {filtered.length} clips
                     </span>
                   </div>
@@ -1957,7 +1957,7 @@ export default function App() {
               {t.title}
             </div>
             {t.body && (
-              <div className="mt-1 break-words text-[11px] text-[#475569]">{t.body}</div>
+              <div className="mt-1 break-words text-[11px] text-ink-3">{t.body}</div>
             )}
           </div>
         ))}
@@ -1990,14 +1990,14 @@ export default function App() {
       {confirmClear && (
         <div className="fixed inset-0 z-[55] flex items-center justify-center p-4">
           <div
-            className="animate-fade fixed inset-0 bg-[#0f172a]/45 backdrop-blur-sm"
+            className="animate-fade fixed inset-0 bg-scrim/45 backdrop-blur-sm"
             onClick={() => setConfirmClear(false)}
           />
-          <div className="animate-pop panel-elevated relative z-10 w-full max-w-sm rounded-xl p-5 border border-[#d3d9e0] bg-[#f8f9fa]">
-            <div className="text-[13px] font-semibold tracking-wide text-red-600">
+          <div className="animate-pop panel-elevated relative z-10 w-full max-w-sm rounded-xl p-5 border border-line bg-surface">
+            <div className="text-[13px] font-semibold tracking-wide text-danger">
               Delete All Clips?
             </div>
-            <p className="mt-2 text-[12px] leading-relaxed text-[#475569]">
+            <p className="mt-2 text-[12px] leading-relaxed text-ink-3">
               This permanently removes all {clips.length} clip{clips.length === 1 ? "" : "s"} from
               the ClipFlow output folder. This action cannot be undone.
             </p>
@@ -2005,7 +2005,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setConfirmClear(false)}
-                className="rounded border border-[#d3d9e0] bg-[#eceff2] px-3 py-1.5 text-[11px] text-[#0f172a] hover:text-slate-900"
+                className="rounded border border-line bg-surface-2 px-3 py-1.5 text-[11px] text-ink hover:text-ink"
               >
                 Cancel
               </button>
@@ -2013,7 +2013,7 @@ export default function App() {
                 type="button"
                 onClick={() => void clearLibrary()}
                 disabled={busy}
-                className="rounded border border-red-500/60 bg-red-500/20 px-3 py-1.5 text-[11px] font-semibold text-red-700 hover:bg-red-500/30 disabled:opacity-40"
+                className="rounded border border-red-500/60 bg-red-500/20 px-3 py-1.5 text-[11px] font-semibold text-danger hover:bg-red-500/30 disabled:opacity-40"
               >
                 Delete All
               </button>
@@ -2078,8 +2078,8 @@ function LazyThumbnail({ clip }: { clip: ClipMetadata }) {
     return <img src={src} alt={clip.title} className="h-full w-full object-cover" />;
   }
   return (
-    <div className="absolute inset-0 grid place-items-center bg-[#eceff2]">
-      <span className="font-mono text-[9px] text-[#475569]">CLIP</span>
+    <div className="absolute inset-0 grid place-items-center bg-surface-2">
+      <span className="font-mono text-[9px] text-ink-3">CLIP</span>
     </div>
   );
 }
@@ -2114,19 +2114,19 @@ function OnboardingOverlay({
 
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
-      <div className="animate-fade fixed inset-0 bg-[#0f172a]/45 backdrop-blur-sm" />
-      <div className="animate-pop panel-elevated relative z-10 w-full max-w-md rounded-xl p-6 border border-[#bcc5cf] bg-[#f8f9fa]">
+      <div className="animate-fade fixed inset-0 bg-scrim/45 backdrop-blur-sm" />
+      <div className="animate-pop panel-elevated relative z-10 w-full max-w-md rounded-xl p-6 border border-line-3 bg-surface">
         <div className="flex items-center gap-3">
-          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-[#eceff2] text-[#2563eb] border border-[#d3d9e0]">
+          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-surface-2 text-accent-fg border border-line">
             <svg viewBox="0 0 16 16" className="h-4 w-4 fill-current">
               <path d="M4 3.5v9l8-4.5-8-4.5z" />
             </svg>
           </div>
           <div>
-            <div className="text-[15px] font-semibold text-[#0f172a]">
+            <div className="text-[15px] font-semibold text-ink">
               Welcome to ClipFlow
             </div>
-            <div className="text-[12px] text-[#475569]">
+            <div className="text-[12px] text-ink-3">
               Lightweight instant replay for PC gaming
             </div>
           </div>
@@ -2136,16 +2136,16 @@ function OnboardingOverlay({
           {steps.map((s, i) => (
             <div
               key={s.title}
-              className="flex items-start gap-3 rounded-lg border border-[#d3d9e0] bg-[#eceff2] p-3"
+              className="flex items-start gap-3 rounded-lg border border-line bg-surface-2 p-3"
             >
-              <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-[#bcc5cf] text-[11px] font-semibold text-[#2563eb]">
+              <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-line-3 text-[11px] font-semibold text-accent-fg">
                 {i + 1}
               </span>
               <div className="min-w-0 flex-1">
-                <div className="text-[13px] font-medium text-[#0f172a]">{s.title}</div>
-                <div className="mt-0.5 text-[11px] leading-relaxed text-[#475569]">{s.body}</div>
+                <div className="text-[13px] font-medium text-ink">{s.title}</div>
+                <div className="mt-0.5 text-[11px] leading-relaxed text-ink-3">{s.body}</div>
               </div>
-              <kbd className="shrink-0 rounded border border-[#bcc5cf] bg-[#f8f9fa] px-2 py-0.5 font-mono text-[10px] font-semibold text-[#0f172a]">
+              <kbd className="shrink-0 rounded border border-line-3 bg-surface px-2 py-0.5 font-mono text-[10px] font-semibold text-ink">
                 {s.kbd}
               </kbd>
             </div>
@@ -2155,7 +2155,7 @@ function OnboardingOverlay({
         <button
           type="button"
           onClick={onDismiss}
-          className="mt-5 w-full rounded-lg border border-[#2563eb] bg-[#2563eb] py-2.5 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-[#1d4ed8]"
+          className="mt-5 w-full rounded-lg border border-accent bg-accent py-2.5 text-[13px] font-semibold text-white shadow-sm transition-colors hover:bg-accent-hover"
         >
           Start Clipping
         </button>

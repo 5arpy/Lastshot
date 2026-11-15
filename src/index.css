@@ -1,27 +1,94 @@
 @import "tailwindcss";
 
 @theme {
-  --color-app-bg: #e9ecef;
+  /* Theme tokens. The light values are ClipFlow's original palette; the soft
+     dark palette below overrides them unless html[data-theme="light"]. */
+  --color-app: #e9ecef;
   --color-surface: #f8f9fa;
-  --color-surface-elevated: #eceff2;
-  --color-surface-hover: #dfe5ec;
-  --color-border: #d3d9e0;
-  --color-border-subtle: #e2e7ec;
-  --color-border-focus: #2563eb;
-  --color-text-primary: #0f172a;
-  --color-text-secondary: #475569;
-  --color-text-muted: #64748b;
+  --color-surface-2: #eceff2;
+  --color-surface-3: #f1f3f5;
+  --color-surface-4: #e3e7eb;
+  --color-line: #d3d9e0;
+  --color-line-2: #cdd5df;
+  --color-line-3: #bcc5cf;
+  --color-line-hover: #a9b6c7;
+  --color-ink: #0f172a;
+  --color-ink-2: #334155;
+  --color-ink-3: #475569;
+  --color-ink-4: #64748b;
+  --color-ink-5: #94a3b8;
   --color-accent: #2563eb;
   --color-accent-hover: #1d4ed8;
-  --color-accent-subtle: rgba(37, 99, 235, 0.08);
-  --color-success: #059669;
-  --color-success-bg: rgba(5, 150, 105, 0.1);
-  --color-warning: #d97706;
-  --color-warning-bg: rgba(217, 119, 6, 0.1);
-  --color-error: #dc2626;
-  --color-error-bg: rgba(220, 38, 38, 0.08);
+  --color-accent-fg: #2563eb;
+  --color-accent-wash: #e7eef9;
+  --color-scrim: #0f172a;
+  --color-ok: #047857;
+  --color-warn: #b45309;
+  --color-danger: #dc2626;
+
+  /* Older names still used in a few places. */
+  --color-app-bg: var(--color-app);
+  --color-surface-elevated: var(--color-surface-2);
+  --color-surface-hover: var(--color-surface-4);
+  --color-border: var(--color-line);
+  --color-border-subtle: var(--color-surface-4);
+  --color-border-focus: var(--color-accent);
+  --color-text-primary: var(--color-ink);
+  --color-text-secondary: var(--color-ink-3);
+  --color-text-muted: var(--color-ink-4);
+  --color-accent-subtle: color-mix(in oklab, var(--color-accent) 8%, transparent);
+  --color-success: var(--color-ok);
+  --color-success-bg: color-mix(in oklab, var(--color-ok) 10%, transparent);
+  --color-warning: var(--color-warn);
+  --color-warning-bg: color-mix(in oklab, var(--color-warn) 10%, transparent);
+  --color-error: var(--color-danger);
+  --color-error-bg: color-mix(in oklab, var(--color-danger) 8%, transparent);
+
   --font-sans: "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
   --font-mono: "Cascadia Code", "JetBrains Mono", Consolas, ui-monospace, SFMono-Regular, monospace;
+}
+
+/* Shadows and other non-color tokens (light). */
+:root {
+  color-scheme: light;
+  --shadow-panel: 0 1px 2px rgba(15, 23, 42, 0.04), 0 8px 24px -16px rgba(15, 23, 42, 0.18);
+  --shadow-panel-elevated: 0 2px 6px rgba(15, 23, 42, 0.05), 0 18px 42px -18px rgba(15, 23, 42, 0.22);
+  --shadow-panel-hover: 0 2px 8px rgba(15, 23, 42, 0.06), 0 16px 30px -20px rgba(15, 23, 42, 0.25);
+  --shadow-thumb: 0 1px 4px rgba(15, 23, 42, 0.25);
+  --range-thumb-hover: #dbeafe;
+}
+
+/* Soft dark: warm-neutral charcoal, low-glare text, muted periwinkle accent.
+   Default unless the user picks Light. */
+:root:not([data-theme="light"]) {
+  color-scheme: dark;
+  --color-app: #15161b;
+  --color-surface: #1c1e25;
+  --color-surface-2: #23262f;
+  --color-surface-3: #20222a;
+  --color-surface-4: #2a2d37;
+  --color-line: #2c2f3a;
+  --color-line-2: #343845;
+  --color-line-3: #414656;
+  --color-line-hover: #50566a;
+  --color-ink: #e4e6ee;
+  --color-ink-2: #c9cdd8;
+  --color-ink-3: #a0a6b6;
+  --color-ink-4: #808799;
+  --color-ink-5: #646b7d;
+  --color-accent: #5d72db;
+  --color-accent-hover: #6b80e4;
+  --color-accent-fg: #a3b4ff;
+  --color-accent-wash: #262b40;
+  --color-scrim: #07080b;
+  --color-ok: #5fd3a0;
+  --color-warn: #f0b860;
+  --color-danger: #f47c7c;
+  --shadow-panel: 0 1px 2px rgba(0, 0, 0, 0.25), 0 8px 24px -16px rgba(0, 0, 0, 0.55);
+  --shadow-panel-elevated: 0 2px 6px rgba(0, 0, 0, 0.3), 0 18px 42px -18px rgba(0, 0, 0, 0.65);
+  --shadow-panel-hover: 0 2px 8px rgba(0, 0, 0, 0.3), 0 16px 30px -20px rgba(0, 0, 0, 0.7);
+  --shadow-thumb: 0 1px 4px rgba(0, 0, 0, 0.5);
+  --range-thumb-hover: #2f3550;
 }
 
 @layer base {
@@ -31,14 +98,10 @@
     height: 100%;
   }
 
-  html {
-    color-scheme: light;
-  }
-
   body {
     margin: 0;
-    background: #e9ecef;
-    color: #0f172a;
+    background: var(--color-app);
+    color: var(--color-ink);
     font-family: var(--font-sans);
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
@@ -47,8 +110,8 @@
   }
 
   ::selection {
-    background: rgba(37, 99, 235, 0.2);
-    color: #0f172a;
+    background: color-mix(in oklab, var(--color-accent) 30%, transparent);
+    color: var(--color-ink);
   }
 
   ::-webkit-scrollbar {
@@ -59,30 +122,29 @@
     background: transparent;
   }
   ::-webkit-scrollbar-thumb {
-    background: #bcc5cf;
+    background: var(--color-line-3);
     border-radius: 6px;
-    border: 3px solid #e9ecef;
+    border: 3px solid var(--color-app);
   }
   ::-webkit-scrollbar-thumb:hover {
-    background: #94a3b8;
+    background: var(--color-ink-5);
+  }
+  ::-webkit-scrollbar-corner {
+    background: transparent;
   }
 }
 
 @layer components {
   .panel {
-    background: #f8f9fa;
-    border: 1px solid #d3d9e0;
-    box-shadow:
-      0 1px 2px rgba(15, 23, 42, 0.04),
-      0 8px 24px -16px rgba(15, 23, 42, 0.18);
+    background: var(--color-surface);
+    border: 1px solid var(--color-line);
+    box-shadow: var(--shadow-panel);
   }
 
   .panel-elevated {
-    background: #f8f9fa;
-    border: 1px solid #cdd5df;
-    box-shadow:
-      0 2px 6px rgba(15, 23, 42, 0.05),
-      0 18px 42px -18px rgba(15, 23, 42, 0.22);
+    background: var(--color-surface);
+    border: 1px solid var(--color-line-2);
+    box-shadow: var(--shadow-panel-elevated);
   }
 
   .panel-hover {
@@ -92,11 +154,9 @@
       box-shadow 150ms ease;
   }
   .panel-hover:hover {
-    border-color: #a9b6c7;
-    background-color: #f8f9fa;
-    box-shadow:
-      0 2px 8px rgba(15, 23, 42, 0.06),
-      0 16px 30px -20px rgba(15, 23, 42, 0.25);
+    border-color: var(--color-line-hover);
+    background-color: var(--color-surface);
+    box-shadow: var(--shadow-panel-hover);
   }
 }
 
@@ -110,7 +170,7 @@
 
   /* Accessible focus indicators across keyboard navigation */
   :focus-visible {
-    outline: 2px solid #2563eb !important;
+    outline: 2px solid var(--color-accent) !important;
     outline-offset: 1px !important;
   }
 
@@ -178,12 +238,12 @@
     appearance: none;
     height: 5px;
     border-radius: 3px;
-    background: #cdd5df;
+    background: var(--color-line-2);
     outline: none;
     cursor: pointer;
   }
   input[type="range"].cf-range:hover {
-    background: #bcc5cf;
+    background: var(--color-line-3);
   }
   input[type="range"].cf-range::-webkit-slider-thumb {
     -webkit-appearance: none;
@@ -191,28 +251,28 @@
     width: 16px;
     height: 16px;
     border-radius: 50%;
-    background: #f8f9fa;
-    border: 2px solid #2563eb;
+    background: var(--color-surface);
+    border: 2px solid var(--color-accent);
     cursor: pointer;
-    box-shadow: 0 1px 4px rgba(15, 23, 42, 0.25);
+    box-shadow: var(--shadow-thumb);
     transition: transform 120ms ease, background-color 120ms ease;
   }
   input[type="range"].cf-range::-webkit-slider-thumb:hover {
     transform: scale(1.12);
-    background: #dbeafe;
+    background: var(--range-thumb-hover);
   }
   input[type="range"].cf-range::-moz-range-thumb {
     width: 16px;
     height: 16px;
     border-radius: 50%;
-    background: #f8f9fa;
-    border: 2px solid #2563eb;
+    background: var(--color-surface);
+    border: 2px solid var(--color-accent);
     cursor: pointer;
-    box-shadow: 0 1px 4px rgba(15, 23, 42, 0.25);
+    box-shadow: var(--shadow-thumb);
     transition: transform 120ms ease, background-color 120ms ease;
   }
   input[type="range"].cf-range::-moz-range-thumb:hover {
     transform: scale(1.12);
-    background: #dbeafe;
+    background: var(--range-thumb-hover);
   }
 }

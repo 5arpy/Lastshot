@@ -50,7 +50,7 @@ export default function PipelinePanel({
           className={cn(
             "rounded-full border px-2.5 py-0.5 text-[11px] font-semibold",
             performanceMode
-              ? "border-emerald-300 bg-emerald-50 text-emerald-700"
+              ? "border-ok/40 bg-ok/10 text-ok"
               : "border-border bg-surface-elevated text-text-secondary",
           )}
         >
@@ -60,7 +60,7 @@ export default function PipelinePanel({
 
       <div className="rounded-xl border border-accent/25 bg-accent-subtle p-4">
         <div className="flex items-start gap-3">
-          <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-white text-accent shadow-sm">
+          <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-surface text-accent-fg shadow-sm">
             <svg viewBox="0 0 24 24" className="h-5 w-5 fill-none stroke-current" strokeWidth="1.8">
               <path d="M12 3l7 3v5c0 4.4-3 8.1-7 9-4-0.9-7-4.6-7-9V6l7-3z" />
               <path d="M9 12l2 2 4-4" strokeLinecap="round" strokeLinejoin="round" />
@@ -85,7 +85,7 @@ export default function PipelinePanel({
             onClick={onTogglePerformanceMode}
             className={cn(
               "relative mt-0.5 inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors",
-              performanceMode ? "bg-accent hover:bg-accent-hover" : "bg-[#94a3b8] hover:bg-[#64748b]",
+              performanceMode ? "bg-accent hover:bg-accent-hover" : "bg-ink-5 hover:bg-ink-4",
             )}
             role="switch"
             aria-checked={performanceMode}
@@ -102,8 +102,8 @@ export default function PipelinePanel({
       </div>
 
       {integratedGpu && performanceMode && (
-        <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2">
-          <p className="text-[11px] leading-relaxed text-amber-800">
+        <div className="rounded-lg border border-warn/40 bg-warn/10 px-3 py-2">
+          <p className="text-[11px] leading-relaxed text-warn">
             Integrated GPU detected ({stats.encoder.adapter_name}). The game and the
             encoder share one graphics chip and its memory bandwidth, so Game Mode
             records at 720p/30 to protect your frame rate.
@@ -112,14 +112,14 @@ export default function PipelinePanel({
       )}
 
       {pendingRestart && (
-        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2">
-          <span className="text-[11px] text-amber-800">
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-warn/40 bg-warn/10 px-3 py-2">
+          <span className="text-[11px] text-warn">
             Game Mode changed — restart the engine to apply it.
           </span>
           <button
             type="button"
             onClick={onRestartEngine}
-            className="rounded-md border border-amber-400 bg-white px-2.5 py-1 text-[11px] font-semibold text-amber-800 hover:bg-amber-100"
+            className="rounded-md border border-amber-400 bg-surface px-2.5 py-1 text-[11px] font-semibold text-warn hover:bg-warn/20"
           >
             Apply now
           </button>
@@ -190,9 +190,9 @@ function Metric({
         className={cn(
           "mt-0.5 truncate text-[10px]",
           tone === "ok"
-            ? "text-emerald-700"
+            ? "text-ok"
             : tone === "warn"
-              ? "text-amber-700"
+              ? "text-warn"
               : "text-text-muted",
         )}
       >

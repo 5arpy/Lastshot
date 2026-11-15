@@ -12,10 +12,10 @@ export function Row({
   children: ReactNode;
 }) {
   return (
-    <div className="flex items-start justify-between gap-4 border-b border-[#d3d9e0] py-3.5 last:border-0">
+    <div className="flex items-start justify-between gap-4 border-b border-line py-3.5 last:border-0">
       <div className="min-w-0 pr-2">
-        <div className="text-[13px] font-medium text-[#0f172a]">{label}</div>
-        {hint && <div className="mt-0.5 text-[12px] leading-normal text-[#475569]">{hint}</div>}
+        <div className="text-[13px] font-medium text-ink">{label}</div>
+        {hint && <div className="mt-0.5 text-[12px] leading-normal text-ink-3">{hint}</div>}
       </div>
       <div className="shrink-0">{children}</div>
     </div>
@@ -32,7 +32,7 @@ export function Toggle({ on, onClick, label }: { on: boolean; onClick: () => voi
       onClick={onClick}
       className={cn(
         "group relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out",
-        on ? "bg-[#2563eb] hover:bg-[#1d4ed8]" : "bg-[#94a3b8] hover:bg-[#64748b]",
+        on ? "bg-accent hover:bg-accent-hover" : "bg-ink-5 hover:bg-ink-4",
       )}
     >
       <span

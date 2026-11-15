@@ -47,15 +47,15 @@ export default class ErrorBoundary extends Component<Props, State> {
     if (!error) return this.props.children;
 
     return (
-      <div className="grid h-screen w-screen place-items-center bg-[#e9ecef] p-6 text-[#0f172a]">
-        <div className="panel-elevated w-full max-w-lg rounded-xl border border-[#cdd5df] bg-[#f8f9fa] p-6">
+      <div className="grid h-screen w-screen place-items-center bg-app p-6 text-ink">
+        <div className="panel-elevated w-full max-w-lg rounded-xl border border-line-2 bg-surface p-6">
           <div className="text-[15px] font-semibold">ClipFlow hit an unexpected error</div>
-          <p className="mt-2 text-[12px] leading-relaxed text-[#475569]">
+          <p className="mt-2 text-[12px] leading-relaxed text-ink-3">
             The recording buffer keeps running in the background — nothing was lost.
             Reload the window to get the interface back.
           </p>
 
-          <pre className="mt-3 max-h-32 overflow-auto rounded-lg border border-[#d3d9e0] bg-[#eceff2] p-3 font-mono text-[10px] leading-relaxed text-[#475569]">
+          <pre className="mt-3 max-h-32 overflow-auto rounded-lg border border-line bg-surface-2 p-3 font-mono text-[10px] leading-relaxed text-ink-3">
             {error.message}
           </pre>
 
@@ -63,7 +63,7 @@ export default class ErrorBoundary extends Component<Props, State> {
             <button
               type="button"
               onClick={() => window.location.reload()}
-              className="rounded-lg border border-[#2563eb] bg-[#2563eb] px-3.5 py-1.5 text-[12px] font-semibold text-white hover:bg-[#1d4ed8]"
+              className="rounded-lg border border-accent bg-accent px-3.5 py-1.5 text-[12px] font-semibold text-white hover:bg-accent-hover"
             >
               Reload window
             </button>
@@ -72,7 +72,7 @@ export default class ErrorBoundary extends Component<Props, State> {
               onClick={() => {
                 void navigator.clipboard?.writeText(this.diagnostics());
               }}
-              className="rounded-lg border border-[#d3d9e0] bg-[#eceff2] px-3.5 py-1.5 text-[12px] text-[#0f172a] hover:border-[#bcc5cf]"
+              className="rounded-lg border border-line bg-surface-2 px-3.5 py-1.5 text-[12px] text-ink hover:border-line-3"
             >
               Copy diagnostics
             </button>

@@ -50,10 +50,10 @@ function IconButton({
       className={cn(
         "grid h-7 w-7 place-items-center rounded-md border text-[11px] backdrop-blur-sm transition-colors duration-150",
         danger
-          ? "border-red-500/40 bg-[#f1f3f5]/95 text-red-600 hover:border-red-400 hover:bg-red-500/25"
+          ? "border-red-500/40 bg-surface-3/95 text-danger hover:border-red-400 hover:bg-red-500/25"
           : highlight
-            ? "border-amber-400/50 bg-[#f1f3f5]/95 text-amber-700 hover:border-amber-400 hover:bg-amber-400/25"
-            : "border-[#bcc5cf] bg-[#f1f3f5]/95 text-[#475569] hover:border-[#2563eb]/70 hover:bg-[#eceff2] hover:text-slate-900",
+            ? "border-amber-400/50 bg-surface-3/95 text-warn hover:border-amber-400 hover:bg-amber-400/25"
+            : "border-line-3 bg-surface-3/95 text-ink-3 hover:border-accent/70 hover:bg-surface-2 hover:text-ink",
       )}
     >
       {children}
@@ -165,8 +165,8 @@ const ClipCard = memo(function ClipCard({
       className={cn(
         "panel panel-hover group relative cursor-pointer overflow-hidden rounded-xl transition-all duration-150",
         selected
-          ? "border-[#2563eb] ring-2 ring-[#2563eb]/40 bg-[#e4ebf7]"
-          : "hover:border-[#a9b6c7]",
+          ? "border-accent ring-2 ring-accent/40 bg-accent-wash"
+          : "hover:border-line-hover",
       )}
       onClick={handleClick}
     >
@@ -324,27 +324,27 @@ const ClipCard = memo(function ClipCard({
 
       {/* Card Content Footer */}
       <div className={compact ? "px-2.5 py-2" : "px-3 py-2.5"}>
-        <div className="h-5 truncate text-[13px] font-medium text-[#0f172a]">{clip.title}</div>
+        <div className="h-5 truncate text-[13px] font-medium text-ink">{clip.title}</div>
         <div className="mt-1 flex h-4 items-center gap-1 overflow-hidden">
           {clip.tags.length > 0 && (
             <>
               {clip.tags.slice(0, 3).map((t) => (
                 <span
                   key={t}
-                  className="shrink-0 rounded border border-[#d3d9e0] bg-[#eceff2] px-1.5 py-px font-mono text-[9px] text-[#475569]"
+                  className="shrink-0 rounded border border-line bg-surface-2 px-1.5 py-px font-mono text-[9px] text-ink-3"
                 >
                   #{t}
                 </span>
               ))}
               {clip.tags.length > 3 && (
-                <span className="shrink-0 font-mono text-[9px] text-[#475569]">
+                <span className="shrink-0 font-mono text-[9px] text-ink-3">
                   +{clip.tags.length - 3}
                 </span>
               )}
             </>
           )}
         </div>
-        <div className="mt-1.5 flex items-center justify-between font-mono text-[10px] text-[#475569]">
+        <div className="mt-1.5 flex items-center justify-between font-mono text-[10px] text-ink-3">
           <span>{formatRelativeTime(clip.created_unix_ms)}</span>
           <span>{formatBytes(clip.size_bytes)}</span>
         </div>
@@ -382,7 +382,7 @@ const GalleryGrid = memo(function GalleryGrid({
     content = (
       <div className={gridClass}>
         {Array.from({ length: compact ? 8 : 6 }).map((_, i) => (
-          <div key={i} className="panel h-[190px] animate-pulse rounded-xl bg-[#eceff2]" />
+          <div key={i} className="panel h-[190px] animate-pulse rounded-xl bg-surface-2" />
         ))}
       </div>
     );
@@ -390,23 +390,23 @@ const GalleryGrid = memo(function GalleryGrid({
     if (totalClipsCount && totalClipsCount > 0) {
       content = (
         <div className="panel flex flex-col items-center justify-center gap-3 rounded-xl px-6 py-14 text-center">
-          <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-[#d3d9e0] bg-[#eceff2] text-[#475569]">
+          <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-line bg-surface-2 text-ink-3">
             <svg viewBox="0 0 24 24" className="h-6 w-6 fill-none stroke-current" strokeWidth="1.5">
               <circle cx="11" cy="11" r="8" />
               <path d="m21 21-4.35-4.35" />
             </svg>
           </div>
-          <div className="text-[14px] font-semibold text-[#0f172a]">
+          <div className="text-[14px] font-semibold text-ink">
             No clips match your search
           </div>
-          <p className="max-w-sm text-[12px] leading-relaxed text-[#475569]">
+          <p className="max-w-sm text-[12px] leading-relaxed text-ink-3">
             No recorded clips match the current search query or game filters.
           </p>
           {onResetFilters && (
             <button
               type="button"
               onClick={onResetFilters}
-              className="mt-1 rounded-lg border border-[#2563eb]/40 bg-[#2563eb]/10 px-3.5 py-1.5 text-[12px] font-medium text-[#2563eb] hover:bg-[#2563eb]/20 transition-colors"
+              className="mt-1 rounded-lg border border-accent/40 bg-accent/10 px-3.5 py-1.5 text-[12px] font-medium text-accent-fg hover:bg-accent/20 transition-colors"
             >
               Clear Search & Filters
             </button>
@@ -416,18 +416,18 @@ const GalleryGrid = memo(function GalleryGrid({
     } else {
       content = (
         <div className="panel flex flex-col items-center justify-center gap-3 rounded-xl px-6 py-16 text-center">
-          <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-[#d3d9e0] bg-[#eceff2] text-[#475569]">
+          <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-line bg-surface-2 text-ink-3">
             <svg viewBox="0 0 24 24" className="h-6 w-6 fill-none stroke-current" strokeWidth="1.5">
               <rect x="2" y="4" width="20" height="16" rx="2" />
               <path d="M7 4v16M17 4v16M2 12h20M2 8h5M2 16h5M17 8h5M17 16h5" />
             </svg>
           </div>
-          <div className="text-[14px] font-semibold text-[#0f172a]">
+          <div className="text-[14px] font-semibold text-ink">
             No clips recorded yet
           </div>
-          <p className="max-w-sm text-[12px] leading-relaxed text-[#475569]">
+          <p className="max-w-sm text-[12px] leading-relaxed text-ink-3">
             The rolling buffer is active in memory. Press{" "}
-            <kbd className="rounded border border-[#bcc5cf] bg-[#eceff2] px-1.5 py-0.5 font-mono text-[11px] text-[#0f172a]">
+            <kbd className="rounded border border-line-3 bg-surface-2 px-1.5 py-0.5 font-mono text-[11px] text-ink">
               Alt + C
             </kbd>{" "}
             at any time while playing to save the last replay moments instantly.

@@ -3,7 +3,7 @@ name: Release
 # Push a tag like `v1.7.0` (or run this by hand) to build Lastshot on a
 # Windows runner and publish a GitHub Release with:
 #   - the NSIS installer (Lastshot_<version>_x64-setup.exe)
-#   - the plain lastshot.exe, for people who want a portable copy
+#   - the plain exe (lastshot_windows_x64.exe), for a portable copy
 #
 # Lastshot does not update itself, so nothing is signed for an updater; the
 # app only checks the latest release tag and opens the download page.
@@ -64,7 +64,7 @@ jobs:
           tagName: v__VERSION__
           releaseName: "Lastshot v__VERSION__"
           releaseBody: |
-            **Download:** `Lastshot_…_x64-setup.exe` below, run it, done. Or grab `lastshot.exe` for a portable copy (needs Microsoft Edge WebView2, which Windows 10/11 already have).
+            **Download:** `Lastshot_…_x64-setup.exe` below, run it, done. Or grab `lastshot_windows_x64.exe` for a portable copy (needs Microsoft Edge WebView2, which Windows 10/11 already have).
 
             Windows may show "Windows protected your PC" because the installer is not code-signed (that costs money every year). Click **More info → Run anyway**.
 

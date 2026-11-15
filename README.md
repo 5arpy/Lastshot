@@ -30,7 +30,7 @@
 ## Download and install
 
 1. Open the [latest release](https://github.com/5arpy/Lastshot/releases/latest).
-2. Download `Lastshot_…_x64-setup.exe` and run it. If you'd rather not install anything, download `lastshot.exe`; it runs as is.
+2. Download `Lastshot_…_x64-setup.exe` and run it. If you'd rather not install anything, download `lastshot_windows_x64.exe`; it runs as is.
 3. Windows may say **"Windows protected your PC"** because the installer is not code-signed (signing costs money every year). Click **More info › Run anyway**.
 
 Lastshot checks for updates only if you turn that on in **Settings › App › Advanced**, and even then it only opens the download page. Nothing installs by itself.

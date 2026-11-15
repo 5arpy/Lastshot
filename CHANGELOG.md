@@ -20,7 +20,7 @@ All notable changes to **Lastshot** (and, before 1.7.0, to **ClipFlow**, which L
 
 ### Fixed
 
-- **Memory leak in the audio encoder.** Every AAC output sample was leaked (a windows-rs `ManuallyDrop` field that was never released), so ClipFlow grew by about 0.5–0.8 GB per hour while recording. Memory now stays flat: a 90-minute test sat at about 200–230 MB the whole time.
+- **Memory leak in the audio encoder.** Every AAC output sample was leaked (a windows-rs `ManuallyDrop` field that was never released), so ClipFlow grew by about 0.5–0.8 GB per hour while recording. Memory now stays flat: once the replay buffer had filled, a 90-minute recording test stayed between 200 and 240 MB the whole time.
 - **60 FPS recordings came out at 30 FPS.** With asynchronous hardware encoders, every other frame was submitted while the encoder was not ready and silently dropped. Frames are now handed over only when the encoder asks for input, and real drops are counted. Measured: 7158 frames in 119.3 s = 60.0 FPS.
 
 ## [1.6.0] - unreleased

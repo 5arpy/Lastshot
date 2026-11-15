@@ -17,6 +17,8 @@ import type {
   EngineStats,
   ForegroundGame,
   MonitorInfo,
+  CaptureSource,
+  WindowInfo,
   PowerState,
   ProfileMapEntry,
   ShrinkProgress,
@@ -241,6 +243,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   hotkeyRecord: "Alt+R",
   controlBar: "recording",
   studioLayers: "recording",
+  captureSource: { kind: "display" },
   explorerOpenWith: false,
   screenshotDir: "",
   screenshotFormat: "png",
@@ -648,6 +651,25 @@ export const lastshot = {
   },
 
   // ---------------------------------------------------- screen recording
+  /** Windows that can be recorded on their own, front-most first. */
+  async listWindows(): Promise<WindowInfo[]> {
+    if (isTauri()) return invoke<WindowInfo[]>("list_windows");
+    return [
+      { hwnd: 1, title: "Roblox", exe: "RobloxPlayerBeta.exe", pid: 1, width: 1920, height: 1080 },
+      { hwnd: 2, title: "Discord", exe: "Discord.exe", pid: 2, width: 1280, height: 800 },
+    ];
+  },
+  /** Records the full screen or one window / app (it also becomes what instant replay captures). */
+  async startRecordingSource(source: CaptureSource): Promise<RecordingStatus> {
+    if (isTauri()) return invoke<RecordingStatus>("start_recording_source", { source });
+    browserSettings.captureSource = source;
+    return this.startRecording();
+  },
+  /** Changes what Lastshot captures (instant replay and recordings). */
+  async setCaptureSource(source: CaptureSource): Promise<void> {
+    if (isTauri()) await invoke("set_capture_source", { source });
+    else browserSettings.captureSource = source;
+  },
   async startRecording(): Promise<RecordingStatus> {
     if (isTauri()) return invoke<RecordingStatus>("start_recording");
     if (!simEngine.isRunning()) await simEngine.start(browserSettings.bufferSeconds, browserSettings.targetFps);

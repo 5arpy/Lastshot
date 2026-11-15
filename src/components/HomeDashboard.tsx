@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
-import type { AppSettings, BarState, DiskInfo, EngineStats } from "../lib/types";
+import type { AppSettings, BarState, CaptureSource, DiskInfo, EngineStats } from "../lib/types";
+import SourcePicker, { sourceLabel } from "./SourcePicker";
 import { formatBytes } from "../lib/format";
 import { cn } from "../utils/cn";
 import { clockTime } from "./ControlBar";
@@ -20,8 +21,10 @@ interface Props {
   onStartRecording: () => void;
   onStopRecording: () => void;
   onPauseRecording: (paused: boolean) => void;
-  /** Opens the snip bar on Record: pick an area or window to record. */
+  /** Opens the snip bar on Record: pick an area to record. */
   onRecordArea: () => void;
+  /** Records the full screen or one window / app. */
+  onRecordSource: (src: CaptureSource) => void;
   onMarker: () => void;
   onDiscardRecording: () => void;
   /** Opens the control bar again after it was closed. */
@@ -135,10 +138,10 @@ export default function HomeDashboard({
   onToggleReplay,
   onSaveReplay,
   onSelectDuration,
-  onStartRecording,
   onStopRecording,
   onPauseRecording,
   onRecordArea,
+  onRecordSource,
   onMarker,
   onDiscardRecording,
   onShowBar,
@@ -156,6 +159,7 @@ export default function HomeDashboard({
   const lowDisk = disk && (disk.freeBytes < 5e9 || disk.freeBytes / disk.totalBytes < 0.05);
   // Delete asks once: the first click arms it for a few seconds.
   const [armed, setArmed] = useState(false);
+  const [picking, setPicking] = useState(false);
   useEffect(() => {
     if (!armed) return;
     const t = setTimeout(() => setArmed(false), 3500);
@@ -269,8 +273,8 @@ export default function HomeDashboard({
             bar?.finishing != null
               ? `Cutting the recording to the area… ${Math.round(bar.finishing * 100)}%`
               : rec
-                ? `Recording ${bar?.area ? `an area (${bar.area})` : "the whole screen"} · ${formatBytes(bar?.bytes ?? 0)}. Press the shortcut again to stop.`
-                : "The whole screen, or just an area or window. No time limit."
+                ? `Recording ${bar?.area ? `an area (${bar.area})` : settings.captureSource?.kind === "window" ? sourceLabel(settings.captureSource) : "the whole screen"} · ${formatBytes(bar?.bytes ?? 0)}. Press the shortcut again to stop.`
+                : `Now: ${sourceLabel(settings.captureSource)}. Or one window / app, or an area. No time limit.`
           }
           hotkey={settings.hotkeyRecord}
           tone={rec ? "live" : "plain"}
@@ -342,7 +346,7 @@ export default function HomeDashboard({
             <div className="flex gap-2">
               <button
                 type="button"
-                onClick={onStartRecording}
+                onClick={() => onRecordSource({ kind: "display" })}
                 disabled={busy || starting}
                 title="Record the whole screen"
                 className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-red-500/50 bg-red-500/10 px-3 py-2.5 text-[13px] font-semibold text-danger transition-colors hover:bg-red-500/20 disabled:opacity-50"
@@ -352,18 +356,32 @@ export default function HomeDashboard({
               </button>
               <button
                 type="button"
-                onClick={onRecordArea}
+                onClick={() => setPicking(true)}
                 disabled={busy || starting}
-                title="Pick an area or a window, then record only that"
+                title="Record one window or app (even when covered), or an area"
                 className="flex flex-1 items-center justify-center gap-2 rounded-lg border border-red-500/50 bg-red-500/10 px-3 py-2.5 text-[13px] font-semibold text-danger transition-colors hover:bg-red-500/20 disabled:opacity-50"
               >
                 <svg viewBox="0 0 16 16" className="h-4 w-4 fill-none stroke-current" strokeWidth="1.5">
                   <path d="M2 5V3a1 1 0 0 1 1-1h2M11 2h2a1 1 0 0 1 1 1v2M14 11v2a1 1 0 0 1-1 1h-2M5 14H3a1 1 0 0 1-1-1v-2" strokeLinecap="round" />
                   <circle cx="8" cy="8" r="2.2" className="fill-red-500 stroke-none" />
                 </svg>
-                Area / window
+                Window / app
               </button>
             </div>
+          )}
+          {picking && (
+            <SourcePicker
+              current={settings.captureSource ?? { kind: "display" }}
+              onPick={(src) => {
+                setPicking(false);
+                onRecordSource(src);
+              }}
+              onArea={() => {
+                setPicking(false);
+                onRecordArea();
+              }}
+              onClose={() => setPicking(false)}
+            />
           )}
           <label className="flex items-center justify-between gap-2 text-[11px] text-ink-3" title="A small bar with a timer, pause, stop, mute and screenshot. It never shows up in your recordings.">
             <span>On-screen control bar</span>

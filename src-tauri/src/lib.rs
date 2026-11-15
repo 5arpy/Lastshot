@@ -37,7 +37,11 @@ pub fn run() {
     .format_timestamp_millis()
     .init();
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    // Automated tests set LASTSHOT_TEST_INSTANCE so a test copy runs on its
+    // own instead of handing over to (and focusing) the user's running app.
+    if std::env::var_os("LASTSHOT_TEST_INSTANCE").is_none() {
+        builder = builder
         // Single instance: one buffer, one encoder session, one DXGI duplicator.
         // A second launch focuses the existing window instead of fighting over
         // the output (Desktop Duplication only allows one duplicator per output,
@@ -51,7 +55,9 @@ pub fn run() {
                 let _ = w.unminimize();
                 let _ = w.set_focus();
             }
-        }))
+        }));
+    }
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
@@ -324,6 +330,9 @@ pub fn run() {
             editor::media_info,
             editor::allow_media,
             editor::render_project,
+            commands::list_windows,
+            recording::start_recording_source,
+            recording::set_capture_source,
             studio::screen_snapshot,
             studio::sync_layers,
             snip::snip_cancel,

@@ -21,7 +21,7 @@ import { EMPTY_SELECTION, selectionCount, selectionReducer } from "./lib/selecti
 import { playSaveSound } from "./lib/sound";
 import { isIntegratedAdapter } from "./lib/gpu";
 import { cacheThumbnail, getCachedThumbnail } from "./lib/thumbCache";
-import type {
+import type { CaptureSource,
   AppSettings,
   BarState,
   CaptureProfile,
@@ -504,6 +504,21 @@ export default function App() {
       setBusy(false);
     }
   }, [pushToast]);
+
+  const recordSource = useCallback(
+    async (src: CaptureSource) => {
+      try {
+        await lastshot.startRecordingSource(src);
+        setSettings(await lastshot.getSettings());
+        const b = await lastshot.getBarState();
+        setBarState(b);
+        recClock.current = { seconds: b.recording?.seconds ?? 0, at: Date.now() };
+      } catch (e) {
+        pushToast("err", "Could not start recording", String(e));
+      }
+    },
+    [pushToast],
+  );
 
   const recordArea = useCallback(async () => {
     try {
@@ -1821,6 +1836,7 @@ export default function App() {
               onStopRecording={() => void stopRecording()}
               onPauseRecording={(p) => void pauseRecording(p)}
               onRecordArea={() => void recordArea()}
+              onRecordSource={(src) => void recordSource(src)}
               onMarker={() => void addMarker()}
               onDiscardRecording={() => void discardRecording()}
               onShowBar={() => void lastshot.showBar()}

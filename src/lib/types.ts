@@ -173,6 +173,21 @@ export interface ClipSavedPayload {
   openTrimmer?: boolean;
 }
 
+/** What Lastshot records (instant replay and recordings alike). */
+export type CaptureSource =
+  | { kind: "display" }
+  | { kind: "window"; hwnd: number; exe: string; title: string };
+
+/** A window that can be recorded on its own. */
+export interface WindowInfo {
+  hwnd: number;
+  title: string;
+  exe: string;
+  pid: number;
+  width: number;
+  height: number;
+}
+
 export interface MonitorInfo {
   index: number;
   name: string;
@@ -270,6 +285,8 @@ export interface AppSettings {
   controlBar: "recording" | "always" | "off";
   /** Studio layers on the recorded screen. */
   studioLayers: "recording" | "always" | "off";
+  /** What the engine captures: the monitor above, or one window / app. */
+  captureSource: CaptureSource;
   /** "Open with Lastshot" on MP4 files in Explorer. */
   explorerOpenWith: boolean;
   /** Screenshot folder; empty = `<save location>\Screenshots`. */

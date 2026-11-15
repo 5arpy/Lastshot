@@ -80,6 +80,16 @@ features = [
     "Win32_System_Ole",
     "Win32_UI_Shell",
     "Win32_UI_Shell_PropertiesSystem",
+    # Window/app capture (Windows.Graphics.Capture) and the GPU compositor.
+    "Foundation",
+    "Graphics",
+    "Graphics_Capture",
+    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture",
+    "Win32_Graphics_Direct3D_Fxc",
 ]
 
 [target.'cfg(windows)'.dependencies]

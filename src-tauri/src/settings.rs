@@ -42,6 +42,9 @@ pub struct Settings {
     pub bitrate_kbps: u32,
     pub codec: Codec,
     pub monitor_index: u32,
+    /// Full screen (the monitor above) or one window / app.
+    #[serde(default)]
+    pub capture_source: crate::media::CaptureSource,
     pub capture_system_audio: bool,
     pub capture_microphone: bool,
     pub output_dir: String,
@@ -246,6 +249,7 @@ impl Default for Settings {
             bitrate_kbps: 12_000,
             codec: Codec::H264,
             monitor_index: 0,
+            capture_source: Default::default(),
             capture_system_audio: true,
             capture_microphone: false,
             output_dir: default_output_dir().to_string_lossy().to_string(),
@@ -387,6 +391,7 @@ impl Settings {
             mic_device_id: self.mic_device_id.clone(),
             output_dir: PathBuf::from(&self.output_dir),
             output_subfolder: None,
+            source: self.capture_source.clone(),
         };
         self.apply_performance_caps(&mut cfg);
         cfg

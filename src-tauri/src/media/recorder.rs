@@ -152,6 +152,21 @@ pub struct RecorderConfig {
     pub output_dir: PathBuf,
     /// Per-game subfolder the next flush lands in (None = output root).
     pub output_subfolder: Option<String>,
+    /// What to capture: the whole monitor (default) or one window / app.
+    #[serde(default)]
+    pub source: CaptureSource,
+}
+
+/// The picture the engine records (instant replay and recordings alike).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum CaptureSource {
+    /// The monitor picked in Settings (desktop duplication).
+    #[default]
+    Display,
+    /// One window. `exe` finds the app again if its window is re-created
+    /// (a game restarting, a launcher swapping windows).
+    Window { hwnd: i64, exe: String, title: String },
 }
 
 impl Default for RecorderConfig {
@@ -173,6 +188,7 @@ impl Default for RecorderConfig {
             mic_device_id: None,
             output_dir: default_output_dir(),
             output_subfolder: None,
+            source: CaptureSource::Display,
         }
     }
 }
@@ -2437,6 +2453,95 @@ mod win {
 
     use std::os::windows::ffi::OsStrExt;
 
+    // ----------------------------------------------- window / app source
+    /// A window captured with Windows.Graphics.Capture and drawn, fitted,
+    /// into a fixed canvas (windows can be resized; the encoder cannot).
+    pub(super) struct WindowSource {
+        cap: Option<crate::media::wincap::WindowCapture>,
+        exe: String,
+        tex: Option<crate::media::compositor::SourceTexture>,
+        comp: crate::media::compositor::Compositor,
+        last_retry: Instant,
+    }
+
+    impl WindowSource {
+        pub fn open(
+            device: &ID3D11Device,
+            context: &ID3D11DeviceContext,
+            hwnd: i64,
+            exe: &str,
+            max_height: u32,
+        ) -> RResult<Self> {
+            use crate::media::wincap;
+            use windows::Win32::Foundation::HWND;
+            if !wincap::supported() {
+                return Err(RecorderError::Other("window capture needs Windows 10 (1903) or newer".into()));
+            }
+            let h = HWND(hwnd as isize as *mut _);
+            let found = wincap::info(h).or_else(|| wincap::find_app_window(exe));
+            let Some(win) = found else {
+                return Err(RecorderError::Other(format!("the window to record is gone ({exe})")));
+            };
+            // Canvas: the window's own size (no black bars), even, capped by
+            // the Game Mode height. Minimised windows report a tiny size.
+            let (mut w, mut h2) = if win.width >= 64 && win.height >= 64 {
+                (win.width, win.height)
+            } else {
+                (1920, 1080)
+            };
+            if max_height > 0 && h2 > max_height {
+                w = ((w as u64 * max_height as u64) / h2 as u64) as u32;
+                h2 = max_height;
+            }
+            let (w, h2) = ((w & !1).max(2), (h2 & !1).max(2));
+            let comp = crate::media::compositor::Compositor::new(device, context, w, h2)
+                .map_err(RecorderError::Other)?;
+            let cap = crate::media::wincap::WindowCapture::new(device, HWND(win.hwnd as isize as *mut _), true)
+                .map_err(RecorderError::Other)?;
+            Ok(Self { cap: Some(cap), exe: win.exe, tex: None, comp, last_retry: Instant::now() })
+        }
+
+        pub fn size(&self) -> (u32, u32) {
+            (self.comp.width, self.comp.height)
+        }
+
+        /// Composes the newest window frame into the canvas.
+        pub fn frame(&mut self) -> &ID3D11Texture2D {
+            use crate::media::compositor::{fit, Crop, Rect, SourceTexture};
+            if self.cap.as_ref().map(|c| c.is_closed()).unwrap_or(true) {
+                self.cap = None;
+                // Look for the app again once a second (game restarted).
+                if self.last_retry.elapsed() >= Duration::from_secs(1) && !self.exe.is_empty() {
+                    self.last_retry = Instant::now();
+                    if let Some(w) = crate::media::wincap::find_app_window(&self.exe) {
+                        let hwnd = windows::Win32::Foundation::HWND(w.hwnd as isize as *mut _);
+                        self.cap = crate::media::wincap::WindowCapture::new(self.comp.device(), hwnd, true).ok();
+                    }
+                }
+            }
+            let (cap, tex, comp) = (&mut self.cap, &mut self.tex, &self.comp);
+            if let Some(c) = cap.as_mut() {
+                c.with_latest(|t| {
+                    let _ = SourceTexture::update(tex, comp.device(), comp.context(), t);
+                });
+            } else {
+                // The window is gone: show black until it comes back.
+                *tex = None;
+            }
+            comp.begin([0.0, 0.0, 0.0, 1.0]);
+            if let Some(t) = tex.as_ref() {
+                let r = fit(
+                    t.width as f32,
+                    t.height as f32,
+                    Rect { x: 0.0, y: 0.0, w: comp.width as f32, h: comp.height as f32 },
+                );
+                comp.draw(t, r, Crop::NONE, 1.0, true);
+            }
+            comp.end();
+            comp.canvas()
+        }
+    }
+
     // ------------------------------------------------------- capture loop
     pub(super) fn capture_loop(
         shared: Arc<SharedState>,
@@ -2505,12 +2610,34 @@ mod win {
                 (dst_w, dst_h)
             };
 
+            let mut window = match &cfg.source {
+                CaptureSource::Window { hwnd, exe, .. } => {
+                    match WindowSource::open(&gfx.device, &gfx.context, *hwnd, exe, cfg.max_height) {
+                        Ok(w) => Some(w),
+                        Err(e) => {
+                            shared.fail(format!("{e}"));
+                            std::thread::sleep(Duration::from_millis(backoff_ms));
+                            backoff_ms = (backoff_ms * 2).min(2_000);
+                            continue 'outer;
+                        }
+                    }
+                }
+                CaptureSource::Display => None,
+            };
+            let (src_w, src_h, src_fmt, dst_w, dst_h) = match window.as_ref() {
+                Some(w) => {
+                    let (cw, ch) = w.size();
+                    (cw, ch, DXGI_FORMAT_B8G8R8A8_UNORM, cw, ch)
+                }
+                None => (gfx.src_width, gfx.src_height, gfx.src_format, dst_w, dst_h),
+            };
+
             let converter = match ColorConverter::new(
                 &gfx.device,
                 &gfx.context,
-                gfx.src_width,
-                gfx.src_height,
-                gfx.src_format,
+                src_w,
+                src_h,
+                src_fmt,
                 dst_w,
                 dst_h,
                 cfg.target_fps,
@@ -2606,12 +2733,20 @@ mod win {
                 let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
                 let mut resource: Option<IDXGIResource> = None;
 
-                let acquire = unsafe {
-                    gfx.duplication
-                        .AcquireNextFrame(0, &mut frame_info, &mut resource)
+                let acquire = if window.is_some() {
+                    // Window source: no desktop duplication this frame.
+                    Err(windows::core::Error::from(DXGI_ERROR_WAIT_TIMEOUT))
+                } else {
+                    unsafe {
+                        gfx.duplication
+                            .AcquireNextFrame(0, &mut frame_info, &mut resource)
+                    }
                 };
 
                 let mut texture: Option<ID3D11Texture2D> = None;
+                if let Some(w) = window.as_mut() {
+                    texture = Some(w.frame().clone());
+                } else {
                 match acquire {
                     Ok(()) => {
                         if let Some(res) = resource.as_ref() {
@@ -2651,6 +2786,7 @@ mod win {
                         let _ = unsafe { gfx.duplication.ReleaseFrame() };
                         continue;
                     }
+                }
                 }
 
                 if let Some(tex) = texture.as_ref() {
@@ -2734,8 +2870,10 @@ mod win {
 
                 // Always release, even on the timeout path - DXGI reference
                 // counts the frame and will refuse the next acquire otherwise.
-                unsafe {
-                    let _ = gfx.duplication.ReleaseFrame();
+                if window.is_none() {
+                    unsafe {
+                        let _ = gfx.duplication.ReleaseFrame();
+                    }
                 }
 
                 if fps_window.elapsed() >= Duration::from_millis(500) {

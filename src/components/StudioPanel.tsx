@@ -6,6 +6,7 @@ import { type Layer, type LayerKind, loadLayers, newLayer, restack, saveLayers }
 import { LayerView, useRecordingSeconds } from "./StudioLayers";
 import { clockTime } from "./ControlBar";
 import { cn } from "../utils/cn";
+import SourcePicker, { sourceLabel } from "./SourcePicker";
 
 /**
  * Studio: recording with layers on top, OBS-style. Pictures, text, a webcam,
@@ -35,6 +36,7 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
   const [selected, setSelected] = useState<string | null>(null);
   const [shot, setShot] = useState<ScreenShot | null>(null);
   const [cams, setCams] = useState<MediaDeviceInfo[]>([]);
+  const [picking, setPicking] = useState(false);
   const secs = useRecordingSeconds();
   const previewRef = useRef<HTMLDivElement | null>(null);
 
@@ -162,10 +164,10 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
               onClick={() => void lastshot.startRecording().catch((e) => onToast("err", "Could not start recording", String(e)))}
               className="flex items-center gap-2 rounded-lg bg-red-500 px-3.5 py-1.5 text-[12px] font-semibold text-white hover:bg-red-600"
             >
-              <span className="h-2 w-2 rounded-full bg-white" /> Record screen
+              <span className="h-2 w-2 rounded-full bg-white" /> Record {sourceLabel(settings.captureSource)}
             </button>
             <button type="button" onClick={() => void lastshot.startSnip("rec")} className="rounded-lg border border-red-500/50 bg-red-500/10 px-3 py-1.5 text-[12px] font-semibold text-danger hover:bg-red-500/20">
-              Record area / window
+              Record area
             </button>
           </div>
         )}
@@ -357,6 +359,31 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
 
           <div className="panel space-y-2.5 rounded-xl p-3 text-[12px]">
             <div className="font-semibold text-ink">Recording</div>
+            <div className="space-y-1">
+              <span className="text-ink-3">What to record</span>
+              <button
+                type="button"
+                onClick={() => setPicking(true)}
+                disabled={!!rec}
+                title={rec ? "Stop the recording to change this" : "Full screen, or one window / app"}
+                className="flex w-full items-center justify-between rounded-md border border-line bg-surface-2 px-2 py-1 text-left text-ink hover:border-accent disabled:opacity-50"
+              >
+                <span className="truncate">{sourceLabel(settings.captureSource)}</span>
+                <span className="text-ink-3">Change</span>
+              </button>
+            </div>
+            {picking && (
+              <SourcePicker
+                current={settings.captureSource ?? { kind: "display" }}
+                monitor={mon}
+                actionLabel="Use"
+                onPick={(src) => {
+                  setPicking(false);
+                  onPatch({ captureSource: src });
+                }}
+                onClose={() => setPicking(false)}
+              />
+            )}
             <label className="block space-y-1">
               <span className="text-ink-3">Screen</span>
               <select value={settings.monitorIndex} onChange={(e) => onPatch({ monitorIndex: Number(e.target.value) })} className="w-full rounded-md border border-line bg-surface-2 px-2 py-1 text-ink">

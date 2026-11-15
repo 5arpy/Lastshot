@@ -118,8 +118,52 @@ pub async fn start(app: &AppHandle) -> Result<RecordingStatus, String> {
     start_with(app, None).await
 }
 
+/// Makes `source` what the engine captures (saved in Settings), restarting
+/// a running engine with it. The instant replay buffer starts over.
+pub async fn set_source(app: &AppHandle, source: crate::media::CaptureSource) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    if state.settings.read().capture_source == source {
+        return Ok(());
+    }
+    if state.engine.recording_status().is_some() {
+        return Err("Stop the recording before changing what to record.".into());
+    }
+    let cfg = {
+        let mut s = state.settings.write();
+        s.capture_source = source;
+        let _ = s.save();
+        s.to_recorder_config()
+    };
+    let engine = Arc::clone(&state.engine);
+    if engine.is_running() {
+        let h = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let _guard = BUSY.lock();
+            engine.stop();
+            let r = engine.start(cfg).map(|_| ()).map_err(|e| e.to_string());
+            let _ = h.emit(EVT_BUFFER_STATE, engine.stats());
+            r
+        })
+        .await
+        .map_err(|e| format!("engine task failed: {e}"))??;
+    }
+    let _ = app.emit("lastshot://settings-changed", ());
+    Ok(())
+}
+
+/// Records `source` (full screen or one window / app).
+pub async fn start_source(app: &AppHandle, source: crate::media::CaptureSource) -> Result<RecordingStatus, String> {
+    set_source(app, source).await?;
+    start_with(app, None).await
+}
+
 /// Starts recording; with `area`, only that part of the screen is kept.
 pub async fn start_with(app: &AppHandle, area: Option<Area>) -> Result<RecordingStatus, String> {
+    // An area is cut out of the full screen afterwards, so it needs the
+    // full screen as the source.
+    if area.is_some() {
+        set_source(app, crate::media::CaptureSource::Display).await?;
+    }
     let state = app.state::<AppState>();
     let engine = Arc::clone(&state.engine);
     let out = state.output_dir();
@@ -629,4 +673,20 @@ fn open_bar(app: &AppHandle) -> tauri::Result<()> {
         return Ok(());
     }
     win.show()
+}
+
+
+/// Records the whole screen or one window / app (Home, Studio).
+#[tauri::command]
+pub async fn start_recording_source(
+    app: AppHandle,
+    source: crate::media::CaptureSource,
+) -> Result<RecordingStatus, String> {
+    start_source(&app, source).await
+}
+
+/// Changes what Lastshot captures without starting a recording.
+#[tauri::command]
+pub async fn set_capture_source(app: AppHandle, source: crate::media::CaptureSource) -> Result<(), String> {
+    set_source(&app, source).await
 }

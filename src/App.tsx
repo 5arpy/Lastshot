@@ -39,6 +39,10 @@ import type { CaptureSource,
 } from "./lib/types";
 import { cn } from "./utils/cn";
 import AudioPanel from "./components/AudioPanel";
+import { POP_VIEWS, popout, type PopView } from "./lib/audio";
+
+const isPopView = (t: string): t is PopView => (POP_VIEWS as string[]).includes(t);
+const POP_NAMES: Record<PopView, string> = { audio: "Audio", editor: "Editor", studio: "Studio" };
 import { screenshotsDir, setStreamerMode, shownPath } from "./lib/pathDisplay";
 
 const APP_VERSION = "1.9.0";
@@ -123,6 +127,9 @@ export default function App() {
   const [loadingClips, setLoadingClips] = useState(true);
   const [busy, setBusy] = useState(false);
   const [tab, setTab] = useState<"home" | "clips" | "editor" | "studio" | "audio" | "settings">("home");
+  // Tabs shown in a window of their own (Audio, Editor, Studio).
+  const [popped, setPopped] = useState<PopView[]>([]);
+  const poppedRef = useRef<PopView[]>([]);
   // Files handed to the Editor (drag & drop on its tab, "Open in Editor").
   const [editorIncoming, setEditorIncoming] = useState<{ paths: string[]; seq: number } | null>(null);
   const tabRef = useRef(tab);
@@ -248,6 +255,25 @@ export default function App() {
     const id = ++toastId.current;
     setToasts((t) => [...t, { id, tone, title, body }].slice(-4));
     window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 4200);
+  }, []);
+
+  // Popped-out tabs. When one docks back, its window may have changed
+  // settings (Studio), so they are read again.
+  useEffect(() => {
+    let off: (() => void) | undefined;
+    let alive = true;
+    const apply = (views: PopView[]) => {
+      const docked = poppedRef.current.some((v) => !views.includes(v));
+      poppedRef.current = views;
+      setPopped(views);
+      if (docked) void lastshot.getSettings().then(setSettings).catch(() => undefined);
+    };
+    void popout.list().then((v) => alive && apply(v)).catch(() => undefined);
+    void popout.onChange(apply).then((u) => (alive ? (off = u) : u()));
+    return () => {
+      alive = false;
+      off?.();
+    };
   }, []);
 
   const refreshClips = useCallback(async () => {
@@ -1762,6 +1788,11 @@ export default function App() {
               )}
             >
               <span>{item.label}</span>
+              {(popped as string[]).includes(item.id) && (
+                <svg viewBox="0 0 16 16" className="h-3 w-3 fill-none stroke-current opacity-70" strokeWidth="1.6" aria-label="in its own window">
+                  <path d="M9 2h5v5M14 2 8 8M12 9.5V13a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h3.5" />
+                </svg>
+              )}
               {item.count !== undefined && (
                 <span
                   className={cn(
@@ -1779,6 +1810,19 @@ export default function App() {
         </div>
 
         <div className="flex items-center gap-2.5 font-mono text-[11px]">
+          {isPopView(tab) && !popped.includes(tab) && native && (
+            <button
+              type="button"
+              onClick={() => void popout.open(tab).catch((e) => pushToast("err", "Could not open the window", String(e)))}
+              title="Open this tab in a window of its own"
+              className="flex items-center gap-1.5 rounded-md border border-line bg-surface px-2.5 py-1 font-sans text-[12px] text-ink-3 transition-colors hover:border-accent hover:text-ink"
+            >
+              <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 fill-none stroke-current" strokeWidth="1.5">
+                <path d="M9 2h5v5M14 2 8 8M12 9.5V13a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h3.5" />
+              </svg>
+              Pop out
+            </button>
+          )}
           {foreground && (
             <span
               title={`Focused Game: ${foreground.title}`}
@@ -1820,7 +1864,33 @@ export default function App() {
         className="relative z-10 flex-1 overflow-y-auto"
         style={activeClip ? { overflowY: "hidden" } : undefined}
       >
-        {tab === "home" ? (
+        {isPopView(tab) && popped.includes(tab) ? (
+          /* ======================================== TAB IN ITS OWN WINDOW */
+          <div className="flex h-full min-h-[420px] items-center justify-center p-5">
+            <div className="panel max-w-[460px] rounded-xl p-6 text-center">
+              <div className="text-[14px] font-semibold text-ink">
+                {POP_NAMES[tab]} is open in its own window
+              </div>
+              <p className="mt-1 text-[12px] text-ink-3">Closing that window brings it back here.</p>
+              <div className="mt-4 flex justify-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void popout.open(tab)}
+                  className="rounded-md border border-line bg-surface-2 px-3 py-1.5 text-[12px] font-medium text-ink hover:border-accent"
+                >
+                  Show it
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void popout.close(tab)}
+                  className="rounded-md bg-accent px-3 py-1.5 text-[12px] font-semibold text-white hover:bg-accent-hover"
+                >
+                  Bring back
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : tab === "home" ? (
           /* ================================================== HOME VIEW */
           <div className="mx-auto max-w-[1440px] p-5 space-y-5">
             <HomeDashboard

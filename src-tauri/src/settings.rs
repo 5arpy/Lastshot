@@ -172,6 +172,20 @@ pub struct Settings {
     /// the app starts.
     #[serde(default)]
     pub app_outputs: Vec<crate::audio_routing::AppOutputRule>,
+    /// Where each popped-out tab's window was last (logical pixels).
+    #[serde(default)]
+    pub popout_places: Vec<WindowPlace>,
+}
+
+/// A popped-out tab's window size and position.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowPlace {
+    pub view: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
 }
 
 fn default_share_mb() -> f32 {
@@ -303,6 +317,7 @@ impl Default for Settings {
             recording_dir: String::new(),
             streamer_mode: false,
             app_outputs: Vec::new(),
+            popout_places: Vec::new(),
         }
     }
 }

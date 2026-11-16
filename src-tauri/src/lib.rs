@@ -13,6 +13,7 @@ pub mod foreground;
 pub mod hotkeys;
 pub mod media;
 pub mod paths;
+pub mod popout;
 pub mod power;
 pub mod recording;
 pub mod settings;
@@ -246,6 +247,7 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            popout::on_event(window, event);
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == snip::SNIP_LABEL
                     || window.label() == recording::BAR_LABEL
@@ -350,6 +352,9 @@ pub fn run() {
             audio_routing::list_audio_apps,
             audio_routing::get_app_output,
             audio_routing::set_app_output,
+            popout::popout_open,
+            popout::popout_close,
+            popout::popout_list,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Lastshot")

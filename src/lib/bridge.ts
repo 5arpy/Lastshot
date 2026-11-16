@@ -18,6 +18,7 @@ import type {
   ForegroundGame,
   MonitorInfo,
   CaptureSource,
+  CameraInfo,
   WindowInfo,
   PowerState,
   ProfileMapEntry,
@@ -156,6 +157,7 @@ export const CHANNELS = {
   snipDone: "lastshot://snip-done",
   recording: "lastshot://recording",
   openFile: "lastshot://open-file",
+  libraryChanged: "lastshot://library-changed",
   dragDrop: "tauri://drag-drop",
 } as const;
 
@@ -232,6 +234,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   gameVolume: 100,
   micVolume: 100,
   micDeviceId: null,
+  cleanVoice: false,
   adaptiveEco: false,
   ecoBatteryThresholdPct: 30,
   ecoRamFreeGbs: 4,
@@ -485,6 +488,53 @@ export const lastshot = {
     return simEngine.clearAll();
   },
 
+  // ------------------------------------------------- library (file manager)
+  /** All folders under the save folder and the extra folders (also empty ones). */
+  async libraryDirs(): Promise<string[]> {
+    if (isTauri()) return invoke<string[]>("library_dirs");
+    return [];
+  },
+  async createClipFolder(parent: string, name: string): Promise<string> {
+    if (isTauri()) return invoke<string>("create_clip_folder", { parent, name });
+    return `${parent}\\${name}`;
+  },
+  /** Moves clips or folders into a folder; resolves to the new paths. */
+  async moveClips(paths: string[], dest: string): Promise<string[]> {
+    if (isTauri()) return invoke<string[]>("move_clips", { paths, dest });
+    return paths;
+  },
+  async copyClipsTo(paths: string[], dest: string): Promise<string[]> {
+    if (isTauri()) return invoke<string[]>("copy_clips_to", { paths, dest });
+    return paths;
+  },
+  /** Renames a clip or folder (never replaces another file). */
+  async renameLibraryItem(path: string, newName: string): Promise<string> {
+    if (isTauri()) return invoke<string>("rename_library_item", { path, newName });
+    return simEngine.rename(path, newName);
+  },
+  /** Clips or folders to the Recycle Bin. */
+  async recycleItems(paths: string[]): Promise<number> {
+    if (isTauri()) return invoke<number>("recycle_items", { paths });
+    for (const p of paths) simEngine.delete(p);
+    return paths.length;
+  },
+  /** Files or folders changed under the save folder (debounced). */
+  /** Whether each global shortcut is ours (test copies register none). */
+  async getHotkeyStatus(): Promise<HotkeyStatus> {
+    if (isTauri()) return invoke<HotkeyStatus>("get_hotkey_status");
+    return { skipped: false, keys: [] };
+  },
+  async retryHotkeys(): Promise<HotkeyStatus> {
+    if (isTauri()) return invoke<HotkeyStatus>("retry_hotkeys");
+    return { skipped: false, keys: [] };
+  },
+  onHotkeyStatus(handler: (s: HotkeyStatus) => void): Promise<() => void> {
+    return listen<HotkeyStatus>("lastshot://hotkeys-status", handler);
+  },
+  onLibraryChanged(handler: () => void): Promise<() => void> {
+    return listen<null>(CHANNELS.libraryChanged, () => handler());
+  },
+
   /** Renames a clip file on disk; resolves to the new path. */
   async renameClip(path: string, newName: string): Promise<string> {
     if (isTauri()) return invoke<string>("rename_clip", { path, newName });
@@ -734,6 +784,50 @@ export const lastshot = {
   },
   async syncLayers(): Promise<void> {
     if (isTauri()) await invoke("sync_layers");
+  },
+  /** Studio layers drawn by the engine into the video. */
+  async setStudioLayers(layers: unknown[]): Promise<void> {
+    if (isTauri()) await invoke("set_studio_layers", { layers });
+  },
+  /** Layers the engine has (null when Studio never saved any). */
+  async getStudioLayers<T>(): Promise<T[] | null> {
+    if (isTauri()) return invoke<T[] | null>("get_studio_layers");
+    return null;
+  },
+  /** Loudest PC sound / mic level since the last call, in dBFS (-100 = silence). */
+  async getAudioLevels(): Promise<{ gameDb: number; micDb: number }> {
+    if (isTauri()) return invoke<{ gameDb: number; micDb: number }>("get_audio_levels");
+    return { gameDb: -100, micDb: -100 };
+  },
+  async getScenes<T>(): Promise<T> {
+    if (isTauri()) return invoke<T>("get_scenes");
+    return { active: null, scenes: [] } as T;
+  },
+  async saveScenes<T>(scenes: T): Promise<T> {
+    if (isTauri()) return invoke<T>("save_scenes", { scenes });
+    return scenes;
+  },
+  /** Switches scene; resolves to a note when the source could not change. */
+  async switchScene(id: string): Promise<string | null> {
+    if (isTauri()) return invoke<string | null>("switch_scene", { id });
+    return null;
+  },
+  async listCameras(): Promise<CameraInfo[]> {
+    if (isTauri()) return invoke<CameraInfo[]>("list_cameras");
+    return [];
+  },
+  /** Newest live preview frame (RGBA) from the engine, or null. */
+  async getPreviewFrame(): Promise<{ width: number; height: number; seq: number; rgba: Uint8ClampedArray<ArrayBuffer> } | null> {
+    if (!isTauri()) return null;
+    const buf = await invoke<ArrayBuffer | number[]>("get_preview_frame");
+    const bytes = buf instanceof ArrayBuffer ? new Uint8Array(buf) : new Uint8Array(buf);
+    if (bytes.length < 12) return null;
+    const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const width = v.getUint32(0, true);
+    const height = v.getUint32(4, true);
+    const seq = v.getUint32(8, true);
+    if (bytes.length < 12 + width * height * 4) return null;
+    return { width, height, seq, rgba: new Uint8ClampedArray(bytes.slice(12, 12 + width * height * 4).buffer) };
   },
 
   // --------------------------------------------------------------- editor
@@ -1127,3 +1221,8 @@ export const lastshot = {
 };
 
 export type LastshotApi = typeof lastshot;
+
+export interface HotkeyStatus {
+  skipped: boolean;
+  keys: { action: "save" | "toggle" | "snip" | "record"; accel: string; ok: boolean; error: string | null }[];
+}

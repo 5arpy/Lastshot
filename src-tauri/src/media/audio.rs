@@ -634,6 +634,7 @@ mod imp {
             let mut mixed_pending: Vec<f32> = Vec::with_capacity(FRAME_SAMPLES * 8);
             let mut pcm = Vec::<i16>::with_capacity(FRAME_SAMPLES);
             let mut qpc_first: Option<i64> = None;
+            let mut voice = crate::media::voice::VoiceChain::new();
 
             // Audio PTS matches clock time directly.
             let mut next_pts = clock.now_hns();
@@ -729,6 +730,15 @@ mod imp {
                     for s in mic_pending.iter_mut().skip(mic_start_idx) {
                         *s = (*s * mg).clamp(-1.0, 1.0);
                     }
+                }
+                if mic_pending.len() > mic_start_idx {
+                    if crate::media::voice::clean_voice() {
+                        voice.process(&mut mic_pending[mic_start_idx..]);
+                    }
+                    crate::media::voice::meter_mic(&mic_pending[mic_start_idx..]);
+                }
+                if sys_pending.len() > sys_start_idx {
+                    crate::media::voice::meter_game(&sys_pending[sys_start_idx..]);
                 }
 
                 // Mix available samples into mixed_pending.

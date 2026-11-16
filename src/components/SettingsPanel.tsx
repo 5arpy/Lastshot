@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { lastshot } from "../lib/bridge";
+import { lastshot, type HotkeyStatus } from "../lib/bridge";
 import type {
   AppSettings,
   AudioDevice,
@@ -118,6 +118,25 @@ function HotkeyRecorder({
         value.toUpperCase()
       )}
     </button>
+  );
+}
+
+/** Red badge with "Try again" when a shortcut is not ours. */
+function HotkeyBadge({ status, action, onRetry }: { status: HotkeyStatus | null; action: string; onRetry: () => void }) {
+  const k = status?.keys.find((x) => x.action === action);
+  if (!k || k.ok) return null;
+  return (
+    <span className="flex items-center gap-1.5" data-testid={`hotkey-bad-${action}`}>
+      <span
+        className="rounded-full bg-danger/15 px-2 py-0.5 text-[10px] font-semibold text-danger"
+        title={`${k.accel} is being used by another app, so it does nothing in Lastshot. Pick other keys, or close that app and try again.`}
+      >
+        Not working
+      </span>
+      <button type="button" onClick={onRetry} className="rounded border border-line bg-surface-2 px-2 py-0.5 text-[10px] text-ink-2 hover:text-ink">
+        Try again
+      </button>
+    </span>
   );
 }
 
@@ -300,6 +319,18 @@ export default function SettingsPanel({
   const [recording, setRecording] = useState<"save" | "toggle" | "snip" | "record" | null>(null);
   const [theme, setThemeState] = useState<ThemeChoice>(getTheme);
   useEffect(() => onThemeChange(setThemeState), []);
+  const [hotkeyStatus, setHotkeyStatus] = useState<HotkeyStatus | null>(null);
+  useEffect(() => {
+    let off: (() => void) | undefined;
+    let alive = true;
+    void lastshot.getHotkeyStatus().then((st) => alive && setHotkeyStatus(st)).catch(() => undefined);
+    void lastshot.onHotkeyStatus(setHotkeyStatus).then((u) => (alive ? (off = u) : u()));
+    return () => {
+      alive = false;
+      off?.();
+    };
+  }, [settings.hotkeySave, settings.hotkeyToggle, settings.hotkeySnip, settings.hotkeyRecord]);
+  const retryHotkeys = () => void lastshot.retryHotkeys().then(setHotkeyStatus).catch(() => undefined);
   const [bitrate, setBitrate] = useState(settings.bitrateKbps);
   const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([]);
   const [scanningDevices, setScanningDevices] = useState(false);
@@ -645,6 +676,9 @@ export default function SettingsPanel({
                 onChange={(e) => onChange({ micVolume: Number(e.target.value) })}
               />
             </Row>
+            <Row label="Clean up my voice" hint="Turns down background noise between words, cuts rumble and evens out loud and quiet speech.">
+              <Toggle on={!!settings.cleanVoice} onClick={() => onChange({ cleanVoice: !settings.cleanVoice })} />
+            </Row>
           </>
         )}
       </Section>
@@ -656,32 +690,44 @@ export default function SettingsPanel({
         description="These work everywhere, also inside full-screen games. Click one, then press the new keys."
       >
         <Row label="Save replay">
-          <HotkeyRecorder
-            value={settings.hotkeySave}
-            recording={recording === "save"}
-            onStart={() => setRecording("save")}
-          />
+          <div className="flex items-center gap-2">
+            <HotkeyRecorder
+              value={settings.hotkeySave}
+              recording={recording === "save"}
+              onStart={() => setRecording("save")}
+            />
+            <HotkeyBadge status={hotkeyStatus} action="save" onRetry={retryHotkeys} />
+          </div>
         </Row>
         <Row label="Start / stop screen recording">
-          <HotkeyRecorder
-            value={settings.hotkeyRecord}
-            recording={recording === "record"}
-            onStart={() => setRecording("record")}
-          />
+          <div className="flex items-center gap-2">
+            <HotkeyRecorder
+              value={settings.hotkeyRecord}
+              recording={recording === "record"}
+              onStart={() => setRecording("record")}
+            />
+            <HotkeyBadge status={hotkeyStatus} action="record" onRetry={retryHotkeys} />
+          </div>
         </Row>
         <Row label="Take a screenshot">
-          <HotkeyRecorder
-            value={settings.hotkeySnip}
-            recording={recording === "snip"}
-            onStart={() => setRecording("snip")}
-          />
+          <div className="flex items-center gap-2">
+            <HotkeyRecorder
+              value={settings.hotkeySnip}
+              recording={recording === "snip"}
+              onStart={() => setRecording("snip")}
+            />
+            <HotkeyBadge status={hotkeyStatus} action="snip" onRetry={retryHotkeys} />
+          </div>
         </Row>
         <Row label="Turn instant replay on / off">
-          <HotkeyRecorder
-            value={settings.hotkeyToggle}
-            recording={recording === "toggle"}
-            onStart={() => setRecording("toggle")}
-          />
+          <div className="flex items-center gap-2">
+            <HotkeyRecorder
+              value={settings.hotkeyToggle}
+              recording={recording === "toggle"}
+              onStart={() => setRecording("toggle")}
+            />
+            <HotkeyBadge status={hotkeyStatus} action="toggle" onRetry={retryHotkeys} />
+          </div>
         </Row>
       </Section>
 
@@ -692,11 +738,14 @@ export default function SettingsPanel({
         description="Records until you stop it. Uses the same quality as instant replay (frame rate here, bitrate under Instant replay › Advanced), and the same sound settings."
       >
         <Row label="Start / stop shortcut">
-          <HotkeyRecorder
-            value={settings.hotkeyRecord}
-            recording={recording === "record"}
-            onStart={() => setRecording("record")}
-          />
+          <div className="flex items-center gap-2">
+            <HotkeyRecorder
+              value={settings.hotkeyRecord}
+              recording={recording === "record"}
+              onStart={() => setRecording("record")}
+            />
+            <HotkeyBadge status={hotkeyStatus} action="record" onRetry={retryHotkeys} />
+          </div>
         </Row>
         <FolderRow
           label="Save recordings to"
@@ -744,11 +793,14 @@ export default function SettingsPanel({
       {/* -------------------------------------------------------- Screenshots */}
       <Section id="snip" title="Screenshots" description="Drag a box, click a window, or press F for the whole screen. Then draw on it, and press Enter.">
         <Row label="Shortcut">
-          <HotkeyRecorder
-            value={settings.hotkeySnip}
-            recording={recording === "snip"}
-            onStart={() => setRecording("snip")}
-          />
+          <div className="flex items-center gap-2">
+            <HotkeyRecorder
+              value={settings.hotkeySnip}
+              recording={recording === "snip"}
+              onStart={() => setRecording("snip")}
+            />
+            <HotkeyBadge status={hotkeyStatus} action="snip" onRetry={retryHotkeys} />
+          </div>
         </Row>
         <Row label="Copy to the clipboard" hint="Ready to paste with Ctrl+V.">
           <Toggle

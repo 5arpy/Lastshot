@@ -285,6 +285,12 @@ pub async fn snip_finish(
         let s = state.settings.read();
         (s.snip_save_to_folder, s.screenshots_dir(), s.screenshot_copy)
     };
+    // Named after the app, in the app's folder (like clips).
+    let (app_name, folder) = crate::commands::resolve_app_and_folder(&state, None);
+    let dir = match folder {
+        Some(f) => dir.join(f),
+        None => dir,
+    };
     let copy = copy && copy_setting;
     // Not copying and not saving would lose the picture: save it then.
     let save = save || save_setting || !copy;
@@ -305,7 +311,7 @@ pub async fn snip_finish(
                 None => (bytes.clone(), "png"),
             };
             std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-            let stem = format!("Lastshot_{}", chrono::Local::now().format("%Y-%m-%d_%H-%M-%S"));
+            let stem = crate::appname::file_stem(&app_name, None, chrono::Local::now());
             let mut p = dir.join(format!("{stem}.{ext}"));
             let mut n = 2;
             while p.exists() {

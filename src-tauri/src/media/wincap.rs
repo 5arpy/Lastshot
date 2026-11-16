@@ -38,6 +38,7 @@ mod imp {
     use windows::Graphics::DirectX::DirectXPixelFormat;
     use windows::Graphics::SizeInt32;
     use windows::Win32::Foundation::{BOOL, CloseHandle, HWND, LPARAM, RECT};
+    use windows::Win32::Graphics::Gdi::HMONITOR;
     use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D};
     use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS};
     use windows::Win32::Graphics::Dxgi::IDXGIDevice;
@@ -190,12 +191,25 @@ mod imp {
 
     impl WindowCapture {
         pub fn new(d3d: &ID3D11Device, hwnd: HWND, cursor: bool) -> Result<Self, String> {
+            let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().map_err(e)?;
+            let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(hwnd) }.map_err(e)?;
+            Self::start(d3d, item, hwnd, cursor)
+        }
+
+        /// A whole monitor through Graphics Capture: the fallback when desktop
+        /// duplication is unavailable (hybrid-GPU laptops, some remote
+        /// sessions) or delivers only black frames.
+        pub fn for_monitor(d3d: &ID3D11Device, monitor: HMONITOR, cursor: bool) -> Result<Self, String> {
+            let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().map_err(e)?;
+            let item: GraphicsCaptureItem = unsafe { interop.CreateForMonitor(monitor) }.map_err(e)?;
+            Self::start(d3d, item, HWND::default(), cursor)
+        }
+
+        fn start(d3d: &ID3D11Device, item: GraphicsCaptureItem, hwnd: HWND, cursor: bool) -> Result<Self, String> {
             unsafe {
                 let dxgi: IDXGIDevice = d3d.cast().map_err(e)?;
                 let inspectable = CreateDirect3D11DeviceFromDXGIDevice(&dxgi).map_err(e)?;
                 let device: IDirect3DDevice = inspectable.cast().map_err(e)?;
-                let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>().map_err(e)?;
-                let item: GraphicsCaptureItem = interop.CreateForWindow(hwnd).map_err(e)?;
                 let size = item.Size().map_err(e)?;
                 let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
                     &device,
@@ -221,7 +235,8 @@ mod imp {
 
         /// The window was closed (the source should look for it again).
         pub fn is_closed(&self) -> bool {
-            self.closed.load(Ordering::Acquire) || unsafe { !IsWindow(self.hwnd).as_bool() }
+            self.closed.load(Ordering::Acquire)
+                || (!self.hwnd.is_invalid() && unsafe { !IsWindow(self.hwnd).as_bool() })
         }
 
         /// Calls `f` with the newest frame, if a new one arrived. The texture

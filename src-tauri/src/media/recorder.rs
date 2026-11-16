@@ -152,6 +152,9 @@ pub struct RecorderConfig {
     pub output_dir: PathBuf,
     /// Per-game subfolder the next flush lands in (None = output root).
     pub output_subfolder: Option<String>,
+    /// App the next clip is named after (`Roblox 2026-11-16 20-15-03.mp4`).
+    #[serde(default)]
+    pub clip_app: Option<String>,
     /// What to capture: the whole monitor (default) or one window / app.
     #[serde(default)]
     pub source: CaptureSource,
@@ -161,6 +164,22 @@ pub struct RecorderConfig {
     /// Draw the mouse pointer into the video.
     #[serde(default = "cursor_default")]
     pub capture_cursor: bool,
+    /// How a monitor is captured (desktop duplication, Graphics Capture, or
+    /// duplication with an automatic Graphics Capture fallback).
+    #[serde(default)]
+    pub display_method: DisplayMethod,
+}
+
+/// How full-screen capture works.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum DisplayMethod {
+    /// Desktop duplication; Graphics Capture when duplication is unavailable
+    /// or only gives black frames.
+    #[default]
+    Auto,
+    Duplication,
+    GraphicsCapture,
 }
 
 fn cursor_default() -> bool {
@@ -176,7 +195,14 @@ pub enum CaptureSource {
     Display,
     /// One window. `exe` finds the app again if its window is re-created
     /// (a game restarting, a launcher swapping windows).
-    Window { hwnd: i64, exe: String, title: String },
+    Window {
+        hwnd: i64,
+        exe: String,
+        title: String,
+        /// Crop from the screen, Graphics Capture, or automatic.
+        #[serde(default)]
+        method: crate::media::winvis::WindowMethod,
+    },
 }
 
 impl Default for RecorderConfig {
@@ -198,9 +224,11 @@ impl Default for RecorderConfig {
             mic_device_id: None,
             output_dir: default_output_dir(),
             output_subfolder: None,
+            clip_app: None,
             source: CaptureSource::Display,
             app_audio: Default::default(),
             capture_cursor: true,
+            display_method: DisplayMethod::Auto,
         }
     }
 }
@@ -253,6 +281,12 @@ pub struct EngineStats {
     pub privacy_active: bool,
     pub uptime_seconds: u64,
     pub last_error: Option<String>,
+    /// How the picture is captured right now, in plain words.
+    #[serde(default)]
+    pub capture_method: String,
+    /// Something the user should know that is not an error (black screen).
+    #[serde(default)]
+    pub notice: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -666,6 +700,13 @@ struct SharedState {
     effective_bitrate_kbps: RwLock<u32>,
     integrated_gpu: RwLock<bool>,
     audio_drift_ms: RwLock<f32>,
+    capture_method: RwLock<String>,
+    notice: RwLock<Option<String>>,
+    /// Studio layers drawn into the video (S1: in the compositor, not in a
+    /// window on the screen).
+    pub(crate) layers: Arc<crate::media::layers::LayersShared>,
+    /// Live preview for Studio (only made while someone is looking).
+    pub(crate) preview: Arc<crate::media::preview::PreviewShared>,
     /// Shared with the audio thread, hence the `Arc`.
     ring: Arc<Mutex<RollingRingBuffer>>,
 }
@@ -693,6 +734,10 @@ impl SharedState {
             effective_bitrate_kbps: RwLock::new(0),
             integrated_gpu: RwLock::new(false),
             audio_drift_ms: RwLock::new(0.0),
+            capture_method: RwLock::new(String::new()),
+            notice: RwLock::new(None),
+            layers: Arc::new(crate::media::layers::LayersShared::default()),
+            preview: Arc::new(crate::media::preview::PreviewShared::default()),
             ring: Arc::new(Mutex::new(RollingRingBuffer::new(
                 cfg.buffer_seconds,
                 ring_cap_mb(cfg.buffer_seconds, cfg.bitrate_kbps),
@@ -710,6 +755,21 @@ impl SharedState {
         *self.last_error.write() = Some(msg);
         self.set_state(EngineState::Error);
     }
+}
+
+/// The presentation time for a frame captured at `raw_hns`: the nearest slot
+/// on the `fps` grid, always at least one slot after `last`. Exact for any
+/// fps (no drift from rounding the frame duration).
+pub fn cfr_pts(raw_hns: i64, fps: u32, last: i64) -> i64 {
+    let fps = fps.max(1) as i128;
+    let slot = |n: i128| (n * HNS_PER_SECOND as i128 / fps) as i64;
+    let n = (raw_hns as i128 * fps + HNS_PER_SECOND as i128 / 2) / HNS_PER_SECOND as i128;
+    let mut pts = slot(n);
+    if last != i64::MIN && pts <= last {
+        let last_n = (last as i128 * fps + HNS_PER_SECOND as i128 / 2) / HNS_PER_SECOND as i128;
+        pts = slot(last_n + 1);
+    }
+    pts
 }
 
 fn ring_cap_mb(buffer_seconds: u32, bitrate_kbps: u32) -> usize {
@@ -839,6 +899,16 @@ impl CaptureEngine {
         }
     }
 
+    /// Studio layers drawn into the video.
+    pub fn layers(&self) -> Arc<crate::media::layers::LayersShared> {
+        Arc::clone(&self.shared.layers)
+    }
+
+    /// The live preview Studio shows.
+    pub fn preview(&self) -> Arc<crate::media::preview::PreviewShared> {
+        Arc::clone(&self.shared.preview)
+    }
+
     pub fn config(&self) -> RecorderConfig {
         self.config.read().clone()
     }
@@ -902,6 +972,8 @@ impl CaptureEngine {
                 .map(|t| t.elapsed().as_secs())
                 .unwrap_or(0),
             last_error: self.shared.last_error.read().clone(),
+            capture_method: self.shared.capture_method.read().clone(),
+            notice: self.shared.notice.read().clone(),
         }
     }
 
@@ -1085,6 +1157,7 @@ impl CaptureEngine {
                 record_loop(&t_path, &header, &ring, generation, start, with_audio, &t_stop, &t_paused, &t_written)
             })
             .map_err(|e| RecorderError::Other(format!("could not start recording: {e}")))?;
+        self.shared.layers.set_timer(Some(Arc::clone(&written)));
         *slot = Some(Recording {
             stop,
             paused,
@@ -1131,6 +1204,7 @@ impl CaptureEngine {
             .take()
             .ok_or_else(|| RecorderError::Other("Not recording".into()))?;
         let t0 = Instant::now();
+        self.shared.layers.set_timer(None);
         rec.stop.store(true, Ordering::Relaxed);
         let mut rec = rec;
         let joined = rec
@@ -1185,6 +1259,10 @@ impl CaptureEngine {
 
     /// Routes Alt+C flushes into `output_dir/<sub>/` (per-game folders). The
     /// commands layer recomputes this on every save, so it can never go stale.
+    pub fn set_clip_app(&self, app: Option<String>) {
+        self.config.write().clip_app = app;
+    }
+
     pub fn set_output_subfolder(&self, sub: Option<String>) {
         self.config.write().output_subfolder = sub;
     }
@@ -1284,9 +1362,10 @@ impl CaptureEngine {
         // Everything that can fail runs inside this closure so the state is
         // restored on *every* exit path, not just the happy one.
         let written = (|| -> RResult<(PathBuf, String)> {
-            let stem = format!(
-                "Lastshot_{}",
-                chrono::Local::now().format("%Y-%m-%d_%H-%M-%S")
+            let stem = crate::appname::file_stem(
+                cfg.clip_app.as_deref().unwrap_or("Desktop"),
+                None,
+                chrono::Local::now(),
             );
             let out_dir = match &cfg.output_subfolder {
                 Some(sub) => cfg.output_dir.join(sub),
@@ -1428,10 +1507,30 @@ mod win {
     }
 
     // ----------------------------------------------------- D3D11 + DXGI
+    /// How the stack should get the monitor's picture.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub(super) enum ScreenMode {
+        /// Desktop duplication only (fails if unavailable).
+        Duplication,
+        /// Desktop duplication, Graphics Capture when it is unsupported.
+        DuplicationOrCapture,
+        /// Graphics Capture of the monitor.
+        Capture,
+        /// No monitor picture (a window source captured on its own).
+        None,
+    }
+
     pub(super) struct GraphicsStack {
         pub device: ID3D11Device,
         pub context: ID3D11DeviceContext,
-        pub duplication: IDXGIOutputDuplication,
+        pub duplication: Option<IDXGIOutputDuplication>,
+        /// Graphics Capture of the monitor (fallback or chosen method).
+        pub wgc: Option<crate::media::wincap::WindowCapture>,
+        /// Copy of the newest Graphics Capture frame.
+        pub wgc_tex: Option<crate::media::compositor::SourceTexture>,
+        pub monitor: windows::Win32::Graphics::Gdi::HMONITOR,
+        /// The monitor's place on the desktop.
+        pub desktop: crate::media::winvis::IRect,
         pub adapter_name: String,
         pub vram_mb: u64,
         pub src_width: u32,
@@ -1440,7 +1539,7 @@ mod win {
     }
 
     impl GraphicsStack {
-        pub fn create(monitor_index: u32) -> RResult<Self> {
+        pub fn create(monitor_index: u32, mode: ScreenMode, cursor: bool) -> RResult<Self> {
             unsafe {
                 let factory: IDXGIFactory1 = CreateDXGIFactory1().map_err(hr)?;
 
@@ -1468,7 +1567,7 @@ mod win {
                             Err(_) => break,
                         };
                         if flat == monitor_index {
-                            return Self::build(&adapter, &adesc, &output);
+                            return Self::build(&adapter, &adesc, &output, mode, cursor);
                         }
                         flat += 1;
                         output_idx += 1;
@@ -1483,6 +1582,8 @@ mod win {
             adapter: &IDXGIAdapter1,
             adesc: &DXGI_ADAPTER_DESC1,
             output: &IDXGIOutput,
+            mode: ScreenMode,
+            cursor: bool,
         ) -> RResult<Self> {
             let levels = [D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0];
             let mut device: Option<ID3D11Device> = None;
@@ -1511,18 +1612,60 @@ mod win {
             let mt: ID3D11Multithread = device.cast().map_err(hr)?;
             let _ = mt.SetMultithreadProtected(TRUE);
 
-            let output1: IDXGIOutput1 = output.cast().map_err(hr)?;
-            let duplication = output1.DuplicateOutput(&device).map_err(|e| {
-                if e.code() == DXGI_ERROR_UNSUPPORTED {
-                    RecorderError::Other(
-                        "Desktop Duplication is unavailable on this output (hybrid-GPU: run Lastshot on the GPU driving the display)".into(),
-                    )
-                } else {
-                    hr(e)
-                }
-            })?;
+            // Keep our GPU work behind the game's: a lower scheduling priority
+            // for this device's work (drivers without support ignore it).
+            if let Ok(dxgi_dev) = device.cast::<IDXGIDevice>() {
+                let _ = dxgi_dev.SetGPUThreadPriority(-2);
+            }
 
-            let desc = duplication.GetDesc();
+            let odesc = output.GetDesc().map_err(hr)?;
+            let r = odesc.DesktopCoordinates;
+            let desktop = crate::media::winvis::IRect { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+
+            let mut duplication = None;
+            let mut wgc = None;
+            let (mut src_width, mut src_height, mut src_format) =
+                (desktop.width() as u32, desktop.height() as u32, DXGI_FORMAT_B8G8R8A8_UNORM);
+            let want_dup = matches!(mode, ScreenMode::Duplication | ScreenMode::DuplicationOrCapture);
+            let mut use_wgc = mode == ScreenMode::Capture;
+            if want_dup {
+                let output1: IDXGIOutput1 = output.cast().map_err(hr)?;
+                match output1.DuplicateOutput(&device) {
+                    Ok(d) => {
+                        let desc = d.GetDesc();
+                        src_width = desc.ModeDesc.Width;
+                        src_height = desc.ModeDesc.Height;
+                        src_format = desc.ModeDesc.Format;
+                        duplication = Some(d);
+                    }
+                    Err(e) if e.code() == DXGI_ERROR_UNSUPPORTED && mode == ScreenMode::DuplicationOrCapture => {
+                        log::warn!("[lastshot] desktop duplication unsupported on this output; using Graphics Capture");
+                        use_wgc = true;
+                    }
+                    Err(e) => {
+                        return Err(if e.code() == DXGI_ERROR_UNSUPPORTED {
+                            RecorderError::Other(
+                                "Desktop Duplication is unavailable on this output (hybrid-GPU: run Lastshot on the GPU driving the display)".into(),
+                            )
+                        } else {
+                            hr(e)
+                        })
+                    }
+                }
+            }
+            if use_wgc {
+                if !crate::media::wincap::supported() {
+                    return Err(RecorderError::Other("screen capture is unavailable (needs Windows 10 1903 or newer)".into()));
+                }
+                wgc = Some(
+                    crate::media::wincap::WindowCapture::for_monitor(&device, odesc.Monitor, cursor)
+                        .map_err(RecorderError::Other)?,
+                );
+                src_format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            }
+            if src_format == DXGI_FORMAT_UNKNOWN {
+                src_format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            }
 
             let adapter_name = String::from_utf16_lossy(
                 &adesc.Description[..adesc
@@ -1535,23 +1678,81 @@ mod win {
             let _ = adapter; // adapter kept alive through `device`
 
             Ok(Self {
-                src_width: desc.ModeDesc.Width,
-                src_height: desc.ModeDesc.Height,
-                src_format: desc.ModeDesc.Format,
+                src_width,
+                src_height,
+                src_format,
                 device,
                 context,
                 duplication,
+                wgc,
+                wgc_tex: None,
+                monitor: odesc.Monitor,
+                desktop,
                 adapter_name,
                 vram_mb: (adesc.DedicatedVideoMemory / (1024 * 1024)) as u64,
             })
         }
 
-        /// Re-arms Desktop Duplication after another process took the lock
-        /// (full-screen mode switch, UAC prompt, Ctrl+Alt+Del, driver TDR...).
-        pub fn reacquire_duplication(&mut self, monitor_index: u32) -> RResult<()> {
-            let rebuilt = Self::create(monitor_index)?;
-            *self = rebuilt;
-            Ok(())
+        /// Plain-words name of the capture method in use.
+        pub fn method_label(&self) -> &'static str {
+            if self.duplication.is_some() {
+                "Desktop duplication"
+            } else if self.wgc.is_some() {
+                "Graphics Capture"
+            } else {
+                "Window capture"
+            }
+        }
+
+        /// Swaps desktop duplication for an already running Graphics Capture
+        /// of the same monitor. The device, converter and encoder stay, so
+        /// the replay buffer keeps its history.
+        pub fn adopt_wgc(&mut self, cap: crate::media::wincap::WindowCapture) {
+            self.duplication = None;
+            self.wgc = Some(cap);
+            self.wgc_tex = None;
+        }
+
+        /// The newest monitor picture from Graphics Capture (copied, so it
+        /// stays valid), or the previous one when nothing changed.
+        pub fn wgc_frame(&mut self) -> Option<ID3D11Texture2D> {
+            let (wgc, slot, device, context) = (&mut self.wgc, &mut self.wgc_tex, &self.device, &self.context);
+            if let Some(c) = wgc.as_mut() {
+                c.with_latest(|t| {
+                    let _ = crate::media::compositor::SourceTexture::update(slot, device, context, t);
+                });
+            }
+            slot.as_ref().map(|s| s.tex.clone())
+        }
+    }
+
+    /// The flat DXGI output index of the monitor showing most of `hwnd`.
+    pub(super) fn monitor_index_of_window(hwnd: i64) -> Option<u32> {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONULL};
+        unsafe {
+            let mon = MonitorFromWindow(HWND(hwnd as isize as *mut _), MONITOR_DEFAULTTONULL);
+            if mon.is_invalid() {
+                return None;
+            }
+            let factory: IDXGIFactory1 = CreateDXGIFactory1().ok()?;
+            let mut flat = 0u32;
+            let mut ai = 0u32;
+            while let Ok(adapter) = factory.EnumAdapters1(ai) {
+                let soft = adapter.GetDesc1().map(|d| d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0).unwrap_or(true);
+                if !soft {
+                    let mut oi = 0u32;
+                    while let Ok(output) = adapter.EnumOutputs(oi) {
+                        if output.GetDesc().map(|d| d.Monitor == mon).unwrap_or(false) {
+                            return Some(flat);
+                        }
+                        flat += 1;
+                        oi += 1;
+                    }
+                }
+                ai += 1;
+            }
+            None
         }
     }
 
@@ -1563,7 +1764,7 @@ mod win {
         context: ID3D11DeviceContext,
         processor: ID3D11VideoProcessor,
         enumerator: ID3D11VideoProcessorEnumerator,
-        input_tex: ID3D11Texture2D,
+        pub(super) input_tex: ID3D11Texture2D,
         in_view: ID3D11VideoProcessorInputView,
         pub nv12: ID3D11Texture2D,
         out_view: ID3D11VideoProcessorOutputView,
@@ -1721,7 +1922,7 @@ mod win {
         /// (the mouse pointer).
         pub fn convert_with(&self, src: &ID3D11Texture2D, overlay: impl FnOnce(&ID3D11Texture2D)) -> RResult<()> {
             unsafe {
-                self.context.CopyResource(&self.input_tex, src);
+                copy_fit(&self.context, &self.input_tex, src);
                 overlay(&self.input_tex);
 
                 let mut streams = [D3D11_VIDEO_PROCESSOR_STREAM {
@@ -1745,6 +1946,30 @@ mod win {
         }
     }
 
+    impl ColorConverter {
+        /// The frame as it goes to the encoder (source size, with the
+        /// pointer and layers drawn on it).
+        pub fn input(&self) -> &ID3D11Texture2D {
+            &self.input_tex
+        }
+    }
+
+    /// CopyResource when the sizes match, otherwise the overlapping part
+    /// (a capture that changed size mid-run must not make the copy fail).
+    pub(super) fn copy_fit(ctx: &ID3D11DeviceContext, dst: &ID3D11Texture2D, src: &ID3D11Texture2D) {
+        let (mut a, mut b) = (D3D11_TEXTURE2D_DESC::default(), D3D11_TEXTURE2D_DESC::default());
+        unsafe {
+            dst.GetDesc(&mut a);
+            src.GetDesc(&mut b);
+            if a.Width == b.Width && a.Height == b.Height {
+                ctx.CopyResource(dst, src);
+            } else if a.Format == b.Format {
+                let bx = D3D11_BOX { left: 0, top: 0, front: 0, right: a.Width.min(b.Width), bottom: a.Height.min(b.Height), back: 1 };
+                ctx.CopySubresourceRegion(dst, 0, 0, 0, 0, src, 0, Some(&bx));
+            }
+        }
+    }
+
     // ------------------------------------------------ hardware H.264 MFT
     pub(super) struct HardwareEncoder {
         transform: IMFTransform,
@@ -1754,6 +1979,10 @@ mod win {
         pub header: VideoFormatHeader,
         async_mode: bool,
         pending_input: u32,
+        /// METransformHaveOutput events not yet answered with ProcessOutput.
+        /// An async MFT must get exactly one ProcessOutput per event; calls
+        /// without one fail (or, on some drivers, stall the next input).
+        pending_output: u32,
         width: u32,
         height: u32,
         fps: u32,
@@ -2013,6 +2242,7 @@ mod win {
                     },
                     async_mode,
                     pending_input: 0,
+                    pending_output: 0,
                     width,
                     height,
                     fps,
@@ -2095,6 +2325,12 @@ mod win {
                 }
 
                 loop {
+                    if self.async_mode {
+                        if self.pending_output == 0 {
+                            return Ok(());
+                        }
+                        self.pending_output -= 1;
+                    }
                     let mut status = 0u32;
                     let mut out = [MFT_OUTPUT_DATA_BUFFER {
                         dwStreamID: 0,
@@ -2170,8 +2406,10 @@ mod win {
                     Err(e) => return Err(hr(e)),
                 };
                 let kind = evt.GetType().unwrap_or(0);
-                if let EventKind::NeedInput = me_transform_need_input_or(kind) {
-                    self.pending_input += 1;
+                match me_transform_need_input_or(kind) {
+                    EventKind::NeedInput => self.pending_input += 1,
+                    EventKind::HaveOutput => self.pending_output += 1,
+                    _ => {}
                 }
             }
         }
@@ -2474,15 +2712,26 @@ mod win {
     use std::os::windows::ffi::OsStrExt;
 
     // ----------------------------------------------- window / app source
-    /// A window captured with Windows.Graphics.Capture and drawn, fitted,
-    /// into a fixed canvas (windows can be resized; the encoder cannot).
+    /// A window drawn, fitted, into a fixed canvas (windows can be resized;
+    /// the encoder cannot). Captured either by cropping it out of the
+    /// duplicated screen (never touches the app) or with Windows.Graphics.
+    /// Capture (works while covered); Automatic picks per frame.
     pub(super) struct WindowSource {
+        hwnd: windows::Win32::Foundation::HWND,
         cap: Option<crate::media::wincap::WindowCapture>,
         exe: String,
         tex: Option<crate::media::compositor::SourceTexture>,
+        part: Option<crate::media::compositor::SourceTexture>,
         comp: crate::media::compositor::Compositor,
         last_retry: Instant,
         cursor: bool,
+        method: crate::media::winvis::WindowMethod,
+        chooser: crate::media::winvis::MethodChooser,
+        last_frame: Instant,
+        /// Since when the crop method has been used without a break (the
+        /// Graphics Capture session is closed after a while to save work).
+        cropping_since: Option<Instant>,
+        pub cropping: bool,
     }
 
     impl WindowSource {
@@ -2493,10 +2742,11 @@ mod win {
             exe: &str,
             max_height: u32,
             cursor: bool,
+            method: crate::media::winvis::WindowMethod,
         ) -> RResult<Self> {
             use crate::media::wincap;
             use windows::Win32::Foundation::HWND;
-            if !wincap::supported() {
+            if !wincap::supported() && method == crate::media::winvis::WindowMethod::Capture {
                 return Err(RecorderError::Other("window capture needs Windows 10 (1903) or newer".into()));
             }
             let h = HWND(hwnd as isize as *mut _);
@@ -2518,28 +2768,146 @@ mod win {
             let (w, h2) = ((w & !1).max(2), (h2 & !1).max(2));
             let comp = crate::media::compositor::Compositor::new(device, context, w, h2)
                 .map_err(RecorderError::Other)?;
-            let cap = crate::media::wincap::WindowCapture::new(device, HWND(win.hwnd as isize as *mut _), cursor)
-                .map_err(RecorderError::Other)?;
-            Ok(Self { cap: Some(cap), exe: win.exe, tex: None, comp, last_retry: Instant::now(), cursor })
+            let hwnd = HWND(win.hwnd as isize as *mut _);
+            // Graphics Capture starts only when it is needed (Automatic opens
+            // it the first time the window is covered).
+            let cap = if method == crate::media::winvis::WindowMethod::Capture {
+                Some(crate::media::wincap::WindowCapture::new(device, hwnd, cursor).map_err(RecorderError::Other)?)
+            } else {
+                None
+            };
+            Ok(Self {
+                hwnd,
+                cap,
+                exe: win.exe,
+                tex: None,
+                part: None,
+                comp,
+                last_retry: Instant::now(),
+                cursor,
+                method,
+                chooser: Default::default(),
+                last_frame: Instant::now(),
+                cropping_since: None,
+                cropping: false,
+            })
         }
 
         pub fn size(&self) -> (u32, u32) {
             (self.comp.width, self.comp.height)
         }
 
-        /// Composes the newest window frame into the canvas.
-        pub fn frame(&mut self) -> &ID3D11Texture2D {
+        /// Whether this source needs the duplicated screen.
+        pub fn wants_screen(&self) -> bool {
+            self.method != crate::media::winvis::WindowMethod::Capture
+        }
+
+        pub fn method_label(&self) -> &'static str {
+            if self.cropping {
+                "Window: crop from screen"
+            } else {
+                "Window: Graphics Capture"
+            }
+        }
+
+        /// The window's part of the monitor, or None when it cannot be
+        /// cropped right now.
+        fn crop_rect(&self, desktop: &crate::media::winvis::IRect, force: bool) -> Option<crate::media::winvis::IRect> {
+            use crate::media::winvis;
+            if winvis::is_minimised(self.hwnd) {
+                return None;
+            }
+            let r = winvis::window_rect(self.hwnd)?;
+            if force {
+                // Crop method: whatever part of it is on this monitor.
+                let c = winvis::IRect {
+                    left: r.left.max(desktop.left),
+                    top: r.top.max(desktop.top),
+                    right: r.right.min(desktop.right),
+                    bottom: r.bottom.min(desktop.bottom),
+                };
+                return (!c.is_empty()).then_some(c);
+            }
+            let above = winvis::windows_above(self.hwnd, 96);
+            winvis::unobstructed(r, *desktop, &above).then_some(r)
+        }
+
+        /// Composes the newest window frame into the canvas. `screen` is the
+        /// duplicated monitor (when available) at `desktop`.
+        pub fn frame(
+            &mut self,
+            screen: Option<&ID3D11Texture2D>,
+            desktop: &crate::media::winvis::IRect,
+            cursor: Option<&mut crate::media::cursor::CursorOverlay>,
+        ) -> &ID3D11Texture2D {
             use crate::media::compositor::{fit, Crop, Rect, SourceTexture};
-            if self.cap.as_ref().map(|c| c.is_closed()).unwrap_or(true) {
+            use crate::media::winvis::WindowMethod;
+            let dt = self.last_frame.elapsed().as_millis() as u64;
+            self.last_frame = Instant::now();
+
+            // The window was closed: look for the app again once a second.
+            if unsafe { !windows::Win32::UI::WindowsAndMessaging::IsWindow(self.hwnd).as_bool() }
+                || self.cap.as_ref().map(|c| c.is_closed()).unwrap_or(false)
+            {
                 self.cap = None;
-                // Look for the app again once a second (game restarted).
                 if self.last_retry.elapsed() >= Duration::from_secs(1) && !self.exe.is_empty() {
                     self.last_retry = Instant::now();
                     if let Some(w) = crate::media::wincap::find_app_window(&self.exe) {
-                        let hwnd = windows::Win32::Foundation::HWND(w.hwnd as isize as *mut _);
-                        self.cap = crate::media::wincap::WindowCapture::new(self.comp.device(), hwnd, self.cursor).ok();
+                        self.hwnd = windows::Win32::Foundation::HWND(w.hwnd as isize as *mut _);
                     }
                 }
+            }
+
+            let crop = match (self.method, screen) {
+                (WindowMethod::Capture, _) | (_, None) => None,
+                (WindowMethod::Crop, Some(_)) => self.crop_rect(desktop, true),
+                (WindowMethod::Auto, Some(_)) => {
+                    let r = self.crop_rect(desktop, false);
+                    if self.chooser.crop(r.is_some(), dt) {
+                        r
+                    } else {
+                        None
+                    }
+                }
+            };
+            self.cropping = crop.is_some();
+
+            if let (Some(r), Some(scr)) = (crop, screen) {
+                self.cropping_since.get_or_insert_with(Instant::now);
+                // Close an idle Graphics Capture session after 10 s of crop.
+                if self.cropping_since.map(|t| t.elapsed() > Duration::from_secs(10)).unwrap_or(false) {
+                    self.cap = None;
+                }
+                let (pw, ph) = (r.width() as u32, r.height() as u32);
+                if self.part.as_ref().map(|p| p.width != pw || p.height != ph).unwrap_or(true) {
+                    self.part = SourceTexture::new(self.comp.device(), pw, ph, DXGI_FORMAT_B8G8R8A8_UNORM).ok();
+                }
+                let comp = &self.comp;
+                comp.begin([0.0, 0.0, 0.0, 1.0]);
+                if let Some(p) = self.part.as_ref() {
+                    p.copy_region(comp.context(), scr, (r.left - desktop.left) as u32, (r.top - desktop.top) as u32);
+                    let dst = fit(pw as f32, ph as f32, Rect { x: 0.0, y: 0.0, w: comp.width as f32, h: comp.height as f32 });
+                    comp.draw(p, dst, Crop::NONE, 1.0, true);
+                    comp.end();
+                    if let Some(c) = cursor {
+                        c.draw_mapped(
+                            comp.device(),
+                            comp.context(),
+                            comp.canvas(),
+                            ((r.left - desktop.left) as f32, (r.top - desktop.top) as f32),
+                            (dst.x, dst.y),
+                            dst.w / pw as f32,
+                        );
+                    }
+                } else {
+                    comp.end();
+                }
+                return comp.canvas();
+            }
+
+            self.cropping_since = None;
+            if self.cap.is_none() && unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(self.hwnd).as_bool() } {
+                self.cap = crate::media::wincap::WindowCapture::new(self.comp.device(), self.hwnd, self.cursor).ok();
             }
             let (cap, tex, comp) = (&mut self.cap, &mut self.tex, &self.comp);
             if let Some(c) = cap.as_mut() {
@@ -2564,6 +2932,25 @@ mod win {
         }
     }
 
+    /// Picks how to capture the screen for this engine run.
+    fn screen_mode(cfg: &RecorderConfig, dup_failures: u32) -> ScreenMode {
+        match &cfg.source {
+            CaptureSource::Window { method, .. } => {
+                if *method == crate::media::winvis::WindowMethod::Capture || dup_failures >= 3 {
+                    ScreenMode::None
+                } else {
+                    ScreenMode::Duplication
+                }
+            }
+            CaptureSource::Display => match cfg.display_method {
+                DisplayMethod::Duplication => ScreenMode::Duplication,
+                DisplayMethod::GraphicsCapture => ScreenMode::Capture,
+                DisplayMethod::Auto if dup_failures >= 3 => ScreenMode::Capture,
+                DisplayMethod::Auto => ScreenMode::DuplicationOrCapture,
+            },
+        }
+    }
+
     // ------------------------------------------------------- capture loop
     pub(super) fn capture_loop(
         shared: Arc<SharedState>,
@@ -2571,6 +2958,7 @@ mod win {
         fmt: Arc<Mutex<Option<VideoFormatHeader>>>,
         clock: Arc<super::QpcClock>,
     ) {
+        use crate::media::watchdog::{is_black, BlackWatch, LumaProbe, WatchAction, BLACK_NOTICE};
         let _timer_guard = HighResTimerGuard::new();
         let _session = match MfSession::new() {
             Ok(s) => s,
@@ -2581,12 +2969,28 @@ mod win {
         };
 
         let mut backoff_ms = 40u64;
+        // Consecutive failures to set up desktop duplication; after three,
+        // Automatic switches to Graphics Capture for this run.
+        let mut dup_failures = 0u32;
 
         'outer: while !shared.stop_requested.load(Ordering::Acquire) {
             // ---------------- build (or rebuild) the graphics stack -------
-            let mut gfx = match GraphicsStack::create(cfg.monitor_index) {
-                Ok(g) => g,
+            let mode = screen_mode(&cfg, dup_failures);
+            let monitor_index = match &cfg.source {
+                CaptureSource::Window { hwnd, .. } => monitor_index_of_window(*hwnd).unwrap_or(cfg.monitor_index),
+                CaptureSource::Display => cfg.monitor_index,
+            };
+            let mut gfx = match GraphicsStack::create(monitor_index, mode, cfg.capture_cursor) {
+                Ok(g) => {
+                    if matches!(mode, ScreenMode::Duplication | ScreenMode::DuplicationOrCapture) {
+                        dup_failures = 0;
+                    }
+                    g
+                }
                 Err(e) => {
+                    if matches!(mode, ScreenMode::Duplication | ScreenMode::DuplicationOrCapture) {
+                        dup_failures += 1;
+                    }
                     shared.set_state(EngineState::Recovering);
                     shared.fail(format!("{e}"));
                     std::thread::sleep(Duration::from_millis(backoff_ms));
@@ -2633,8 +3037,8 @@ mod win {
             };
 
             let mut window = match &cfg.source {
-                CaptureSource::Window { hwnd, exe, .. } => {
-                    match WindowSource::open(&gfx.device, &gfx.context, *hwnd, exe, cfg.max_height, cfg.capture_cursor) {
+                CaptureSource::Window { hwnd, exe, method, .. } => {
+                    match WindowSource::open(&gfx.device, &gfx.context, *hwnd, exe, cfg.max_height, cfg.capture_cursor, *method) {
                         Ok(w) => Some(w),
                         Err(e) => {
                             shared.fail(format!("{e}"));
@@ -2698,6 +3102,9 @@ mod win {
             *shared.dimensions.write() = encoder.dimensions();
             *fmt.lock() = Some(encoder.header.clone());
             *shared.last_error.write() = None;
+            *shared.notice.write() = None;
+            *shared.capture_method.write() =
+                window.as_ref().map(|w| w.method_label()).unwrap_or(gfx.method_label()).to_string();
             shared.set_state(EngineState::Buffering);
             backoff_ms = 40;
 
@@ -2707,13 +3114,26 @@ mod win {
 
             let mut next_deadline = Instant::now();
             let mut force_key = true;
+            let mut last_pts = i64::MIN;
             let mut was_gated = false;
-            let mut last_texture: Option<ID3D11Texture2D> = None;
+            let mut last_screen: Option<ID3D11Texture2D> = None;
             // Desktop Duplication leaves the pointer out; we draw it.
-            let mut cursor = (cfg.capture_cursor && window.is_none())
+            let mut cursor = (cfg.capture_cursor && gfx.duplication.is_some())
                 .then(crate::media::cursor::CursorOverlay::default);
             let mut fps_window = Instant::now();
             let mut fps_frames = 0u32;
+
+            // Studio layers and the live preview (both cost nothing when unused).
+            let mut layers = crate::media::layers::LayerRenderer::default();
+            let mut previewer: Option<crate::media::preview::Previewer> = None;
+
+            // Black-frame watchdog (full-screen capture only).
+            let mut black_watch = BlackWatch::default();
+            let mut luma: Option<LumaProbe> = None;
+            let mut last_luma = Instant::now();
+            let mut probe_cap: Option<(crate::media::wincap::WindowCapture, Instant)> = None;
+            let mut probe_tex: Option<crate::media::compositor::SourceTexture> = None;
+            let mut probe_luma: Option<LumaProbe> = None;
 
             // ---------------------------- steady-state capture ------------
             loop {
@@ -2727,11 +3147,6 @@ mod win {
                     shared.generation.fetch_add(1, Ordering::AcqRel);
                     shared.set_state(EngineState::Recovering);
                     encoder.flush();
-                    drop(encoder);
-                    drop(converter);
-                    if gfx.reacquire_duplication(cfg.monitor_index).is_err() {
-                        std::thread::sleep(Duration::from_millis(backoff_ms));
-                    }
                     continue 'outer;
                 }
 
@@ -2755,66 +3170,108 @@ mod win {
                 }
 
                 let submit_start = Instant::now();
-                let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
-                let mut resource: Option<IDXGIResource> = None;
 
-                let acquire = if window.is_some() {
-                    // Window source: no desktop duplication this frame.
-                    Err(windows::core::Error::from(DXGI_ERROR_WAIT_TIMEOUT))
-                } else {
-                    unsafe {
-                        gfx.duplication
-                            .AcquireNextFrame(0, &mut frame_info, &mut resource)
-                    }
-                };
-
-                let mut texture: Option<ID3D11Texture2D> = None;
-                if let Some(w) = window.as_mut() {
-                    texture = Some(w.frame().clone());
-                } else {
-                match acquire {
-                    Ok(()) => {
-                        if let Some(c) = cursor.as_mut() {
-                            c.update(&gfx.duplication, &gfx.device, &gfx.context, &frame_info);
-                        }
-                        if let Some(res) = resource.as_ref() {
-                            match res.cast::<ID3D11Texture2D>() {
-                                Ok(t) => {
-                                    last_texture = Some(t.clone());
-                                    texture = Some(t);
+                // ---- the screen picture (full screen, or a window to crop)
+                let needs_screen = window.as_ref().map(|w| w.wants_screen()).unwrap_or(true);
+                let mut screen: Option<ID3D11Texture2D> = None;
+                let mut acquired = false;
+                if needs_screen {
+                    if let Some(dup) = gfx.duplication.clone() {
+                        let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
+                        let mut resource: Option<IDXGIResource> = None;
+                        match unsafe { dup.AcquireNextFrame(0, &mut frame_info, &mut resource) } {
+                            Ok(()) => {
+                                acquired = true;
+                                if let Some(c) = cursor.as_mut() {
+                                    c.update(&dup, &gfx.device, &gfx.context, &frame_info);
                                 }
-                                Err(e) => {
-                                    log::warn!("[lastshot] frame cast failed: {e}");
+                                if let Some(res) = resource.as_ref() {
+                                    match res.cast::<ID3D11Texture2D>() {
+                                        Ok(t) => {
+                                            last_screen = Some(t.clone());
+                                            screen = Some(t);
+                                        }
+                                        Err(e) => log::warn!("[lastshot] frame cast failed: {e}"),
+                                    }
                                 }
                             }
+                            Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => {
+                                // Nothing changed on screen. Re-encode the previous
+                                // surface so the timeline stays constant-frame-rate.
+                                screen = last_screen.clone();
+                            }
+                            Err(e) if is_device_lost(&e) => {
+                                log::warn!("[lastshot] device lost during acquire: {e}");
+                                let _ = unsafe { dup.ReleaseFrame() };
+                                shared.device_resets.fetch_add(1, Ordering::Relaxed);
+                                shared.generation.fetch_add(1, Ordering::AcqRel);
+                                shared.set_state(EngineState::Recovering);
+                                encoder.flush();
+                                continue 'outer;
+                            }
+                            Err(e) => {
+                                log::warn!("[lastshot] acquire error: {e}");
+                                shared.dropped_frames.fetch_add(1, Ordering::Relaxed);
+                                let _ = unsafe { dup.ReleaseFrame() };
+                                continue;
+                            }
                         }
-                    }
-                    Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => {
-                        // Nothing changed on screen. Re-encode the previous
-                        // surface so the timeline stays constant-frame-rate.
-                        texture = last_texture.clone();
-                    }
-                    Err(e) if is_device_lost(&e) => {
-                        log::warn!("[lastshot] device lost during acquire: {e}");
-                        let _ = unsafe { gfx.duplication.ReleaseFrame() };
-                        shared.device_resets.fetch_add(1, Ordering::Relaxed);
-                        shared.generation.fetch_add(1, Ordering::AcqRel);
-                        shared.set_state(EngineState::Recovering);
-                        encoder.flush();
-                        drop(encoder);
-                        drop(converter);
-                        if gfx.reacquire_duplication(cfg.monitor_index).is_err() {
-                            std::thread::sleep(Duration::from_millis(backoff_ms));
+                    } else if gfx.wgc.is_some() {
+                        if gfx.wgc.as_ref().map(|c| c.is_closed()).unwrap_or(false) {
+                            // The monitor went away (unplugged, mode change).
+                            shared.generation.fetch_add(1, Ordering::AcqRel);
+                            shared.set_state(EngineState::Recovering);
+                            encoder.flush();
+                            continue 'outer;
                         }
-                        continue 'outer;
-                    }
-                    Err(e) => {
-                        log::warn!("[lastshot] acquire error: {e}");
-                        shared.dropped_frames.fetch_add(1, Ordering::Relaxed);
-                        let _ = unsafe { gfx.duplication.ReleaseFrame() };
-                        continue;
+                        screen = gfx.wgc_frame();
                     }
                 }
+
+                let texture: Option<ID3D11Texture2D> = match window.as_mut() {
+                    Some(w) => {
+                        let t = w.frame(screen.as_ref(), &gfx.desktop, cursor.as_mut()).clone();
+                        Some(t)
+                    }
+                    None => screen,
+                };
+
+                // ---- black-frame probe of the other method (full screen)
+                if let Some((cap, started)) = probe_cap.as_mut() {
+                    let mut verdict: Option<bool> = None;
+                    let (dev, ctx) = (&gfx.device, &gfx.context);
+                    cap.with_latest(|t| {
+                        let _ = crate::media::compositor::SourceTexture::update(&mut probe_tex, dev, ctx, t);
+                    });
+                    if let Some(t) = probe_tex.as_ref() {
+                        if probe_luma.is_none() {
+                            probe_luma = LumaProbe::new(dev, ctx).ok();
+                        }
+                        if let Some(p) = probe_luma.as_mut() {
+                            verdict = p.measure_now(&t.tex).map(is_black);
+                        }
+                    }
+                    let timed_out = started.elapsed() > Duration::from_secs(2);
+                    match verdict {
+                        Some(false) => {
+                            // Graphics Capture sees a picture, duplication
+                            // does not: switch in place, keep the replay.
+                            log::warn!("[lastshot] duplication gives black frames, Graphics Capture does not: switching");
+                            let (cap, _) = probe_cap.take().expect("probe running");
+                            gfx.adopt_wgc(cap);
+                            cursor = None;
+                            last_screen = None;
+                            *shared.capture_method.write() = "Graphics Capture (black screen fallback)".into();
+                        }
+                        Some(true) => {
+                            probe_cap = None;
+                        }
+                        None if timed_out => probe_cap = None,
+                        None => {}
+                    }
+                    if probe_cap.is_none() {
+                        probe_tex = None;
+                    }
                 }
 
                 if let Some(tex) = texture.as_ref() {
@@ -2822,21 +3279,72 @@ mod win {
                     // before the encoder — the ring can never hold desktop
                     // footage. When the gate lifts, the next frame is forced to
                     // a key frame so the buffer restarts cleanly.
+                    let sample_luma = window.is_none() && last_luma.elapsed() >= Duration::from_secs(1);
+                    let mut dark: Option<f32> = None;
                     if shared.privacy_gate.load(Ordering::Acquire) {
                         was_gated = true;
                     } else if let Err(e) = converter.convert_with(tex, |t| {
-                        if let Some(c) = cursor.as_mut() {
-                            c.draw_on(&gfx.device, &gfx.context, t);
+                        // Before the pointer and layers are drawn on it.
+                        if sample_luma {
+                            if luma.is_none() {
+                                luma = LumaProbe::new(&gfx.device, &gfx.context).ok();
+                            }
+                            dark = luma.as_mut().and_then(|p| p.sample(t));
                         }
+                        if window.is_none() {
+                            if let Some(c) = cursor.as_mut() {
+                                c.draw_on(&gfx.device, &gfx.context, t);
+                            }
+                        }
+                        layers.draw_on(&gfx.device, &gfx.context, t, &shared.layers);
                     }) {
                         log::warn!("[lastshot] color convert failed: {e}");
                         shared.dropped_frames.fetch_add(1, Ordering::Relaxed);
                     } else {
+                        if sample_luma {
+                            last_luma = Instant::now();
+                            if let Some(d) = dark {
+                                match black_watch.on_sample(is_black(d)) {
+                                    WatchAction::ProbeOther => {
+                                        if gfx.duplication.is_some()
+                                            && cfg.display_method == DisplayMethod::Auto
+                                            && probe_cap.is_none()
+                                        {
+                                            probe_cap = crate::media::wincap::WindowCapture::for_monitor(
+                                                &gfx.device,
+                                                gfx.monitor,
+                                                cfg.capture_cursor,
+                                            )
+                                            .ok()
+                                            .map(|c| (c, Instant::now()));
+                                        }
+                                    }
+                                    WatchAction::Notice => *shared.notice.write() = Some(BLACK_NOTICE.into()),
+                                    WatchAction::ClearNotice => *shared.notice.write() = None,
+                                    WatchAction::None => {}
+                                }
+                            }
+                        }
+                        if shared.preview.wanted() {
+                            if previewer.is_none() {
+                                previewer = crate::media::preview::Previewer::new(&gfx.device, &gfx.context).ok();
+                            }
+                            if let Some(p) = previewer.as_mut() {
+                                p.capture(converter.input(), &shared.preview);
+                            }
+                        } else if previewer.is_some() && !shared.preview.recently_wanted() {
+                            previewer = None;
+                        }
                         if was_gated {
                             force_key = true;
                             was_gated = false;
                         }
-                        let pts = clock.now_hns();
+                        // Constant frame rate: stamp the frame on the fps
+                        // grid (REC-036). Players then see an even cadence,
+                        // and a late frame leaves a one-slot gap instead of
+                        // jitter on every frame.
+                        let pts = cfr_pts(clock.now_hns(), cfg.target_fps, last_pts);
+                        last_pts = pts;
                         let submit_ns = submit_start.elapsed().as_nanos() as u64;
                         let encode_start = Instant::now();
 
@@ -2900,11 +3408,13 @@ mod win {
                     }
                 }
 
-                // Always release, even on the timeout path - DXGI reference
-                // counts the frame and will refuse the next acquire otherwise.
-                if window.is_none() {
-                    unsafe {
-                        let _ = gfx.duplication.ReleaseFrame();
+                // Always release an acquired frame - DXGI reference counts
+                // it and refuses the next acquire otherwise.
+                if acquired {
+                    if let Some(dup) = gfx.duplication.as_ref() {
+                        unsafe {
+                            let _ = dup.ReleaseFrame();
+                        }
                     }
                 }
 
@@ -2913,6 +3423,12 @@ mod win {
                         fps_frames as f32 / fps_window.elapsed().as_secs_f32();
                     fps_frames = 0;
                     fps_window = Instant::now();
+                    if let Some(w) = window.as_ref() {
+                        let label = w.method_label();
+                        if *shared.capture_method.read() != label {
+                            *shared.capture_method.write() = label.to_string();
+                        }
+                    }
                 }
             }
         }
@@ -3279,6 +3795,47 @@ pub fn enumerate_monitors() -> Vec<MonitorInfo> {
             primary: true,
             adapter: "Virtual Adapter".into(),
         }]
+    }
+}
+
+#[cfg(test)]
+mod cfr_tests {
+    use super::*;
+
+    #[test]
+    fn frames_land_on_the_fps_grid() {
+        // 60 fps: slot n is n * 10_000_000 / 60, exact (no accumulated drift).
+        assert_eq!(cfr_pts(166_000, 60, i64::MIN), 166_666);
+        assert_eq!(cfr_pts(10_000_000 + 3_000, 60, i64::MIN), 10_000_000);
+        assert_eq!(cfr_pts(3_600 * HNS_PER_SECOND + 70_000, 60, i64::MIN), 3_600 * HNS_PER_SECOND);
+    }
+
+    #[test]
+    fn a_frame_never_shares_or_goes_back_a_slot() {
+        let a = cfr_pts(1_000_000, 60, i64::MIN);
+        let b = cfr_pts(1_010_000, 60, a); // woke up early: same slot
+        assert!(b > a);
+        assert_eq!((a, b), (1_000_000, 1_166_666));
+        // A late frame skips a slot (a gap), it is not squeezed in.
+        let c = cfr_pts(1_000_000 + 3 * 166_667, 60, b);
+        assert_eq!(c, cfr_pts(1_000_000 + 3 * 166_667, 60, i64::MIN));
+    }
+
+    #[test]
+    fn steady_capture_gives_an_even_cadence() {
+        let mut last = i64::MIN;
+        let mut out = Vec::new();
+        for i in 0..600i64 {
+            // Wake-ups jitter by up to +-2 ms around the ideal time.
+            let jitter = [0, 15_000, -12_000, 20_000, -5_000][(i % 5) as usize];
+            let p = cfr_pts(i * HNS_PER_SECOND / 60 + jitter, 60, last);
+            out.push(p);
+            last = p;
+        }
+        for w in out.windows(2) {
+            let d = w[1] - w[0];
+            assert!((166_666..=166_667).contains(&d), "uneven step {d}");
+        }
     }
 }
 

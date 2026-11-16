@@ -51,6 +51,25 @@ pub fn draw_constants(canvas_w: f32, canvas_h: f32, dst: Rect, crop: Crop, opaci
     [x, y, w, h, u0, v0, uw, vh, opacity.clamp(0.0, 1.0), if opaque { 1.0 } else { 0.0 }, 0.0, 0.0]
 }
 
+/// The crop rectangle that makes a source "cover" a box (CSS object-fit:
+/// cover): the source's middle part with the box's shape.
+pub fn cover_crop(src_w: f32, src_h: f32, box_w: f32, box_h: f32) -> Crop {
+    if src_w <= 0.0 || src_h <= 0.0 || box_w <= 0.0 || box_h <= 0.0 {
+        return Crop::NONE;
+    }
+    let src_aspect = src_w / src_h;
+    let box_aspect = box_w / box_h;
+    if src_aspect > box_aspect {
+        let keep = box_aspect / src_aspect;
+        let side = (1.0 - keep) / 2.0;
+        Crop { left: side, top: 0.0, right: side, bottom: 0.0 }
+    } else {
+        let keep = src_aspect / box_aspect;
+        let side = (1.0 - keep) / 2.0;
+        Crop { left: 0.0, top: side, right: 0.0, bottom: side }
+    }
+}
+
 #[cfg(windows)]
 pub use imp::*;
 
@@ -64,13 +83,14 @@ mod imp {
     use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 
     const HLSL: &str = r#"
-cbuffer P : register(b0) { float4 dst; float4 uvr; float opacity; float opaque; float2 pad; };
-struct V { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
+cbuffer P : register(b0) { float4 dst; float4 uvr; float opacity; float opaque; float radius; float aspect; };
+struct V { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; float2 t : TEXCOORD1; };
 V vs_main(uint id : SV_VertexID) {
     float2 t = float2(id & 1, id >> 1);
     V o;
     o.pos = float4(dst.xy + t * dst.zw, 0, 1);
     o.uv = uvr.xy + t * uvr.zw;
+    o.t = t;
     return o;
 }
 Texture2D tex : register(t0);
@@ -79,6 +99,14 @@ float4 ps_main(V i) : SV_Target {
     float4 c = tex.Sample(smp, i.uv);
     if (opaque > 0.5) c.a = 1;
     c.a *= opacity;
+    if (radius > 0) {
+        // Rounded box / circle mask; units are the box height.
+        float2 q = abs(i.t - 0.5) * float2(aspect, 1);
+        float2 d = q - (float2(aspect * 0.5, 0.5) - radius);
+        float dist = length(max(d, 0)) - radius;
+        float aa = max(fwidth(dist), 1e-5);
+        c.a *= 1 - smoothstep(-aa, aa, dist);
+    }
     return c;
 }
 "#;
@@ -173,6 +201,22 @@ float4 ps_main(V i) : SV_Target {
                 unsafe { context.CopyResource(&s.tex, src) };
             }
             Ok(())
+        }
+
+        /// A view on an existing texture (it must allow shader binding).
+        pub fn wrap(device: &ID3D11Device, tex: &ID3D11Texture2D) -> Result<Self, String> {
+            let mut d = D3D11_TEXTURE2D_DESC::default();
+            unsafe { tex.GetDesc(&mut d) };
+            let mut srv = None;
+            unsafe { device.CreateShaderResourceView(tex, None, Some(&mut srv)) }.map_err(e)?;
+            Ok(Self { tex: tex.clone(), srv: srv.ok_or("view: none")?, width: d.Width, height: d.Height, format: d.Format })
+        }
+
+        /// Copies part of `src` (desktop pixels relative to its top-left)
+        /// into this texture's top-left corner.
+        pub fn copy_region(&self, context: &ID3D11DeviceContext, src: &ID3D11Texture2D, left: u32, top: u32) {
+            let b = D3D11_BOX { left, top, front: 0, right: left + self.width, bottom: top + self.height, back: 1 };
+            unsafe { context.CopySubresourceRegion(&self.tex, 0, 0, 0, 0, src, 0, Some(&b)) };
         }
 
         /// Uploads tightly packed BGRA pixels (pictures, text).
@@ -350,10 +394,22 @@ float4 ps_main(V i) : SV_Target {
 
         /// Draws one source into the canvas.
         pub fn draw(&self, src: &SourceTexture, dst: Rect, crop: Crop, opacity: f32, opaque: bool) {
+            self.draw_shaped(src, dst, crop, opacity, opaque, 0.0, false);
+        }
+
+        /// Draws with rounded corners (`radius` as a share of the box
+        /// height; 0.5 on a square box is a circle), optionally mirrored.
+        pub fn draw_shaped(&self, src: &SourceTexture, dst: Rect, crop: Crop, opacity: f32, opaque: bool, radius: f32, mirror: bool) {
             if dst.w <= 0.0 || dst.h <= 0.0 || opacity <= 0.0 {
                 return;
             }
-            let k = draw_constants(self.width as f32, self.height as f32, dst, crop, opacity, opaque);
+            let mut k = draw_constants(self.width as f32, self.height as f32, dst, crop, opacity, opaque);
+            k[10] = radius.clamp(0.0, 0.5);
+            k[11] = dst.w / dst.h;
+            if mirror {
+                k[4] += k[6];
+                k[6] = -k[6];
+            }
             unsafe {
                 let c = &self.context;
                 c.UpdateSubresource(&self.cb, 0, None, k.as_ptr() as *const _, 0, 0);
@@ -386,6 +442,17 @@ mod tests {
         assert!((r.h - 1080.0).abs() < 0.01 && (r.w - 607.5).abs() < 0.01);
         assert!((r.x - 656.25).abs() < 0.01 && r.y == 0.0);
         assert_eq!(fit(0.0, 10.0, b).w, 0.0);
+    }
+
+    #[test]
+    fn cover_crop_keeps_the_middle() {
+        // 16:9 into a square: cut the sides.
+        let c = cover_crop(1600.0, 900.0, 100.0, 100.0);
+        assert!((c.left - 0.21875).abs() < 1e-4 && (c.right - 0.21875).abs() < 1e-4 && c.top == 0.0);
+        // Square into 16:9: cut top and bottom.
+        let c = cover_crop(100.0, 100.0, 160.0, 90.0);
+        assert!((c.top - 0.21875).abs() < 1e-4 && c.left == 0.0);
+        assert_eq!(cover_crop(0.0, 1.0, 1.0, 1.0), Crop::NONE);
     }
 
     #[test]

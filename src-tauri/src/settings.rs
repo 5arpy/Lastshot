@@ -51,6 +51,10 @@ pub struct Settings {
     /// Show the mouse pointer in recordings and replays.
     #[serde(default = "default_true")]
     pub capture_cursor: bool,
+    /// Full-screen capture method (hidden; Automatic is right for nearly
+    /// everyone).
+    #[serde(default)]
+    pub display_method: crate::media::recorder::DisplayMethod,
     pub capture_system_audio: bool,
     pub capture_microphone: bool,
     pub output_dir: String,
@@ -104,6 +108,10 @@ pub struct Settings {
     /// Specific microphone device ID, or None to use system default.
     #[serde(default)]
     pub mic_device_id: Option<String>,
+    /// "Clean up my voice": low cut, noise gate, compressor and limiter on
+    /// the microphone. Applies live.
+    #[serde(default)]
+    pub clean_voice: bool,
     /// Adaptive capture (ECO): on battery or under memory pressure the deck
     /// shrinks the rolling buffer live and caps the fps. Invisible when off.
     #[serde(default)]
@@ -283,6 +291,7 @@ impl Default for Settings {
             capture_source: Default::default(),
             app_audio: Default::default(),
             capture_cursor: true,
+            display_method: Default::default(),
             capture_system_audio: true,
             capture_microphone: false,
             output_dir: default_output_dir().to_string_lossy().to_string(),
@@ -305,6 +314,7 @@ impl Default for Settings {
             game_volume: 100,
             mic_volume: 100,
             mic_device_id: None,
+            clean_voice: false,
             adaptive_eco: false,
             eco_battery_threshold_pct: 30,
             eco_ram_free_gbs: 4,
@@ -428,9 +438,11 @@ impl Settings {
             mic_device_id: self.mic_device_id.clone(),
             output_dir: PathBuf::from(&self.output_dir),
             output_subfolder: None,
+            clip_app: None,
             source: self.capture_source.clone(),
             app_audio: self.app_audio.clone(),
             capture_cursor: self.capture_cursor,
+            display_method: self.display_method,
         };
         self.apply_performance_caps(&mut cfg);
         cfg

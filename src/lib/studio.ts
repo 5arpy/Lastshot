@@ -29,6 +29,35 @@ export interface Layer {
   shape?: "rect" | "rounded" | "circle";
   border?: boolean;
   mirror?: boolean;
+  /** Crop of the picture / webcam, a fraction per side. */
+  cropLeft?: number;
+  cropTop?: number;
+  cropRight?: number;
+  cropBottom?: number;
+}
+
+/** A scene: what to record plus its layers, switched with one click. */
+export interface Scene {
+  id: string;
+  name: string;
+  /** null = keep whatever is being recorded. */
+  source: import("./types").CaptureSource | null;
+  layers: Layer[];
+}
+export interface Scenes {
+  active: string | null;
+  scenes: Scene[];
+}
+
+/** "Scene 1", "Scene 2", ... the first free one. */
+export function nextSceneName(scenes: readonly Scene[]): string {
+  const taken = new Set(scenes.map((s) => s.name.trim().toLowerCase()));
+  for (let i = 1; ; i++) if (!taken.has(`scene ${i}`)) return `Scene ${i}`;
+}
+
+/** The scene from what Studio has now. */
+export function sceneFrom(name: string, source: Scene["source"], layers: Layer[]): Scene {
+  return { id: `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, name, source, layers };
 }
 
 export const LAYERS_KEY = "lastshot.studio.layers";

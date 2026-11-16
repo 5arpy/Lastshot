@@ -29,7 +29,9 @@ export type SelectionAction =
     }
   | { type: "select-all"; order: string[] }
   | { type: "clear" }
-  | { type: "remove"; paths: string[] };
+  | { type: "remove"; paths: string[] }
+  /** Replace the whole selection (file-manager view, rubber-band). */
+  | { type: "set"; paths: string[]; anchor: string | null };
 
 export function isSelected(state: SelectionState, path: string): boolean {
   return state.selected.includes(path);
@@ -46,6 +48,9 @@ export function selectionReducer(
   switch (action.type) {
     case "clear":
       return EMPTY_SELECTION;
+
+    case "set":
+      return { anchor: action.anchor, selected: [...new Set(action.paths)] };
 
     case "select-all":
       return { anchor: action.order[0] ?? null, selected: [...action.order] };

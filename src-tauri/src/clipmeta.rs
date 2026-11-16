@@ -171,6 +171,22 @@ impl ClipMetaStore {
         }
     }
 
+    /// A folder was renamed: entries for clips inside it follow.
+    pub fn migrate_prefix(&mut self, old_dir: &str, new_dir: &str) {
+        let old = format!("{}\\", old_dir.trim_end_matches(['\\', '/']));
+        let new = format!("{}\\", new_dir.trim_end_matches(['\\', '/']));
+        let keys: Vec<String> = self.entries.keys().filter(|k| k.to_ascii_lowercase().starts_with(&old.to_ascii_lowercase())).cloned().collect();
+        if keys.is_empty() {
+            return;
+        }
+        for k in keys {
+            if let Some(e) = self.entries.remove(&k) {
+                self.entries.insert(format!("{new}{}", &k[old.len()..]), e);
+            }
+        }
+        let _ = self.save();
+    }
+
     /// Applies stored metadata onto a scanned clip list (matched by absolute
     /// path) and prunes entries whose clip no longer exists on disk. Runs
     /// inside the gallery scan so the UI always gets one consistent snapshot.

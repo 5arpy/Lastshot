@@ -32,6 +32,7 @@ impl AppState {
         let mut settings = Settings::load();
         settings.seed_default_profiles();
         let _ = settings.save(); // persist the stock profiles once
+        crate::media::voice::set_clean_voice(settings.clean_voice);
         Self {
             engine: Arc::new(CaptureEngine::new()),
             settings: RwLock::new(settings),
@@ -182,49 +183,41 @@ pub fn sanitize_file_stem(raw: &str, fallback: &str) -> String {
     }
 }
 
-/// Sanitises a foreground exe into a safe per-game folder name. Returns `None`
-/// for our own process so pressing Alt+C on the deck never creates a "lastshot"
-/// folder.
-fn game_folder_name(exe: &str) -> Option<String> {
-    let exe = exe.to_ascii_lowercase();
-    if exe.starts_with("lastshot") {
-        return None;
-    }
-    let stem = match exe.rfind('.') {
-        Some(i) if i > 0 => &exe[..i],
-        _ => exe.as_str(),
-    };
-    let sanitized: String = stem
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let name = sanitized.trim_matches('-').to_string();
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
-}
-
 /// Resolves the per-game subfolder for the next flush: the game in the
 /// foreground, or `game_override` when the caller already knows the game (the
 /// auto-save-on-game-exit flow). Returns `None` when per-game organisation is
 /// off or no game applies — the clip then lands in the output root.
 pub fn resolve_game_folder(state: &AppState, game_override: Option<&str>) -> Option<String> {
-    let s = state.settings.read();
-    if !s.organize_by_game {
-        return None;
-    }
-    if let Some(g) = game_override {
-        return game_folder_name(g);
-    }
-    crate::foreground::foreground_exe().and_then(|exe| game_folder_name(&exe))
+    resolve_app_and_folder(state, game_override).1
+}
+
+/// The app a save is named after (`Roblox`), and the per-game folder it goes
+/// to (`None` = the save folder itself: per-game folders off, or nothing but
+/// the desktop was in use). A window source is named after its app; a full
+/// screen save after the app in the foreground (or the last one played in
+/// the last few seconds when Lastshot or the desktop has focus).
+pub fn resolve_app_and_folder(state: &AppState, game_override: Option<&str>) -> (String, Option<String>) {
+    let (organize, source) = {
+        let s = state.settings.read();
+        (s.organize_by_game, s.capture_source.clone())
+    };
+    let app = match (game_override, source) {
+        (Some(exe), _) if !crate::appname::is_not_an_app(exe) => crate::appname::display_name(exe, None),
+        (_, crate::media::CaptureSource::Window { hwnd, exe, .. }) => crate::appname::window_app(hwnd as isize, &exe),
+        _ => crate::appname::foreground_app(),
+    };
+    let app = crate::appname::sanitize(&app);
+    let folder = (organize && app != "Desktop").then(|| app.clone());
+    (app, folder)
+}
+
+/// Before a replay save: name the clip after the app and route it into the
+/// app's folder. Returns the folder (the clip's game tag).
+pub fn prepare_save(state: &AppState, game_override: Option<&str>) -> Option<String> {
+    let (app, folder) = resolve_app_and_folder(state, game_override);
+    state.engine.set_output_subfolder(folder.clone());
+    state.engine.set_clip_app(Some(app));
+    folder
 }
 
 /// The single source of truth for the privacy gate: pause only when the
@@ -282,8 +275,7 @@ pub async fn save_instant_replay(
     }
     // Per-game organisation: route the flush into output_dir/<game>/. The
     // subfolder is recomputed on every save so it can never go stale.
-    let game_folder = resolve_game_folder(&state, game_override.as_deref());
-    state.engine.set_output_subfolder(game_folder.clone());
+    let game_folder = prepare_save(&state, game_override.as_deref());
 
     let engine = Arc::clone(&state.engine);
 
@@ -470,9 +462,8 @@ pub async fn trim_clip(
 pub async fn delete_clip(path: String) -> Result<(), String> {
     // `async` + spawn_blocking: a non-async command runs on the main thread,
     // and a slow/network path here would freeze the whole WebView.
-    tauri::async_runtime::spawn_blocking(move || {
-        library::delete_clip(Path::new(&path)).map_err(|e| e.to_string())
-    })
+    // To the Recycle Bin, never deleted for good.
+    tauri::async_runtime::spawn_blocking(move || crate::library_ops::recycle(&[path]))
     .await
     .map_err(|e| format!("delete task panicked: {e}"))?
 }
@@ -484,13 +475,9 @@ pub async fn delete_all_clips(state: State<'_, AppState>) -> Result<u32, String>
     let dir = state.output_dir();
     tauri::async_runtime::spawn_blocking(move || {
         let clips = library::scan_directory(&dir, false).map_err(|e| e.to_string())?;
-        let mut deleted = 0u32;
-        for c in &clips {
-            if library::delete_clip(Path::new(&c.path)).is_ok() {
-                deleted += 1;
-            }
-        }
-        Ok(deleted)
+        let paths: Vec<String> = clips.into_iter().map(|c| c.path).collect();
+        crate::library_ops::recycle(&paths)?;
+        Ok(paths.len() as u32)
     })
     .await
     .map_err(|e| format!("delete task panicked: {e}"))?
@@ -553,13 +540,10 @@ pub fn copy_clips_to_clipboard(paths: Vec<String>) -> Result<(), String> {
 pub async fn delete_clips(paths: Vec<String>) -> Result<u32, String> {
     // Batch delete of hundreds of files must never block the main thread.
     tauri::async_runtime::spawn_blocking(move || {
-        let mut deleted = 0u32;
-        for p in &paths {
-            if library::delete_clip(Path::new(p)).is_ok() {
-                deleted += 1;
-            }
-        }
-        Ok(deleted)
+        // To the Recycle Bin, never deleted for good.
+        let there: Vec<String> = paths.into_iter().filter(|p| Path::new(p).exists()).collect();
+        crate::library_ops::recycle(&there)?;
+        Ok(there.len() as u32)
     })
     .await
     .map_err(|e| format!("delete task panicked: {e}"))?
@@ -713,6 +697,7 @@ pub struct SettingsPatch {
     pub capture_source: Option<crate::media::CaptureSource>,
     pub app_audio: Option<crate::media::procaudio::AppAudio>,
     pub capture_cursor: Option<bool>,
+    pub display_method: Option<crate::media::recorder::DisplayMethod>,
     pub capture_system_audio: Option<bool>,
     pub capture_microphone: Option<bool>,
     pub output_dir: Option<String>,
@@ -733,6 +718,7 @@ pub struct SettingsPatch {
     pub game_volume: Option<u32>,
     pub mic_volume: Option<u32>,
     pub mic_device_id: Option<String>,
+    pub clean_voice: Option<bool>,
     pub adaptive_eco: Option<bool>,
     pub eco_battery_threshold_pct: Option<u32>,
     pub eco_ram_free_gbs: Option<u32>,
@@ -860,7 +846,8 @@ pub fn update_settings(
     }
     let source_changed = patch.capture_source.as_ref().map(|v| *v != s.capture_source).unwrap_or(false)
         || patch.app_audio.as_ref().map(|v| *v != s.app_audio).unwrap_or(false)
-        || patch.capture_cursor.map(|v| v != s.capture_cursor).unwrap_or(false);
+        || patch.capture_cursor.map(|v| v != s.capture_cursor).unwrap_or(false)
+        || patch.display_method.map(|v| v != s.display_method).unwrap_or(false);
     if source_changed && state.engine.recording_status().is_some() {
         return Err("Stop the recording before changing what to record.".into());
     }
@@ -872,6 +859,9 @@ pub fn update_settings(
     }
     if let Some(v) = patch.capture_cursor {
         s.capture_cursor = v;
+    }
+    if let Some(v) = patch.display_method {
+        s.display_method = v;
     }
     if let Some(v) = patch.capture_system_audio {
         s.capture_system_audio = v;
@@ -906,7 +896,9 @@ pub fn update_settings(
         // so a corrupt settings.json can never leave an unwanted autostart.
         s.launch_at_startup = v;
         use tauri_plugin_autostart::ManagerExt;
-        if v {
+        if std::env::var_os("LASTSHOT_TEST_INSTANCE").is_some() {
+            // A test copy never touches the real Run key.
+        } else if v {
             if let Err(e) = app.autolaunch().enable() {
                 return Err(format!("could not enable launch at startup: {e}"));
             }
@@ -1021,6 +1013,10 @@ pub fn update_settings(
         state
             .engine
             .set_audio_volumes(s.game_volume, crate::recording::effective_mic_volume(s.mic_volume));
+    }
+    if let Some(v) = patch.clean_voice {
+        s.clean_voice = v;
+        crate::media::voice::set_clean_voice(v);
     }
     if patch.mic_device_id.is_some() {
         state.engine.set_mic_device(s.mic_device_id.clone());
@@ -1267,9 +1263,11 @@ pub fn hide_main_window(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn quit_app(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+pub fn quit_app(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     state.engine.stop();
     crate::quit_cleanup(&app);
+    // Removes the tray icon (a plain exit leaves a ghost icon behind).
+    app.cleanup_before_exit();
     std::process::exit(0);
 }
 

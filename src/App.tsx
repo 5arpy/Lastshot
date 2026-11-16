@@ -4,7 +4,9 @@ import EditorPanel from "./components/EditorPanel";
 import StudioPanel from "./components/StudioPanel";
 import FolderSidebar, { matchesFolder } from "./components/FolderSidebar";
 import ClipTrimmerModal from "./components/ClipTrimmerModal";
-import GalleryGrid from "./components/GalleryGrid";
+import ClipsExplorer from "./components/ClipsExplorer";
+import type { Loc as ExplorerLoc } from "./lib/explorer";
+import { isInside as pathInside, samePath as pathSame } from "./lib/explorer";
 import PipelinePanel from "./components/PipelinePanel";
 import ProfilesPanel from "./components/ProfilesPanel";
 import SettingsPanel from "./components/SettingsPanel";
@@ -13,7 +15,7 @@ import TitleBar from "./components/TitleBar";
 import { AdvancedButton, useAdvanced } from "./components/ui";
 import { open } from "@tauri-apps/plugin-dialog";
 import { DEFAULT_SETTINGS, lastshot } from "./lib/bridge";
-import { folderName, formatBytes, formatDuration, formatRelativeTime } from "./lib/format";
+import { formatBytes, formatDuration, formatRelativeTime } from "./lib/format";
 import { loadGalleryState, saveGalleryState, type SortKey } from "./lib/galleryState";
 import { PrivacyGateHysteresis, shouldGateForForeground } from "./lib/privacyGate";
 import { decideEco, EcoHysteresis } from "./lib/powerPolicy";
@@ -152,18 +154,18 @@ export default function App() {
   const [sessionBytes, setSessionBytes] = useState(0);
   // Restore the last gallery view (filter / sort / compact) from localStorage.
   const [initialGallery] = useState(loadGalleryState);
-  const [query, setQuery] = useState(initialGallery.query);
+  const [query] = useState(initialGallery.query);
   const [gameFilter, setGameFilter] = useState<string>(initialGallery.gameFilter);
-  const [sortKey, setSortKey] = useState<SortKey>(initialGallery.sortKey);
+  const [sortKey] = useState<SortKey>(initialGallery.sortKey);
   const [audioOnly, setAudioOnly] = useState(initialGallery.audioOnly);
   const [favOnly, setFavOnly] = useState(initialGallery.favOnly);
   /** "all", "save" (the save folder) or an extra library folder path. */
-  const [folderFilter, setFolderFilter] = useState("all");
+  const [folderFilter] = useState("all");
   const [tagFilter, setTagFilter] = useState<string | null>(initialGallery.tagFilter);
   const [compact, setCompact] = useState(initialGallery.compact);
   // LOAD MORE pagination: only the first N filtered clips render; the button
   // reveals more. Resets to the first page whenever the filter set changes.
-  const [visibleCount, setVisibleCount] = useState(GALLERY_PAGE_SIZE);
+  const [, setVisibleCount] = useState(GALLERY_PAGE_SIZE);
   // Multi-select (batch management): pure reducer, paths keyed by clip path.
   const [selection, dispatchSelection] = useReducer(selectionReducer, EMPTY_SELECTION);
   const [selectMode, setSelectMode] = useState(false);
@@ -1301,7 +1303,7 @@ export default function App() {
         await lastshot.deleteClip(clip.path);
         setClips((prev) => prev.filter((c) => c.path !== clip.path));
         if (activeClipRef.current?.path === clip.path) setActiveClip(null);
-        pushToast("warn", "Clip deleted", clip.file_name);
+        pushToast("warn", "Moved to the Recycle Bin", clip.file_name);
       } catch (e) {
         pushToast("err", "Delete failed", String(e));
       }
@@ -1510,37 +1512,81 @@ export default function App() {
     return sorted;
   }, [clips, query, audioOnly, gameFilter, favOnly, tagFilter, sortKey, folderFilter]);
 
-  // Paginated view handed to the grid: filters produce the full sorted list,
-  // but only the first `visibleCount` entries render (LOAD MORE reveals the
-  // rest). Batch selection still operates on the FULL filtered list, so a
-  // shift-click range can span pages without loading them first.
-  const visibleClips = useMemo(
-    () => (visibleCount >= filtered.length ? filtered : filtered.slice(0, visibleCount)),
-    [filtered, visibleCount],
-  );
 
   // The visible order for shift-click ranges. Kept in a ref so the selection
   // click handler stays referentially stable (the gallery is memoised) while
   // still reading the freshest filter/sort at click time.
+  // Set by the file-manager view (its visible order).
   const filteredPathsRef = useRef<string[]>([]);
-  filteredPathsRef.current = filtered.map((c) => c.path);
+
+  // ------------------------------------------------- file-manager library
+  // The explorer does folders, search and sorting itself; the star / tag /
+  // game / sound filters still apply.
+  const explorerClips = useMemo(() => {
+    const activeGame = gameFilter === "all" || clips.some((c) => c.game === gameFilter) ? gameFilter : "all";
+    const activeTag = tagFilter && clips.some((c) => c.tags.includes(tagFilter)) ? tagFilter : null;
+    return clips.filter(
+      (c) =>
+        (!audioOnly || c.has_audio) &&
+        (activeGame === "all" || c.game === activeGame) &&
+        (!favOnly || c.favorite) &&
+        (!activeTag || c.tags.includes(activeTag)),
+    );
+  }, [clips, audioOnly, gameFilter, favOnly, tagFilter]);
+  const [explorerNav, setExplorerNav] = useState<{ loc: ExplorerLoc; n: number } | undefined>(undefined);
+  const [explorerLoc, setExplorerLoc] = useState<ExplorerLoc | null>(null);
+  const explorerSidebarValue = useMemo(() => {
+    const save = settings.outputDir;
+    if (!explorerLoc || explorerLoc.kind === "all") return "all";
+    if (explorerLoc.kind === "recent") return "";
+    if (pathSame(explorerLoc.path, save)) return "save";
+    if (pathInside(explorerLoc.path, save)) return `dir:${explorerLoc.path}`;
+    return (settings.libraryFolders ?? []).find((f) => pathSame(f, explorerLoc.path)) ?? "";
+  }, [explorerLoc, settings.outputDir, settings.libraryFolders]);
+  const navFromSidebar = useCallback(
+    (v: string) => {
+      const loc: ExplorerLoc =
+        v === "all"
+          ? { kind: "all" }
+          : v === "save"
+            ? { kind: "folder", path: settings.outputDir }
+            : { kind: "folder", path: v.startsWith("dir:") ? v.slice(4) : v };
+      setExplorerNav((n) => ({ loc, n: (n?.n ?? 0) + 1 }));
+    },
+    [settings.outputDir],
+  );
+  const setExplorerSelection = useCallback((paths: string[], anchor: string | null) => {
+    dispatchSelection({ type: "set", paths, anchor });
+  }, []);
+  const setExplorerOrder = useCallback((paths: string[]) => {
+    filteredPathsRef.current = paths;
+  }, []);
+  const revealPath = useCallback(
+    async (path: string) => {
+      try {
+        await lastshot.revealClip(path);
+      } catch (e) {
+        pushToast("err", "Could not open Explorer", String(e));
+      }
+    },
+    [pushToast],
+  );
+  const copyForDiscord = useCallback(
+    async (paths: string[]) => {
+      if (!paths.length) return;
+      try {
+        await lastshot.copyClips(paths);
+        pushToast("ok", paths.length === 1 ? "Video copied" : `${paths.length} videos copied`, "Paste straight into Discord or Explorer.");
+      } catch (e) {
+        pushToast("err", "Clipboard failed", String(e));
+      }
+    },
+    [pushToast],
+  );
 
   // ------------------------------------------------------ batch selection
   // Set form for O(1) membership tests in the virtualised grid.
   const selectedSet = useMemo(() => new Set(selection.selected), [selection.selected]);
-
-  const handleCardSelect = useCallback(
-    (clip: ClipMetadata, mods: { ctrl: boolean; shift: boolean }) => {
-      dispatchSelection({
-        type: "click",
-        path: clip.path,
-        order: filteredPathsRef.current,
-        ctrl: mods.ctrl,
-        shift: mods.shift,
-      });
-    },
-    [],
-  );
 
   const selectAllVisible = useCallback(() => {
     dispatchSelection({ type: "select-all", order: filteredPathsRef.current });
@@ -2094,8 +2140,8 @@ export default function App() {
                   outputDir={settings.outputDir}
                   libraryFolders={settings.libraryFolders ?? []}
                   disks={disks}
-                  value={folderFilter}
-                  onChange={setFolderFilter}
+                  value={explorerSidebarValue}
+                  onChange={navFromSidebar}
                   onOpenFolder={(p) => void lastshot.openFolder(p)}
                   onAddFolder={() => void addLibraryFolder()}
                   onRemoveFolder={(f) =>
@@ -2117,58 +2163,6 @@ export default function App() {
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
-                  {/* Search box */}
-                  <div className="relative">
-                    <svg
-                      className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-3"
-                      viewBox="0 0 16 16"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.5"
-                    >
-                      <circle cx="7" cy="7" r="4.5" />
-                      <path d="M10.5 10.5L14 14" />
-                    </svg>
-                    <input
-                      name="clip-filter"
-                      value={query}
-                      onChange={(e) => setQuery(e.target.value)}
-                      placeholder="Search clips…"
-                      className="w-52 rounded-lg border border-line bg-surface pl-8 pr-2.5 py-1.5 text-[11px] text-ink outline-none placeholder:text-ink-3 focus:border-accent"
-                    />
-                  </div>
-
-                  <select
-                    value={sortKey}
-                    onChange={(e) => setSortKey(e.target.value as SortKey)}
-                    title="Sort clips"
-                    className="rounded-lg border border-line bg-surface px-2.5 py-1.5 text-[11px] text-ink outline-none transition-colors hover:border-line-3 focus:border-accent"
-                  >
-                    <option value="newest" className="bg-app">Newest</option>
-                    <option value="oldest" className="bg-app">Oldest</option>
-                    <option value="largest" className="bg-app">Largest</option>
-                    <option value="smallest" className="bg-app">Smallest</option>
-                    <option value="longest" className="bg-app">Longest</option>
-                    <option value="shortest" className="bg-app">Shortest</option>
-                  </select>
-
-                  {(settings.libraryFolders ?? []).length > 0 && (
-                    <select
-                      value={folderFilter.startsWith("dir:") ? "save" : folderFilter}
-                      onChange={(e) => setFolderFilter(e.target.value)}
-                      title="Which folder's clips to show"
-                      className="max-w-[12rem] lg:hidden rounded-lg border border-line bg-surface px-2.5 py-1.5 text-[11px] text-ink outline-none transition-colors hover:border-line-3 focus:border-accent"
-                    >
-                      <option value="all" className="bg-app">All folders</option>
-                      <option value="save" className="bg-app">Lastshot clips</option>
-                      {settings.libraryFolders.map((f) => (
-                        <option key={f} value={f} className="bg-app">
-                          📁 {folderName(f)}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-
                   <button
                     type="button"
                     onClick={() => setFavOnly((v) => !v)}
@@ -2460,59 +2454,27 @@ export default function App() {
                 </div>
               )}
 
-              {/* Virtualized Gallery Grid */}
-              <GalleryGrid
-                clips={visibleClips}
+              {/* File-manager library */}
+              <ClipsExplorer
+                clips={explorerClips}
+                saveDir={settings.outputDir}
+                externals={settings.libraryFolders ?? []}
                 loading={loadingClips}
-                compact={compact}
-                totalClipsCount={clips.length}
-                onResetFilters={() => {
-                  setQuery("");
-                  setGameFilter("all");
-                  setAudioOnly(false);
-                  setFavOnly(false);
-                  setTagFilter(null);
-                }}
-                selectedPaths={selectedSet}
-                selectMode={selectMode}
+                selected={selectedSet}
+                onSelection={setExplorerSelection}
                 onOpen={openClip}
-                onSelect={handleCardSelect}
-                onCopy={copyClip}
-                onReveal={revealClip}
-                onOpenExternal={openExternalClip}
-                onDelete={deleteClip}
-                onToggleFavorite={toggleFavorite}
+                onPlay={openExternalClip}
+                onReveal={revealPath}
+                onCopyForDiscord={copyForDiscord}
                 onShare={(c) => void shareClip(c)}
-                shareLimitMb={settings.shareSizeMb}
+                onToggleFavorite={toggleFavorite}
+                onChanged={refreshClips}
+                onToast={pushToast}
+                onOrder={setExplorerOrder}
+                navRequest={explorerNav}
+                onLocation={setExplorerLoc}
                 shareProgress={shareProgress}
               />
-
-              {visibleClips.length < filtered.length && (
-                <>
-                  <div ref={sentinelRef} className="h-px" aria-hidden />
-                  <div className="mt-4 flex flex-col items-center gap-2">
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setVisibleCount((c) => c + GALLERY_PAGE_SIZE)}
-                        className="rounded-lg border border-accent/40 bg-accent/10 px-4 py-2 text-[12px] font-semibold text-accent-fg transition-colors hover:bg-accent/20"
-                      >
-                        Load More (+{Math.min(GALLERY_PAGE_SIZE, filtered.length - visibleClips.length)})
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setVisibleCount(filtered.length)}
-                        className="rounded-lg border border-line bg-surface px-3.5 py-2 text-[12px] text-ink-3 hover:text-ink"
-                      >
-                        Load All ({filtered.length})
-                      </button>
-                    </div>
-                    <span className="font-mono text-[10px] text-ink-3">
-                      Showing {visibleClips.length} of {filtered.length} clips
-                    </span>
-                  </div>
-                </>
-              )}
             </section>
           </div>
         ) : tab === "editor" ? (
@@ -2669,8 +2631,8 @@ export default function App() {
               Delete All Clips?
             </div>
             <p className="mt-2 text-[12px] leading-relaxed text-ink-3">
-              This permanently deletes all {clips.length} clip{clips.length === 1 ? "" : "s"} in
-              your clips folder, starred ones too. This cannot be undone.
+              This moves all {clips.length} clip{clips.length === 1 ? "" : "s"} in your clips
+              folder to the Recycle Bin, starred ones too. You can restore them from there.
             </p>
             <div className="mt-4 flex justify-end gap-2">
               <button

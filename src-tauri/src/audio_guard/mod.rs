@@ -882,7 +882,7 @@ pub fn init(app: &AppHandle) {
     // The mic-mute shortcut.
     let key = settings(app).mic_mute_hotkey;
     if !key.is_empty() {
-        if let Err(e) = crate::hotkeys::rebind(app, "", &key) {
+        if let Err(e) = crate::hotkey_guard::set(app, "mic", &key) {
             log::warn!("[audio-guard] mic shortcut: {e}");
         }
     }
@@ -1040,13 +1040,12 @@ pub async fn guard_set_settings(app: AppHandle, settings_new: GuardSettings) -> 
             }
         }
         if gs.mic_mute_hotkey != old.mic_mute_hotkey {
-            if gs.mic_mute_hotkey.is_empty() {
-                if let Ok(sc) = crate::hotkeys::parse(&old.mic_mute_hotkey) {
-                    use tauri_plugin_global_shortcut::GlobalShortcutExt;
-                    let _ = app.global_shortcut().unregister(sc);
-                }
-            } else {
-                crate::hotkeys::rebind(&app, &old.mic_mute_hotkey, &gs.mic_mute_hotkey)?;
+            if !gs.mic_mute_hotkey.is_empty() {
+                crate::hotkeys::validate(&gs.mic_mute_hotkey)?;
+            }
+            // Kept working by the shortcut guard; a taken combo shows in Settings.
+            if let Err(e) = crate::hotkey_guard::set(&app, "mic", &gs.mic_mute_hotkey) {
+                log::warn!("[audio-guard] mic shortcut: {e}");
             }
         }
         gs.tidy();

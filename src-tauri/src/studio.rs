@@ -1,21 +1,38 @@
-//! Studio: layers (pictures, text, webcam, clock) shown on top of the
-//! recorded screen, OBS-style. They are drawn in a transparent, click-through
-//! window over that screen, so every capture (recordings, instant replays,
-//! screenshots) includes them. The layers themselves live in the window's
-//! local storage, shared by the Studio panel and the layer window.
+//! Studio: layers (pictures, text, webcam, clock, recording timer) on top of
+//! the recorded picture, OBS-style. Since S1 the capture engine draws them
+//! itself (media/layers.rs), so they are in replays, recordings and window
+//! captures, and no longer shown on the user's screen. The layers are kept
+//! in `studio_layers.json` so they also work when Lastshot starts in the tray
+//! without its window.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tauri::{AppHandle, Manager, State};
 
 use crate::commands::AppState;
+use crate::media::layers::LayerSpec;
 
 pub const SCENE_LABEL: &str = "scene";
 
 static OPEN: AtomicBool = AtomicBool::new(false);
 
-/// Opens or closes the layer window for the "Show layers" setting:
-/// "off", "recording" (only while recording) or "always".
+fn layers_file() -> std::path::PathBuf {
+    crate::paths::app_file("studio_layers.json")
+}
+
+/// Loads the saved layers into the engine (at startup).
+pub fn init(app: &AppHandle) {
+    let Some(state) = app.try_state::<AppState>() else { return };
+    if let Ok(raw) = std::fs::read_to_string(layers_file()) {
+        if let Ok(v) = serde_json::from_str::<Vec<LayerSpec>>(&raw) {
+            state.engine.layers().set(v);
+        }
+    }
+    sync(app);
+}
+
+/// Turns the layers on or off for the "Show layers" setting: "off",
+/// "recording" (only while recording) or "always".
 pub fn sync(app: &AppHandle) {
     let Some(state) = app.try_state::<AppState>() else { return };
     let mode = state.settings.read().studio_layers.clone();
@@ -25,29 +42,64 @@ pub fn sync(app: &AppHandle) {
         "recording" => recording,
         _ => false,
     };
-    if want == OPEN.load(Ordering::Relaxed) && (want == app.get_webview_window(SCENE_LABEL).is_some()) {
-        return;
-    }
-    let rect = crate::recording::recorded_monitor(&state);
-    let h = app.clone();
-    // Built on the main thread, queued from a worker (see recording::sync_bar).
-    tauri::async_runtime::spawn(async move {
-        let h2 = h.clone();
-        let _ = h.run_on_main_thread(move || {
-            if want {
-                if let Some((x, y, w, hh, _)) = rect {
-                    if let Err(e) = open(&h2, (x, y, w, hh)) {
-                        log::warn!("[lastshot] studio layers: {e}");
-                    }
+    state.engine.layers().set_enabled(want);
+    // The old on-screen layer window is not used any more.
+    if OPEN.swap(false, Ordering::Relaxed) || app.get_webview_window(SCENE_LABEL).is_some() {
+        let h = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let h2 = h.clone();
+            let _ = h.run_on_main_thread(move || {
+                if let Some(w) = h2.get_webview_window(SCENE_LABEL) {
+                    let _ = w.close();
                 }
-            } else if let Some(w) = h2.get_webview_window(SCENE_LABEL) {
-                let _ = w.close();
-            }
-            OPEN.store(want && h2.get_webview_window(SCENE_LABEL).is_some(), Ordering::Relaxed);
+            });
         });
-    });
+    }
 }
 
+/// Studio saved its layers: draw them from the next frame on.
+#[tauri::command]
+pub fn set_studio_layers(app: AppHandle, state: State<'_, AppState>, layers: Vec<LayerSpec>) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(&layers).map_err(|e| e.to_string())?;
+    if let Some(dir) = layers_file().parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    std::fs::write(layers_file(), json).map_err(|e| e.to_string())?;
+    let paths: Vec<String> = layers.iter().filter_map(|l| l.path.clone()).collect();
+    for p in paths {
+        if let Some(dir) = std::path::Path::new(&p).parent() {
+            let _ = app.asset_protocol_scope().allow_directory(dir, false);
+        }
+    }
+    state.engine.layers().set(layers);
+    Ok(())
+}
+
+/// The layers the engine draws (None when Studio never saved any, so the
+/// panel can bring over layers from the old local storage once).
+#[tauri::command]
+pub fn get_studio_layers(state: State<'_, AppState>) -> Option<Vec<LayerSpec>> {
+    if !layers_file().exists() {
+        return None;
+    }
+    Some(state.engine.layers().get())
+}
+
+/// Cameras for the webcam layer (names only; nothing is opened).
+#[tauri::command]
+pub async fn list_cameras() -> Vec<crate::media::webcam::CameraInfo> {
+    tauri::async_runtime::spawn_blocking(crate::media::webcam::list_cameras).await.unwrap_or_default()
+}
+
+/// The newest live preview frame: 12-byte header (width, height, sequence)
+/// + RGBA. Empty when the engine has none yet. Asking keeps the preview on.
+#[tauri::command]
+pub fn get_preview_frame(state: State<'_, AppState>) -> tauri::ipc::Response {
+    let bytes = state.engine.preview().request().map(|f| f.to_bytes()).unwrap_or_default();
+    tauri::ipc::Response::new(bytes)
+}
+
+#[allow(dead_code)]
 fn open(app: &AppHandle, rect: (i32, i32, u32, u32)) -> tauri::Result<()> {
     if app.get_webview_window(SCENE_LABEL).is_some() {
         return Ok(());

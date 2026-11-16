@@ -41,44 +41,18 @@ pub fn validate(accelerator: &str) -> Result<Shortcut, String> {
 
 /// Test copies (LASTSHOT_TEST_INSTANCE=1) register no global shortcuts, so a
 /// running test never takes Alt+C etc. from the user's own Lastshot.
-fn test_instance() -> bool {
+pub(crate) fn test_instance() -> bool {
     std::env::var("LASTSHOT_TEST_INSTANCE").as_deref() == Ok("1")
 }
 
-/// Registers the save, arm/disarm and snip shortcuts. Called once from `setup`.
-pub fn register_all(
-    app: &AppHandle,
-    save: &str,
-    toggle: &str,
-    snip: &str,
-    record: &str,
-) -> Result<(), String> {
-    if test_instance() {
-        return Ok(()); // test copies leave the user's shortcuts alone
-    }
-    let gs = app.global_shortcut();
-    let save_sc = validate(save)?;
-    let toggle_sc = validate(toggle)?;
-
-    if !gs.is_registered(save_sc) {
-        gs.register(save_sc)
-            .map_err(|e| format!("could not register {save}: {e} (another app may own it)"))?;
-    }
-    if !gs.is_registered(toggle_sc) {
-        gs.register(toggle_sc)
-            .map_err(|e| format!("could not register {toggle}: {e}"))?;
-    }
-    let snip_sc = validate(snip)?;
-    if !gs.is_registered(snip_sc) {
-        gs.register(snip_sc)
-            .map_err(|e| format!("could not register {snip}: {e} (another app may own it)"))?;
-    }
-    let record_sc = validate(record)?;
-    if !gs.is_registered(record_sc) {
-        gs.register(record_sc)
-            .map_err(|e| format!("could not register {record}: {e} (another app may own it)"))?;
-    }
-    Ok(())
+/// Registers the shortcuts, each on its own (one taken combo never blocks
+/// the others), and keeps them working; see `hotkey_guard`. Test copies
+/// register nothing (the guard checks that too).
+pub fn register_all(app: &AppHandle, save: &str, toggle: &str, snip: &str, record: &str) {
+    crate::hotkey_guard::start(
+        app,
+        &[("save", save.to_string()), ("toggle", toggle.to_string()), ("snip", snip.to_string()), ("record", record.to_string())],
+    );
 }
 
 /// Registers the new combo (if different) and then drops the old one. Order
@@ -101,6 +75,7 @@ pub fn rebind(app: &AppHandle, previous: &str, next: &str) -> Result<(), String>
             let _ = gs.unregister(prev);
         }
     }
+    crate::hotkey_guard::rebound(previous, next);
     Ok(())
 }
 
@@ -211,12 +186,10 @@ pub fn publish_saved_clip(
             open_trimmer,
         },
     );
+    // In the tray without a window, the save chime comes from here.
+    crate::startup::play_save_sound_if_no_window(app);
     if raise_deck {
-        if let Some(w) = app.get_webview_window("main") {
-            let _ = w.show();
-            let _ = w.unminimize();
-            let _ = w.set_focus();
-        }
+        crate::startup::show_main(app);
     }
     clip
 }
@@ -245,8 +218,7 @@ pub fn trigger_save(app: AppHandle) {
         let open_trimmer = state.settings.read().open_trimmer_after_save;
 
         // Per-game organisation (same rule as the UI save path).
-        let game_folder = crate::commands::resolve_game_folder(&state, None);
-        state.engine.set_output_subfolder(game_folder.clone());
+        let game_folder = crate::commands::prepare_save(&state, None);
 
         // The foreground is sampled inside the same blocking task so a hung
         // foreground window cannot stall the async runtime. The privacy check

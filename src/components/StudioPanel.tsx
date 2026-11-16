@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { assetUrl, isTauri, lastshot } from "../lib/bridge";
-import type { AppSettings, BarState, MonitorInfo, ScreenShot } from "../lib/types";
-import { type Layer, type LayerKind, loadLayers, newLayer, restack, saveLayers } from "../lib/studio";
+import type { AppSettings, BarState, CameraInfo, MonitorInfo, ScreenShot, WindowMethod } from "../lib/types";
+import { type Layer, type LayerKind, type Scene, type Scenes, loadLayers, newLayer, nextSceneName, restack, saveLayers, sceneFrom } from "../lib/studio";
 import { LayerView, useRecordingSeconds } from "./StudioLayers";
 import { clockTime } from "./ControlBar";
 import { cn } from "../utils/cn";
@@ -36,15 +36,117 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
   const [layers, setLayers] = useState<Layer[]>(loadLayers);
   const [selected, setSelected] = useState<string | null>(null);
   const [shot, setShot] = useState<ScreenShot | null>(null);
-  const [cams, setCams] = useState<MediaDeviceInfo[]>([]);
+  const [cams, setCams] = useState<CameraInfo[]>([]);
+  const [live, setLive] = useState(false);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [picking, setPicking] = useState(false);
+  const [scenes, setScenes] = useState<Scenes>({ active: null, scenes: [] });
+  const [renamingScene, setRenamingScene] = useState<string | null>(null);
   const secs = useRecordingSeconds();
   const previewRef = useRef<HTMLDivElement | null>(null);
 
   const update = (next: Layer[]) => {
     setLayers(next);
     saveLayers(next);
+    void lastshot.setStudioLayers(next).catch(() => undefined);
   };
+
+  // The engine draws the layers into the video. Bring over layers kept only
+  // in this window's storage (before the engine had its own copy) once.
+  useEffect(() => {
+    void lastshot
+      .getStudioLayers<Layer>()
+      .then((fromEngine) => {
+        if (fromEngine === null) {
+          if (layers.length) void lastshot.setStudioLayers(layers);
+        } else {
+          setLayers(fromEngine);
+          saveLayers(fromEngine);
+        }
+      })
+      .catch(() => undefined);
+    // First load only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Scenes: what to record + layers, one click to switch.
+  useEffect(() => {
+    void lastshot
+      .getScenes<Scenes>()
+      .then(setScenes)
+      .catch(() => undefined);
+  }, []);
+  const storeScenes = (next: Scenes) => {
+    setScenes(next);
+    void lastshot
+      .saveScenes(next)
+      .then(setScenes)
+      .catch((e) => onToast("err", "Could not save scenes", String(e)));
+  };
+  const addScene = () => {
+    const sc = sceneFrom(nextSceneName(scenes.scenes), settings.captureSource ?? { kind: "display" }, layers);
+    storeScenes({ active: sc.id, scenes: [...scenes.scenes, sc] });
+  };
+  const switchTo = async (sc: Scene) => {
+    try {
+      const note = await lastshot.switchScene(sc.id);
+      setLayers(sc.layers);
+      saveLayers(sc.layers);
+      setScenes((s) => ({ ...s, active: sc.id }));
+      if (sc.source && !note) onPatch({ captureSource: sc.source });
+      if (note) onToast("warn", `Switched to ${sc.name}, same source`, note);
+    } catch (e) {
+      onToast("err", "Could not switch scene", String(e));
+    }
+  };
+  // Edits go into the active scene too.
+  const activeScene = scenes.scenes.find((s) => s.id === scenes.active) ?? null;
+  useEffect(() => {
+    if (!activeScene) return;
+    const src = settings.captureSource ?? { kind: "display" as const };
+    if (JSON.stringify(activeScene.layers) === JSON.stringify(layers) && JSON.stringify(activeScene.source) === JSON.stringify(src)) return;
+    const t = window.setTimeout(() => {
+      storeScenes({ ...scenes, scenes: scenes.scenes.map((s) => (s.id === activeScene.id ? { ...s, layers, source: src } : s)) });
+    }, 600);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layers, settings.captureSource, activeScene?.id]);
+
+  // Live preview from the engine (what is being encoded), ~8 times a second
+  // while Studio is on screen. Falls back to a still picture of the screen.
+  useEffect(() => {
+    let alive = true;
+    let lastSeq = -1;
+    let misses = 0;
+    const tick = async () => {
+      if (!alive) return;
+      if (document.visibilityState === "visible") {
+        try {
+          const f = await lastshot.getPreviewFrame();
+          if (f && f.seq !== lastSeq && canvasRef.current) {
+            lastSeq = f.seq;
+            misses = 0;
+            const c = canvasRef.current;
+            if (c.width !== f.width || c.height !== f.height) {
+              c.width = f.width;
+              c.height = f.height;
+            }
+            c.getContext("2d")?.putImageData(new ImageData(f.rgba, f.width, f.height), 0, 0);
+            setLive(true);
+          } else if (!f && ++misses > 10) {
+            setLive(false);
+          }
+        } catch {
+          setLive(false);
+        }
+      }
+      if (alive) window.setTimeout(() => void tick(), 120);
+    };
+    void tick();
+    return () => {
+      alive = false;
+    };
+  }, []);
   const patchLayer = (id: string, p: Partial<Layer>) => update(layers.map((l) => (l.id === id ? { ...l, ...p } : l)));
 
   const refreshShot = async () => {
@@ -68,8 +170,7 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
 
   const loadCams = async () => {
     try {
-      const all = await navigator.mediaDevices.enumerateDevices();
-      setCams(all.filter((d) => d.kind === "videoinput"));
+      setCams(await lastshot.listCameras());
     } catch {
       setCams([]);
     }
@@ -127,6 +228,7 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       saveLayers(latest);
+      void lastshot.setStudioLayers(latest).catch(() => undefined);
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
@@ -135,7 +237,11 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
   const sel = layers.find((l) => l.id === selected) ?? null;
   const rec = bar?.recording ?? null;
   const mon = monitors.find((m) => m.index === settings.monitorIndex) ?? monitors[0];
-  const aspect = shot ? `${shot.width} / ${shot.height}` : mon ? `${mon.width} / ${mon.height}` : "16 / 9";
+  const aspect = live && canvasRef.current
+    ? `${canvasRef.current.width} / ${canvasRef.current.height}`
+    : shot ? `${shot.width} / ${shot.height}` : mon ? `${mon.width} / ${mon.height}` : "16 / 9";
+  // The live picture already shows the layers when the engine draws them.
+  const layersInLive = live && (settings.studioLayers === "always" || (settings.studioLayers === "recording" && !!rec));
 
   return (
     <div className="space-y-4">
@@ -172,6 +278,60 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
             </button>
           </div>
         )}
+      </div>
+
+      {/* Scenes */}
+      <div className="panel flex flex-wrap items-center gap-1.5 rounded-xl px-3 py-2" data-testid="scenes">
+        <span className="mr-1 text-[12px] font-semibold text-ink" title="A scene is what to record plus its layers. Click one to switch; changes you make go into the scene that is on.">
+          Scenes
+        </span>
+        {scenes.scenes.length === 0 && <span className="text-[11px] text-ink-3">Save what you have now as a scene to switch between setups in one click.</span>}
+        {scenes.scenes.map((sc) =>
+          renamingScene === sc.id ? (
+            <input
+              key={sc.id}
+              autoFocus
+              defaultValue={sc.name}
+              onFocus={(e) => e.currentTarget.select()}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") e.currentTarget.blur();
+                if (e.key === "Escape") setRenamingScene(null);
+              }}
+              onBlur={(e) => {
+                const name = e.currentTarget.value.trim();
+                setRenamingScene(null);
+                if (name && name !== sc.name) storeScenes({ ...scenes, scenes: scenes.scenes.map((s) => (s.id === sc.id ? { ...s, name } : s)) });
+              }}
+              className="w-28 rounded-md border border-accent bg-app px-2 py-1 text-[11px] text-ink outline-none"
+            />
+          ) : (
+            <span key={sc.id} className="group relative">
+              <button
+                type="button"
+                onClick={() => void switchTo(sc)}
+                onDoubleClick={() => setRenamingScene(sc.id)}
+                title={`${sc.name}: ${sourceLabel(sc.source ?? settings.captureSource)}, ${sc.layers.length} layer${sc.layers.length === 1 ? "" : "s"}. Double-click to rename.`}
+                className={cn(
+                  "rounded-md border px-2.5 py-1 text-[11px] font-semibold",
+                  scenes.active === sc.id ? "border-accent bg-accent/15 text-accent-fg" : "border-line bg-surface text-ink-2 hover:border-line-3",
+                )}
+              >
+                {sc.name}
+              </button>
+              <button
+                type="button"
+                title={`Remove ${sc.name}`}
+                onClick={() => storeScenes({ active: scenes.active === sc.id ? null : scenes.active, scenes: scenes.scenes.filter((s) => s.id !== sc.id) })}
+                className="absolute -right-1.5 -top-1.5 hidden h-4 w-4 place-items-center rounded-full bg-surface-4 text-[9px] text-ink-3 hover:text-danger group-hover:grid"
+              >
+                ✕
+              </button>
+            </span>
+          ),
+        )}
+        <button type="button" onClick={addScene} className="rounded-md border border-dashed border-line px-2.5 py-1 text-[11px] text-ink-3 hover:border-accent hover:text-ink">
+          + Scene
+        </button>
       </div>
 
       <div className="grid gap-4 xl:grid-cols-[230px_minmax(0,1fr)_270px]">
@@ -236,7 +396,9 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
             className="relative w-full overflow-hidden rounded-lg bg-[#0d0f14]"
             style={{ aspectRatio: aspect, containerType: "size" }}
           >
-            {shot?.image && <img src={shot.image} alt="" className="absolute inset-0 h-full w-full object-cover opacity-80" draggable={false} />}
+            <canvas ref={canvasRef} className={cn("absolute inset-0 h-full w-full", !live && "hidden")} />
+            {!live && shot?.image && <img src={shot.image} alt="" className="absolute inset-0 h-full w-full object-cover opacity-80" draggable={false} />}
+            {live && <span className="absolute right-1.5 top-1.5 z-10 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-semibold text-white">LIVE</span>}
             {layers.map((l) => (
               <div
                 key={l.id}
@@ -246,10 +408,12 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
                   left: `${l.x * 100}%`,
                   top: `${l.y * 100}%`,
                   width: l.kind === "image" || l.kind === "webcam" ? `${l.w * 100}%` : undefined,
-                  opacity: l.visible ? l.opacity : 0.25,
+                  opacity: layersInLive ? 1 : l.visible ? l.opacity : 0.25,
                 }}
               >
-                <LayerView layer={l} recordingSeconds={secs} />
+                <div style={{ opacity: layersInLive ? 0 : 1 }} className={cn(layersInLive && "outline outline-1 outline-white/40")}>
+                  <LayerView layer={l} recordingSeconds={secs} noCamera />
+                </div>
                 {selected === l.id && (
                   <span onPointerDown={drag(l, "size")} title="Drag to resize" className="absolute -bottom-1.5 -right-1.5 h-3 w-3 cursor-nwse-resize rounded-sm border border-black/40 bg-white" />
                 )}
@@ -270,7 +434,7 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
               </select>
             </label>
             <span className="text-[11px] text-ink-3">
-              Layers are drawn on your screen so they are in the video; you see them too. Clicks go through them.
+              The recorder draws the layers into the video (replays, recordings and window captures). They are not shown on your screen.
             </span>
           </div>
         </div>
@@ -317,8 +481,8 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
                       >
                         <option value="">Default camera</option>
                         {cams.map((c, i) => (
-                          <option key={c.deviceId || i} value={c.deviceId}>
-                            {c.label || `Camera ${i + 1}`}
+                          <option key={c.id || i} value={c.id}>
+                            {c.name || `Camera ${i + 1}`}
                           </option>
                         ))}
                       </select>
@@ -353,6 +517,22 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
                     <input type="checkbox" checked={!!sel.border} onChange={(e) => patchLayer(sel.id, { border: e.target.checked })} /> Border
                   </label>
                 )}
+                {(sel.kind === "image" || sel.kind === "webcam") && (
+                  <div className="grid grid-cols-2 gap-x-2">
+                    {(["cropLeft", "cropRight", "cropTop", "cropBottom"] as const).map((k) => (
+                      <Slider
+                        key={k}
+                        label={`Crop ${k.slice(4).toLowerCase()}`}
+                        value={(sel[k] ?? 0) * 100}
+                        min={0}
+                        max={45}
+                        step={1}
+                        suffix="%"
+                        onChange={(v) => patchLayer(sel.id, { [k]: v / 100 })}
+                      />
+                    ))}
+                  </div>
+                )}
                 <Slider label="Opacity" value={sel.opacity * 100} min={5} max={100} step={1} suffix="%" onChange={(v) => patchLayer(sel.id, { opacity: v / 100 })} />
               </>
             )}
@@ -373,6 +553,21 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
                 <span className="text-ink-3">Change</span>
               </button>
             </div>
+            {settings.captureSource?.kind === "window" && (
+              <label className="block space-y-1" title="Crop from screen never touches the app (no added lag), but needs the window visible. Automatic crops while it is visible and switches to Graphics Capture when it is covered.">
+                <span className="text-ink-3">Window capture method</span>
+                <select
+                  value={settings.captureSource.method ?? "auto"}
+                  disabled={!!rec}
+                  onChange={(e) => settings.captureSource?.kind === "window" && onPatch({ captureSource: { ...settings.captureSource, method: e.target.value as WindowMethod } })}
+                  className="w-full rounded-md border border-line bg-surface-2 px-2 py-1 text-ink"
+                >
+                  <option value="auto">Automatic</option>
+                  <option value="crop">Crop from screen</option>
+                  <option value="capture">Graphics Capture (works when covered)</option>
+                </select>
+              </label>
+            )}
             {picking && (
               <SourcePicker
                 current={settings.captureSource ?? { kind: "display" }}
@@ -426,8 +621,14 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
               <input type="checkbox" checked={settings.captureMicrophone} onChange={(e) => onPatch({ captureMicrophone: e.target.checked })} /> Microphone
             </label>
             {settings.captureMicrophone && (
-              <Slider label="Microphone volume" value={settings.micVolume * 100} min={0} max={200} step={5} suffix="%" onChange={(v) => onPatch({ micVolume: v / 100 })} />
+              <>
+                <Slider label="Microphone volume" value={settings.micVolume} min={0} max={100} step={5} suffix="%" onChange={(v) => onPatch({ micVolume: v })} />
+                <label className="flex items-center gap-2" title="Turns down background noise between words, cuts rumble and evens out loud and quiet speech.">
+                  <input type="checkbox" checked={!!settings.cleanVoice} onChange={(e) => onPatch({ cleanVoice: e.target.checked })} /> Clean up my voice
+                </label>
+              </>
             )}
+            {(settings.captureSystemAudio || settings.captureMicrophone) && <SoundMeters game={settings.captureSystemAudio} mic={settings.captureMicrophone} />}
             <label className="block space-y-1">
               <span className="text-ink-3">Control bar</span>
               <select value={settings.controlBar} onChange={(e) => onPatch({ controlBar: e.target.value as AppSettings["controlBar"] })} className="w-full rounded-md border border-line bg-surface-2 px-2 py-1 text-ink">
@@ -456,5 +657,47 @@ function Slider({ label, value, min, max, step, suffix, onChange }: { label: str
       </span>
       <input type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))} className="w-full accent-[var(--color-accent)]" />
     </label>
+  );
+}
+
+/** Live sound meters (what goes into the recording), while Studio is open. */
+function SoundMeters({ game, mic }: { game: boolean; mic: boolean }) {
+  const [lv, setLv] = useState({ gameDb: -100, micDb: -100 });
+  useEffect(() => {
+    let alive = true;
+    const shown = { gameDb: -100, micDb: -100 };
+    const t = window.setInterval(() => {
+      void lastshot
+        .getAudioLevels()
+        .then((l) => {
+          if (!alive) return;
+          // Rise at once, fall smoothly.
+          shown.gameDb = Math.max(l.gameDb, shown.gameDb - 3);
+          shown.micDb = Math.max(l.micDb, shown.micDb - 3);
+          setLv({ ...shown });
+        })
+        .catch(() => undefined);
+    }, 100);
+    return () => {
+      alive = false;
+      window.clearInterval(t);
+    };
+  }, []);
+  const bar = (label: string, d: number, id: string) => {
+    const pct = Math.max(0, Math.min(100, ((d + 60) / 60) * 100));
+    return (
+      <div className="flex items-center gap-2" data-testid={id} data-db={Math.round(d)} title={d <= -99 ? "Silent" : `${Math.round(d)} dB`}>
+        <span className="w-16 shrink-0 text-[11px] text-ink-3">{label}</span>
+        <div className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-surface-4">
+          <div className={cn("absolute inset-y-0 left-0 rounded-full", d > -3 ? "bg-danger" : d > -12 ? "bg-warn" : "bg-accent")} style={{ width: `${pct}%` }} />
+        </div>
+      </div>
+    );
+  };
+  return (
+    <div className="space-y-1">
+      {game && bar("PC sound", lv.gameDb, "meter-game")}
+      {mic && bar("Microphone", lv.micDb, "meter-mic")}
+    </div>
   );
 }

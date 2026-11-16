@@ -190,7 +190,12 @@ export default function HomeDashboard({
           <span className="truncate text-[13px] font-medium text-ink">{status.text}</span>
           {on && stats.width > 0 && (
             <span className="hidden font-mono text-[11px] text-ink-3 md:inline">
-              {stats.width}×{stats.height} · {stats.target_fps} fps
+              {stats.width}×{stats.height} · {stats.target_fps} fps{stats.capture_method ? ` · ${stats.capture_method}` : ""}
+            </span>
+          )}
+          {on && stats.notice && (
+            <span title={stats.notice} className="truncate rounded border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[11px] text-warn">
+              Black picture
             </span>
           )}
           {eco?.active && (

@@ -7,7 +7,7 @@
 import { drawShape, type DrawEnv } from "../annotate/draw";
 import type { Shape } from "../annotate/shapes";
 import { end } from "../timeline/model";
-import { type EdItem, type EdProject, tracksOf } from "./project";
+import { type EdItem, type EdProject, pictureTracks, shapeTracks } from "./project";
 
 export interface Placement {
   /** Source rectangle (natural pixels). */
@@ -77,7 +77,7 @@ export interface FrameSources {
 
 /** Items visible at `t`, picture tracks bottom first. */
 export function picturesAt(p: EdProject, t: number): EdItem[] {
-  const v = tracksOf(p.tl, "video").filter((tr) => !tr.hidden);
+  const v = pictureTracks(p.tl).filter((tr) => !tr.hidden);
   const out: EdItem[] = [];
   for (let k = v.length - 1; k >= 0; k--) {
     for (const it of p.tl.items) {
@@ -89,7 +89,7 @@ export function picturesAt(p: EdProject, t: number): EdItem[] {
 
 /** Annotation objects visible at `t`, back to front (blur boxes first). */
 export function shapesAt(p: EdProject, t: number): { item: EdItem; shape: Shape }[] {
-  const o = tracksOf(p.tl, "overlay").filter((tr) => !tr.hidden);
+  const o = shapeTracks(p.tl).filter((tr) => !tr.hidden);
   const out: { item: EdItem; shape: Shape }[] = [];
   for (let k = o.length - 1; k >= 0; k--) {
     for (const it of p.tl.items) {

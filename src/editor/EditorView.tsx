@@ -47,22 +47,27 @@ import {
   type Picture,
   type TrackKind,
   DEFAULT_FX,
-  TRACK_LIMIT,
   accepts,
   audioJob,
   exportRange,
   exportRoute,
   exportStem,
+  dropTrack,
+  freeTrack as findFreeTrack,
+  homeKind,
   kindOf,
   mainTrack,
   newProject,
   outputFps,
   outputSize,
+  pictureTracks,
   projectLength,
   renderJob,
   track as makeTrack,
+  trackLimit,
   tracksOf,
 } from "./project";
+import pro from "lastshot-pro";
 import { baseName, isEmpty, itemFromPath, lastOpen, loadProjects, saveProjects, stillPng, urlOf, MEDIA_RE, AUDIO_RE, IMAGE_RE } from "./store";
 import { Btn, Ico, I, Menu, type MenuItem, Sep, usePersist } from "./ui";
 
@@ -95,7 +100,11 @@ export interface EditorProps {
   active?: boolean;
 }
 
-const TRACK_H: Record<string, number> = { video: 62, overlay: 30, audio: 50 };
+const TRACK_H: Record<string, number> = { video: 62, overlay: 30, audio: 50, spare: 50 };
+/** Tracks per kind: one in the free app (plus the spare lane); a Pro build may allow more. */
+const PER_KIND = pro.editorTracksPerKind;
+const limitHint = (kind: TrackKind) =>
+  kind === "spare" ? "There is one spare track" : PER_KIND === undefined ? "One per kind in the free app, plus the spare track" : `Up to ${trackLimit(kind, PER_KIND)}`;
 const STILL = 5;
 const SHAPE_SECONDS = 4;
 
@@ -249,24 +258,13 @@ export default function EditorView(props: EditorProps) {
 
   // ------------------------------------------------------------ adding media
   const firstTrack = (tl: EdProject["tl"], it: EdItem): string | null => {
-    const kind: TrackKind = it.kind === "audio" ? "audio" : it.kind === "shape" ? "overlay" : "video";
+    const kind = homeKind(it);
     if (kind === "video") return mainTrack(tl);
     return tracksOf(tl, kind).find((t) => !t.locked)?.id ?? null;
   };
 
-  /** A track of `kind` free over [a, b] (adds one when allowed). */
-  const freeTrack = (tl: EdProject["tl"], kind: TrackKind, a: number, b: number, prefer?: string): { tl: EdProject["tl"]; track: string | null } => {
-    const list = tracksOf(tl, kind).filter((t) => !t.locked);
-    const order = prefer ? [...list.filter((t) => t.id === prefer), ...list.filter((t) => t.id !== prefer)] : kind === "overlay" ? list : list;
-    for (const t of order) if (!tl.items.some((i) => i.track === t.id && i.start < b - 1e-6 && end(i) > a + 1e-6)) return { tl, track: t.id };
-    if (tracksOf(tl, kind).length < TRACK_LIMIT) {
-      const nt = makeTrack(kind, tracksOf(tl, kind).length + 1);
-      // Overlays and pictures stack on top; sound goes at the bottom.
-      const idx = kind === "audio" ? tl.tracks.length : tl.tracks.findIndex((t) => t.kind === kind);
-      return { tl: addTrack(tl, nt, Math.max(0, idx)), track: nt.id };
-    }
-    return { tl, track: order[0]?.id ?? null };
-  };
+  /** A track of `kind` free over [a, b]: adds one when allowed, else the spare track (see project.ts). */
+  const freeTrack = (tl: EdProject["tl"], kind: TrackKind, a: number, b: number, prefer?: string) => findFreeTrack(tl, kind, a, b, PER_KIND, prefer);
 
   const clipByPath = (path: string) => props.clips.find((c) => c.path === path);
 
@@ -304,29 +302,31 @@ export default function EditorView(props: EditorProps) {
     let t = at?.t ?? player.time;
     const placed: EdItem[] = [];
     let mode: "insert" | "overwrite" = at?.insert ? "insert" : "overwrite";
+    let spared = "";
     for (const it0 of items) {
-      const kind: TrackKind = it0.kind === "audio" ? "audio" : "video";
+      const kind = homeKind(it0);
       let track: string | null = null;
       const span: [number, number] = [t, t + it0.duration];
-      if (at?.track && kindOf(tl, at.track) === kind && !tl.tracks.find((x) => x.id === at.track)?.locked) track = at.track;
-      else if (at?.below || (at?.track && kindOf(tl, at.track) !== kind)) {
+      if (at?.below) {
         const r = freeTrack(tl, kind, ...span);
         tl = r.tl;
         track = r.track;
-      } else if (!at) {
-        if (kind === "video") {
-          track = mainTrack(tl);
-          // After the clip under the playhead, pushing the rest along.
-          const under = tl.items.find((i) => i.track === track && i.start < t - 1e-6 && end(i) > t + 1e-6);
-          if (under) t = end(under);
-          mode = tl.items.some((i) => i.track === track && i.start >= t - 1e-6) ? "insert" : "overwrite";
-        } else {
-          const r = freeTrack(tl, kind, ...span);
-          tl = r.tl;
-          track = r.track;
-        }
+      } else if (at) {
+        // The track under the pointer; when it is busy there, a free one (at the limit: the spare lane).
+        const r = dropTrack(tl, it0, at.track, ...span, { insert: at.insert, perKind: PER_KIND });
+        tl = r.tl;
+        track = r.track;
+        if (at.track && track && track !== at.track && kindOf(tl, track) === "spare") spared = tl.tracks.find((x) => x.id === at.track)?.name ?? "";
+      } else if (kind === "video") {
+        track = mainTrack(tl);
+        // After the clip under the playhead, pushing the rest along.
+        const under = tl.items.find((i) => i.track === track && i.start < t - 1e-6 && end(i) > t + 1e-6);
+        if (under) t = end(under);
+        mode = tl.items.some((i) => i.track === track && i.start >= t - 1e-6) ? "insert" : "overwrite";
       } else {
-        track = firstTrack(tl, it0);
+        const r = freeTrack(tl, kind, ...span);
+        tl = r.tl;
+        track = r.track;
       }
       if (!track) continue;
       const it = { ...it0, id: newId("i"), track, start: t };
@@ -338,6 +338,7 @@ export default function EditorView(props: EditorProps) {
     // Recorded markers of a library clip become timeline markers too.
     apply({ ...pRef.current, tl }, "once", placed.length === 1 ? `Add ${placed[0].name}` : `Add ${placed.length} files`);
     setSel(new Set(placed.map((x) => x.id)));
+    if (spared) onToast("info", "Put on the spare track", `${spared} is busy there. Hold Ctrl while dropping to insert instead.`);
     if (pRef.current.tl.items.length === placed.length) requestAnimationFrame(fit);
   };
 
@@ -432,16 +433,23 @@ export default function EditorView(props: EditorProps) {
     const kind = dropKind(e) ?? "video";
     if (!h) return;
     const tl = pRef.current.tl;
-    const track = h.track && kindOf(tl, h.track.id) === kind ? h.track.id : tracksOf(tl, kind)[0]?.id;
     const clip = dragPaths.current?.[0] ? clipByPath(dragPaths.current[0]) : undefined;
     const label = dragPaths.current?.length ? baseName(dragPaths.current[0]) : "Drop here";
+    const dur = clip?.duration_seconds ?? STILL;
     if (h.below) {
       setGhost(null);
-      setBelowHint(tracksOf(tl, kind).length < TRACK_LIMIT ? `Drop for a new ${kind === "audio" ? "audio" : "video"} track` : "No more tracks of this kind");
+      const r = freeTrack(tl, kind, h.t, h.t + dur);
+      const name = r.track ? tl.tracks.find((x) => x.id === r.track)?.name : "";
+      setBelowHint(r.tl !== tl ? `Drop for a new ${kind} track` : name ? `Drop on ${name}` : "No free track here");
       return;
     }
     setBelowHint("");
-    if (track) setGhost({ track, start: h.t, duration: clip?.duration_seconds ?? STILL, label: `${label}${e.ctrlKey ? " · insert" : ""}` });
+    // Same choice as the drop: a busy track hands the item to a free one (the spare lane at the limit).
+    const r = dropTrack(tl, { kind: kind === "audio" ? "audio" : "video" }, h.track?.id ?? null, h.t, h.t + dur, { insert: e.ctrlKey, perKind: PER_KIND });
+    const fresh = r.tl !== tl;
+    const track = fresh ? (h.track?.id ?? null) : r.track;
+    const moved = !fresh && !!track && track !== h.track?.id && kindOf(tl, track) === "spare";
+    if (track) setGhost({ track, start: h.t, duration: dur, label: `${label}${e.ctrlKey ? " · insert" : ""}${fresh ? " · new track" : moved ? " · spare track (busy here)" : ""}` });
   };
   const clearDrag = () => {
     setGhost(null);
@@ -1148,8 +1156,12 @@ export default function EditorView(props: EditorProps) {
       at,
       items: [
         { label: "Rename…", run: () => setAsk({ title: "Rename track", ok: "Rename", field: tr.name, run: (v) => v.trim() && apply({ ...pRef.current, tl: patchTrack(pRef.current.tl, tr.id, { name: v.trim() }) }, "once", "Rename track") }) },
-        { label: `Add a ${kind} track above`, disabled: count >= TRACK_LIMIT, run: () => add(idx), hint: count >= TRACK_LIMIT ? `Up to ${TRACK_LIMIT} in the free app` : undefined },
-        { label: `Add a ${kind} track below`, disabled: count >= TRACK_LIMIT, run: () => add(idx + 1) },
+        ...(kind === "spare"
+          ? []
+          : [
+              { label: `Add a ${kind} track above`, disabled: count >= trackLimit(kind, PER_KIND), run: () => add(idx), hint: count >= trackLimit(kind, PER_KIND) ? limitHint(kind) : undefined },
+              { label: `Add a ${kind} track below`, disabled: count >= trackLimit(kind, PER_KIND), run: () => add(idx + 1) },
+            ]),
         { label: "Remove this track", danger: true, disabled: count <= 1, run: () => apply({ ...cur, tl: removeTrack(cur.tl, tr.id) }, "once", "Remove track") },
         { sep: true, label: "" },
         ...(kind !== "overlay" || true ? [{ label: tr.locked ? "Unlock" : "Lock", run: () => apply({ ...cur, tl: patchTrack(cur.tl, tr.id, { locked: !tr.locked }) }, "once", "Lock track") }] : []),
@@ -1239,7 +1251,7 @@ export default function EditorView(props: EditorProps) {
     const s = cur.tl.items.find((i) => selRef.current.has(i.id) && (i.kind === "video" || i.kind === "image"));
     if (s) return s;
     const t = player.time;
-    const vids = tracksOf(cur.tl, "video");
+    const vids = pictureTracks(cur.tl);
     for (const tr of vids) {
       const it = cur.tl.items.find((i) => i.track === tr.id && (i.kind === "video" || i.kind === "image") && t >= i.start && t < end(i));
       if (it) return it;
@@ -1767,8 +1779,8 @@ function AddTrack({ p, onAdd }: { p: EdProject; onAdd: (k: TrackKind) => void })
           onClose={() => setM(null)}
           items={(["video", "overlay", "audio"] as TrackKind[]).map((kind) => ({
             label: `${kind === "video" ? "Video" : kind === "overlay" ? "Overlay (text, drawings)" : "Audio"} track`,
-            disabled: tracksOf(p.tl, kind).length >= TRACK_LIMIT,
-            hint: tracksOf(p.tl, kind).length >= TRACK_LIMIT ? `Up to ${TRACK_LIMIT} in the free app` : undefined,
+            disabled: tracksOf(p.tl, kind).length >= trackLimit(kind, PER_KIND),
+            hint: tracksOf(p.tl, kind).length >= trackLimit(kind, PER_KIND) ? limitHint(kind) : undefined,
             run: () => onAdd(kind),
           }))}
         />

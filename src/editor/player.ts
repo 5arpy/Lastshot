@@ -8,7 +8,7 @@
  * frame without React re-rendering the editor.
  */
 import { end } from "../timeline/model";
-import { type EdItem, type EdProject, effectiveAudio, kindOf } from "./project";
+import { type EdItem, type EdProject, effectiveAudio, kindOf, pictureTracks } from "./project";
 import { media } from "./media";
 
 interface Entry {
@@ -146,7 +146,7 @@ export class Player {
   private leader(t: number): Entry | null {
     const p = this.project;
     if (!p) return null;
-    const order = p.tl.tracks.filter((tr) => tr.kind === "video" && !tr.hidden).map((tr) => tr.id);
+    const order = pictureTracks(p.tl).filter((tr) => !tr.hidden).map((tr) => tr.id);
     for (const trId of order) {
       for (const e of this.pool.values()) {
         const it = e.item;
@@ -232,7 +232,7 @@ export class Player {
     for (const it of tl.items) {
       if (it.disabled || !it.path || (it.kind !== "video" && it.kind !== "audio")) continue;
       const k = kindOf(tl, it.track);
-      const hiddenPic = k === "video" && tl.tracks.find((x) => x.id === it.track)?.hidden;
+      const hiddenPic = (k === "video" || k === "spare") && tl.tracks.find((x) => x.id === it.track)?.hidden;
       const sounds = !!effectiveAudio(tl, it);
       if (hiddenPic && !sounds) continue;
       const inside = t >= it.start - 0.001 && t < end(it);

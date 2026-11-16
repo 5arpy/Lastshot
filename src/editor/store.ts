@@ -7,7 +7,7 @@ import type { ClipMetadata } from "../lib/types";
 import { newId } from "../timeline/model";
 import { type Shape, DEFAULT_STYLE, shapeId } from "../annotate/shapes";
 import { editorApi } from "./api";
-import { DEFAULT_FX, type EdItem, type EdProject, newProject, tracksOf } from "./project";
+import { DEFAULT_FX, type EdItem, type EdProject, newProject, tracksOf, withSpare } from "./project";
 
 const LIST = "lastshot.editor.projects.v2";
 const OLD = "lastshot.editor.project";
@@ -24,7 +24,7 @@ export const stem = (p: string) => baseName(p).replace(/\.[^.]+$/, "");
 export function loadProjects(): EdProject[] {
   try {
     const raw = localStorage.getItem(LIST);
-    if (raw) return (JSON.parse(raw) as EdProject[]).filter((p) => p && p.tl && Array.isArray(p.tl.items));
+    if (raw) return (JSON.parse(raw) as EdProject[]).filter((p) => p && p.tl && Array.isArray(p.tl.items)).map((p) => ({ ...p, tl: withSpare(p.tl) }));
     const old = localStorage.getItem(OLD);
     if (old) {
       const p = migrate(JSON.parse(old));

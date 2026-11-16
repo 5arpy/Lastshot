@@ -6,10 +6,14 @@
  */
 import type { CropRect } from "../lib/types";
 import { type Item, type Timeline, type Track, end, newId, timelineEnd } from "../timeline/model";
-import { audible } from "../timeline/ops";
+import { addTrack, audible } from "../timeline/ops";
 import type { Shape } from "../annotate/shapes";
 
-export type TrackKind = "video" | "overlay" | "audio";
+/**
+ * "spare": one extra lane that takes anything (a second clip, a picture, a
+ * sound or an object), so a busy track never blocks a drop.
+ */
+export type TrackKind = "video" | "overlay" | "audio" | "spare";
 
 export interface AudioFx {
   /** 1 = 100 %, up to 4. */
@@ -80,10 +84,21 @@ export interface EdProject {
   view?: { pxPerSec: number; scroll: number };
 }
 
-export const TRACK_LIMIT = 3; // per kind in the free app; Pro may raise it.
+/** Tracks per kind (video, overlay, audio) in the free app; plus one spare. */
+export const FREE_TRACKS_PER_KIND = 1;
+
+/**
+ * How many tracks of `kind` a project may have. `perKind` comes from the
+ * Pro module (`editorTracksPerKind`); the free app has one of each.
+ */
+export function trackLimit(kind: TrackKind, perKind = FREE_TRACKS_PER_KIND): number {
+  return kind === "spare" ? 1 : Math.max(1, Math.floor(perKind));
+}
+
+export const SPARE_NAME = "Spare: drop anything";
 
 export function track(kind: TrackKind, n: number): Track {
-  const name = kind === "video" ? `Video ${n}` : kind === "overlay" ? `Overlay ${n}` : `Audio ${n}`;
+  const name = kind === "spare" ? SPARE_NAME : kind === "video" ? `Video ${n}` : kind === "overlay" ? `Overlay ${n}` : `Audio ${n}`;
   return { id: newId(kind[0]), kind, name, volume: 1, pan: 0 };
 }
 
@@ -94,11 +109,18 @@ export function newProject(name = "Untitled"): EdProject {
     updated: Date.now(),
     size: "auto",
     fps: "auto",
-    tl: { tracks: [track("overlay", 1), track("video", 1), track("audio", 1)], items: [], markers: [], inPoint: null, outPoint: null },
+    tl: { tracks: [track("overlay", 1), track("spare", 1), track("video", 1), track("audio", 1)], items: [], markers: [], inPoint: null, outPoint: null },
     magnet: false,
     snapping: true,
     ripple: false,
   };
+}
+
+/** Projects saved before the spare track existed get one, above the video tracks. */
+export function withSpare(tl: EdTimeline): EdTimeline {
+  if (tl.tracks.some((t) => t.kind === "spare")) return tl;
+  const v = tl.tracks.findIndex((t) => t.kind === "video");
+  return { ...tl, tracks: [...tl.tracks.slice(0, Math.max(0, v)), track("spare", 1), ...tl.tracks.slice(Math.max(0, v))] };
 }
 
 export const kindOf = (tl: EdTimeline, trackId: string): TrackKind | undefined => tl.tracks.find((t) => t.id === trackId)?.kind as TrackKind | undefined;
@@ -106,18 +128,72 @@ export const kindOf = (tl: EdTimeline, trackId: string): TrackKind | undefined =
 /** Tracks of one kind in display order (top first). */
 export const tracksOf = (tl: EdTimeline, kind: TrackKind) => tl.tracks.filter((t) => t.kind === kind);
 
+/** Tracks that can show pictures (video and spare), top first: z follows this order. */
+export const pictureTracks = (tl: EdTimeline) => tl.tracks.filter((t) => t.kind === "video" || t.kind === "spare");
+
+/** Tracks that can hold annotation objects (overlay and spare), top first. */
+export const shapeTracks = (tl: EdTimeline) => tl.tracks.filter((t) => t.kind === "overlay" || t.kind === "spare");
+
 /** The main video track: the bottom one (V1). */
 export function mainTrack(tl: EdTimeline): string | null {
   const v = tracksOf(tl, "video");
   return v.length ? v[v.length - 1].id : null;
 }
 
+/** The track kind an item belongs on (the spare track takes any). */
+export const homeKind = (it: Pick<EdItem, "kind">): TrackKind => (it.kind === "audio" ? "audio" : it.kind === "shape" ? "overlay" : "video");
+
 /** Which tracks an item may sit on. */
 export function accepts(trackKind: TrackKind, item: Pick<EdItem, "kind">): boolean {
-  if (item.kind === "audio") return trackKind === "audio";
-  if (item.kind === "video") return trackKind === "video";
-  if (item.kind === "image") return trackKind === "video";
-  return trackKind === "overlay";
+  return trackKind === "spare" || trackKind === homeKind(item);
+}
+
+const busyOn = (tl: EdTimeline, id: string, a: number, b: number) => tl.items.some((i) => i.track === id && i.start < b - 1e-6 && end(i) > a + 1e-6);
+
+/**
+ * A track of `kind` free over [a, b]: an unlocked one of that kind (`prefer`
+ * first), else a new one when the limit allows, else the spare track when it
+ * is free there, else the first one of the kind (the caller overwrites).
+ */
+export function freeTrack(tl: EdTimeline, kind: TrackKind, a: number, b: number, perKind = FREE_TRACKS_PER_KIND, prefer?: string): { tl: EdTimeline; track: string | null } {
+  const list = tracksOf(tl, kind).filter((t) => !t.locked);
+  const order = prefer ? [...list.filter((t) => t.id === prefer), ...list.filter((t) => t.id !== prefer)] : list;
+  for (const t of order) if (!busyOn(tl, t.id, a, b)) return { tl, track: t.id };
+  const count = tracksOf(tl, kind).length;
+  if (count < trackLimit(kind, perKind)) {
+    const nt = track(kind, count + 1);
+    // Overlays and pictures stack on top of their kind; sound goes at the bottom.
+    const first = tl.tracks.findIndex((t) => t.kind === kind);
+    const idx = kind === "audio" || first < 0 ? (kind === "audio" ? tl.tracks.length : 0) : first;
+    return { tl: addTrack(tl, nt, idx), track: nt.id };
+  }
+  const spare = kind === "spare" ? undefined : tracksOf(tl, "spare").find((t) => !t.locked && !busyOn(tl, t.id, a, b));
+  if (spare) return { tl, track: spare.id };
+  return { tl, track: order[0]?.id ?? null };
+}
+
+/**
+ * Where a dropped item over [a, b] goes. On the track under the pointer when
+ * it takes the item and is free there (or the drop inserts); when that track
+ * is busy, on another free track of its kind, a new one, or the spare track;
+ * only when all are busy does it overwrite the track under the pointer.
+ */
+export function dropTrack(
+  tl: EdTimeline,
+  it: Pick<EdItem, "kind">,
+  hit: string | null,
+  a: number,
+  b: number,
+  opts: { insert?: boolean; perKind?: number } = {},
+): { tl: EdTimeline; track: string | null } {
+  const h = hit ? tl.tracks.find((t) => t.id === hit) : undefined;
+  const kind = homeKind(it);
+  if (h && !h.locked && accepts(h.kind as TrackKind, it)) {
+    if (opts.insert || !busyOn(tl, h.id, a, b)) return { tl, track: h.id };
+    const f = freeTrack(tl, kind, a, b, opts.perKind, h.kind === kind ? h.id : undefined);
+    return f.track && !busyOn(f.tl, f.track, a, b) ? f : { tl, track: h.id };
+  }
+  return freeTrack(tl, kind, a, b, opts.perKind);
 }
 
 /** Picture size after crop and quarter turns. */
@@ -362,7 +438,8 @@ export async function renderJob(
     r,
   );
   const video: RenderVideo[] = [];
-  const vTracks = tracksOf(tl, "video");
+  // Video and spare tracks, top first: a clip on the spare lane sits above the main video.
+  const vTracks = pictureTracks(tl);
   for (const it of items) {
     if (it.kind !== "video" && it.kind !== "image") continue;
     const tr = vTracks.find((t) => t.id === it.track);
@@ -379,7 +456,7 @@ export async function renderJob(
   }
   const overlays: RenderOverlay[] = [];
   const regions: RenderRegion[] = [];
-  const oTracks = tracksOf(tl, "overlay");
+  const oTracks = shapeTracks(tl);
   // Back to front: the bottom overlay track first, earlier items first.
   const shapes = items
     .filter((i) => i.kind === "shape" && i.shape && !oTracks.find((t) => t.id === i.track)?.hidden)

@@ -246,7 +246,7 @@ export function TrackHeader({
   return (
     <div className="flex h-full flex-col justify-center gap-0.5 px-2" onContextMenu={onMenu}>
       <div className="flex items-center gap-1">
-        <span className={cn("min-w-0 flex-1 truncate text-[11px] font-semibold", track.kind === "video" ? "text-sky-300" : track.kind === "audio" ? "text-emerald-300" : "text-amber-300")} title={track.name}>
+        <span className={cn("min-w-0 flex-1 truncate text-[11px] font-semibold", track.kind === "video" ? "text-sky-300" : track.kind === "audio" ? "text-emerald-300" : track.kind === "spare" ? "text-violet-300" : "text-amber-300")} title={track.name}>
           {track.name}
         </span>
         {canHide && btn(!!track.hidden, track.hidden ? "Show this track" : "Hide this track", track.hidden ? I.eyeOff : I.eye, () => onPatch({ hidden: !track.hidden }, track.hidden ? "Show track" : "Hide track"))}

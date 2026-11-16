@@ -515,6 +515,8 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                     state.engine.stop();
                 }
                 audio_routing::voicemeeter::shutdown();
+                // Removes the tray icon (a plain exit leaves a ghost icon).
+                app.cleanup_before_exit();
                 std::process::exit(0);
             }
             _ => {}

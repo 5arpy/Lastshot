@@ -1265,9 +1265,11 @@ pub fn hide_main_window(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn quit_app(state: State<'_, AppState>) -> Result<(), String> {
+pub fn quit_app(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     state.engine.stop();
     crate::audio_routing::voicemeeter::shutdown();
+    // Removes the tray icon (a plain exit leaves a ghost icon behind).
+    app.cleanup_before_exit();
     std::process::exit(0);
 }
 

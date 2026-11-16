@@ -29,6 +29,11 @@ pub fn lock_down<R: tauri::Runtime>(webview: &tauri::Webview<R>) {
             if let Ok(s3) = settings.cast::<ICoreWebView2Settings3>() {
                 let _ = s3.SetAreBrowserAcceleratorKeysEnabled(false);
             }
+            // No devtools at all for users (the Cargo feature is on for the
+            // test harness, which drives test copies over CDP).
+            if !crate::startup::is_test_instance() {
+                let _ = settings.SetAreDevToolsEnabled(false);
+            }
         }
     });
     #[cfg(not(windows))]

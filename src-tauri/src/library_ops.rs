@@ -249,11 +249,13 @@ pub async fn recycle_items(state: State<'_, AppState>, paths: Vec<String>) -> Re
     Ok(n)
 }
 
-/// Moves files or folders to the Recycle Bin, quietly (no dialogs).
+/// Moves files or folders to the Recycle Bin, quietly (no dialogs), except
+/// that Windows asks first when something cannot go to the Recycle Bin (too
+/// big, a drive without one) and would be deleted for good.
 #[cfg(windows)]
 pub fn recycle(paths: &[String]) -> Result<(), String> {
     use windows::core::PCWSTR;
-    use windows::Win32::UI::Shell::{SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FO_DELETE, SHFILEOPSTRUCTW};
+    use windows::Win32::UI::Shell::{SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING, FO_DELETE, SHFILEOPSTRUCTW};
     let existing: Vec<&String> = paths.iter().filter(|p| Path::new(p).exists()).collect();
     if existing.is_empty() {
         return Ok(());
@@ -268,7 +270,7 @@ pub fn recycle(paths: &[String]) -> Result<(), String> {
     let mut op = SHFILEOPSTRUCTW {
         wFunc: FO_DELETE,
         pFrom: PCWSTR(from.as_ptr()),
-        fFlags: (FOF_ALLOWUNDO.0 | FOF_NOCONFIRMATION.0 | FOF_NOERRORUI.0 | FOF_SILENT.0) as u16,
+        fFlags: (FOF_ALLOWUNDO.0 | FOF_NOCONFIRMATION.0 | FOF_NOERRORUI.0 | FOF_SILENT.0 | FOF_WANTNUKEWARNING.0) as u16,
         ..Default::default()
     };
     let r = unsafe { SHFileOperationW(&mut op) };

@@ -461,9 +461,8 @@ pub async fn trim_clip(
 pub async fn delete_clip(path: String) -> Result<(), String> {
     // `async` + spawn_blocking: a non-async command runs on the main thread,
     // and a slow/network path here would freeze the whole WebView.
-    tauri::async_runtime::spawn_blocking(move || {
-        library::delete_clip(Path::new(&path)).map_err(|e| e.to_string())
-    })
+    // To the Recycle Bin, never deleted for good.
+    tauri::async_runtime::spawn_blocking(move || crate::library_ops::recycle(&[path]))
     .await
     .map_err(|e| format!("delete task panicked: {e}"))?
 }
@@ -475,13 +474,9 @@ pub async fn delete_all_clips(state: State<'_, AppState>) -> Result<u32, String>
     let dir = state.output_dir();
     tauri::async_runtime::spawn_blocking(move || {
         let clips = library::scan_directory(&dir, false).map_err(|e| e.to_string())?;
-        let mut deleted = 0u32;
-        for c in &clips {
-            if library::delete_clip(Path::new(&c.path)).is_ok() {
-                deleted += 1;
-            }
-        }
-        Ok(deleted)
+        let paths: Vec<String> = clips.into_iter().map(|c| c.path).collect();
+        crate::library_ops::recycle(&paths)?;
+        Ok(paths.len() as u32)
     })
     .await
     .map_err(|e| format!("delete task panicked: {e}"))?
@@ -544,13 +539,10 @@ pub fn copy_clips_to_clipboard(paths: Vec<String>) -> Result<(), String> {
 pub async fn delete_clips(paths: Vec<String>) -> Result<u32, String> {
     // Batch delete of hundreds of files must never block the main thread.
     tauri::async_runtime::spawn_blocking(move || {
-        let mut deleted = 0u32;
-        for p in &paths {
-            if library::delete_clip(Path::new(p)).is_ok() {
-                deleted += 1;
-            }
-        }
-        Ok(deleted)
+        // To the Recycle Bin, never deleted for good.
+        let there: Vec<String> = paths.into_iter().filter(|p| Path::new(p).exists()).collect();
+        crate::library_ops::recycle(&there)?;
+        Ok(there.len() as u32)
     })
     .await
     .map_err(|e| format!("delete task panicked: {e}"))?

@@ -12,6 +12,7 @@ pub mod commands;
 pub mod editor;
 pub mod foreground;
 pub mod hotkeys;
+pub mod library_ops;
 pub mod media;
 pub mod paths;
 pub mod popout;
@@ -137,6 +138,7 @@ pub fn run() {
             recording::sync_bar(&handle);
             studio::init(&handle);
             appname::start_tracker();
+            library_ops::start_watch(&handle);
 
             if let Err(e) =
                 hotkeys::register_all(&handle, &save_key, &toggle_key, &snip_key, &record_key)
@@ -351,6 +353,12 @@ pub fn run() {
             studio::get_studio_layers,
             studio::list_cameras,
             studio::get_preview_frame,
+            library_ops::library_dirs,
+            library_ops::create_clip_folder,
+            library_ops::move_clips,
+            library_ops::copy_clips_to,
+            library_ops::rename_library_item,
+            library_ops::recycle_items,
             snip::snip_cancel,
             snip::open_screenshots_folder,
             audio_routing::vm_status,

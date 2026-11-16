@@ -157,6 +157,7 @@ export const CHANNELS = {
   snipDone: "lastshot://snip-done",
   recording: "lastshot://recording",
   openFile: "lastshot://open-file",
+  libraryChanged: "lastshot://library-changed",
   dragDrop: "tauri://drag-drop",
 } as const;
 
@@ -484,6 +485,41 @@ export const lastshot = {
   async deleteAllClips(): Promise<number> {
     if (isTauri()) return invoke<number>("delete_all_clips");
     return simEngine.clearAll();
+  },
+
+  // ------------------------------------------------- library (file manager)
+  /** All folders under the save folder and the extra folders (also empty ones). */
+  async libraryDirs(): Promise<string[]> {
+    if (isTauri()) return invoke<string[]>("library_dirs");
+    return [];
+  },
+  async createClipFolder(parent: string, name: string): Promise<string> {
+    if (isTauri()) return invoke<string>("create_clip_folder", { parent, name });
+    return `${parent}\\${name}`;
+  },
+  /** Moves clips or folders into a folder; resolves to the new paths. */
+  async moveClips(paths: string[], dest: string): Promise<string[]> {
+    if (isTauri()) return invoke<string[]>("move_clips", { paths, dest });
+    return paths;
+  },
+  async copyClipsTo(paths: string[], dest: string): Promise<string[]> {
+    if (isTauri()) return invoke<string[]>("copy_clips_to", { paths, dest });
+    return paths;
+  },
+  /** Renames a clip or folder (never replaces another file). */
+  async renameLibraryItem(path: string, newName: string): Promise<string> {
+    if (isTauri()) return invoke<string>("rename_library_item", { path, newName });
+    return simEngine.rename(path, newName);
+  },
+  /** Clips or folders to the Recycle Bin. */
+  async recycleItems(paths: string[]): Promise<number> {
+    if (isTauri()) return invoke<number>("recycle_items", { paths });
+    for (const p of paths) simEngine.delete(p);
+    return paths.length;
+  },
+  /** Files or folders changed under the save folder (debounced). */
+  onLibraryChanged(handler: () => void): Promise<() => void> {
+    return listen<null>(CHANNELS.libraryChanged, () => handler());
   },
 
   /** Renames a clip file on disk; resolves to the new path. */

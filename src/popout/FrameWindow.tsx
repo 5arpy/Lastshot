@@ -531,6 +531,11 @@ function FrameChrome({
           >
             <Icon d={FI.full} />
           </Btn>
+          {frame.kind === "video" && (
+            <Btn title="Open in the editor (trim, cut, crop, draw, export)" onClick={() => void openInEditor(frame.src)}>
+              <Icon d="M2 14l2.5-.5 8-8-2-2-8 8zM9.5 4.5l2 2" />
+            </Btn>
+          )}
           <Btn title="Show the Pop-outs panel in Lastshot" onClick={() => void frames.showPanel()}>
             <Icon d={FI.panel} />
           </Btn>
@@ -729,4 +734,12 @@ function MediaBody({ frame, say, onFullscreen }: { frame: Frame; say: (m: string
       />
     </>
   );
+}
+
+/** Hands a clip to the main window's editor (as if opened with Lastshot). */
+async function openInEditor(path: string) {
+  const t = (window as unknown as { __TAURI__?: { event: { emitTo: (to: string, e: string, p: unknown) => Promise<void> }; core: { invoke: (c: string) => Promise<unknown> } } }).__TAURI__;
+  if (!t) return;
+  await t.core.invoke("show_main_window").catch(() => undefined);
+  await t.event.emitTo("main", "lastshot://open-file", path).catch(() => undefined);
 }

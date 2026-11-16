@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import HomeDashboard from "./components/HomeDashboard";
-import EditorPanel from "./components/EditorPanel";
+import EditorView, { type EditorIncoming } from "./editor/EditorView";
 import StudioPanel from "./components/StudioPanel";
 import FolderSidebar, { matchesFolder } from "./components/FolderSidebar";
-import ClipTrimmerModal from "./components/ClipTrimmerModal";
 import ClipsExplorer from "./components/ClipsExplorer";
 import FramesPanel from "./popout/FramesPanel";
 import { PICTURE_FILE, frames as popFrames, isPictureType, popOutClip, popOutMany, popOutPicture, popOutPicturePath } from "./popout/frames";
@@ -116,6 +115,7 @@ interface Toast {
   tone: ToastTone;
   title: string;
   body?: string;
+  action?: { label: string; run: () => void };
 }
 
 const TONE_STYLES: Record<ToastTone, string> = {
@@ -141,11 +141,11 @@ export default function App() {
   const [frameCount, setFrameCount] = useState(0);
   const poppedRef = useRef<PopView[]>([]);
   // Files handed to the Editor (drag & drop on its tab, "Open in Editor").
-  const [editorIncoming, setEditorIncoming] = useState<{ paths: string[]; seq: number } | null>(null);
+  const [editorIncoming, setEditorIncoming] = useState<EditorIncoming | null>(null);
   const tabRef = useRef(tab);
   tabRef.current = tab;
-  const sendToEditor = useCallback((paths: string[]) => {
-    setEditorIncoming((p) => ({ paths, seq: (p?.seq ?? 0) + 1 }));
+  const sendToEditor = useCallback((paths: string[], opts?: { mode?: "open" | "add"; flushMs?: number }) => {
+    setEditorIncoming((p) => ({ paths, seq: (p?.seq ?? 0) + 1, ...opts }));
     setTab("editor");
   }, []);
   /** Settings section to scroll to when the Settings tab opens. */
@@ -261,10 +261,18 @@ export default function App() {
     }
   }, [activeClip]);
 
-  const pushToast = useCallback((tone: ToastTone, title: string, body?: string) => {
+  // The quick trimmer is now the Editor tab: a clip opened anywhere (card
+  // click, after saving, Open with Lastshot) opens there as its own edit.
+  useEffect(() => {
+    if (!activeClip) return;
+    sendToEditor([activeClip.path], { mode: "open", flushMs: activeFlushMs });
+    setActiveClip(null);
+  }, [activeClip, activeFlushMs, sendToEditor]);
+
+  const pushToast = useCallback((tone: ToastTone, title: string, body?: string, action?: Toast["action"]) => {
     const id = ++toastId.current;
-    setToasts((t) => [...t, { id, tone, title, body }].slice(-4));
-    window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 4200);
+    setToasts((t) => [...t, { id, tone, title, body, action }].slice(-4));
+    window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), action ? 7000 : 4200);
   }, []);
 
   // Popped-out tabs. When one docks back, its window may have changed
@@ -409,6 +417,7 @@ export default function App() {
             `${payload.clip.file_name} · ${formatDuration(payload.clip.duration_seconds)} · ${formatBytes(
               payload.clip.size_bytes,
             )}`,
+            { label: "Open in editor", run: () => sendToEditor([payload.clip.path], { mode: "open", flushMs: payload.flushMs }) },
           );
           // The Rust side decides: hotkey saves while a game has focus do NOT
           // raise the deck (that would steal focus and minimise the game), so
@@ -663,21 +672,6 @@ export default function App() {
     };
   }, [tab, refreshClips]);
 
-  const moveToLibrary = useCallback(
-    async (clip: ClipMetadata) => {
-      try {
-        const dest = await lastshot.moveClipToLibrary(clip.path);
-        const moved = { ...clip, path: dest, folder: undefined, file_name: dest.split(/[\\/]/).pop() ?? clip.file_name };
-        setClips((prev) => prev.map((c) => (c.path === clip.path ? moved : c)));
-        setActiveClip((a) => (a && a.path === clip.path ? moved : a));
-        pushToast("ok", "Moved to the Lastshot folder", shownPath(dest));
-        void refreshClips();
-      } catch (e) {
-        pushToast("err", "Could not move the clip", String(e));
-      }
-    },
-    [pushToast, refreshClips],
-  );
 
   const saveDisk = useMemo(() => {
     const d = disks.find((x) => settings.outputDir.toLowerCase().startsWith(x.root.toLowerCase()));
@@ -1295,35 +1289,11 @@ export default function App() {
     void lastshot.startSnip().catch((e) => pushToast("err", "Screenshot failed", String(e)));
   }, [pushToast]);
 
-  const revealClip = useCallback(
-    async (clip: ClipMetadata) => {
-      try {
-        await lastshot.revealClip(clip.path);
-        if (!native) pushToast("info", "Path copied", clip.path);
-      } catch (e) {
-        pushToast("err", "Could not open Explorer", String(e));
-      }
-    },
-    [native, pushToast],
-  );
 
   // Read through a ref so `deleteClip` stays referentially stable (the gallery
   // is memoised) — the closure only needs the *current* activeClip at call time.
   const activeClipRef = useRef(activeClip);
   activeClipRef.current = activeClip;
-  const deleteClip = useCallback(
-    async (clip: ClipMetadata) => {
-      try {
-        await lastshot.deleteClip(clip.path);
-        setClips((prev) => prev.filter((c) => c.path !== clip.path));
-        if (activeClipRef.current?.path === clip.path) setActiveClip(null);
-        pushToast("warn", "Moved to the Recycle Bin", clip.file_name);
-      } catch (e) {
-        pushToast("err", "Delete failed", String(e));
-      }
-    },
-    [pushToast],
-  );
 
   const toggleFavorite = useCallback(
     async (clip: ClipMetadata) => {
@@ -1347,67 +1317,8 @@ export default function App() {
     [pushToast],
   );
 
-  const updateTags = useCallback(
-    async (clip: ClipMetadata, tags: string[]) => {
-      setClips((prev) =>
-        prev.map((c) => (c.path === clip.path ? { ...c, tags } : c)),
-      );
-      setActiveClip((c) => (c && c.path === clip.path ? { ...c, tags } : c));
-      try {
-        await lastshot.setClipTags(clip.path, tags);
-      } catch (e) {
-        pushToast("err", "Could not save tags", String(e));
-      }
-    },
-    [pushToast],
-  );
 
-  const saveTrimmed = useCallback(
-    async (start: number, end: number) => {
-      if (!activeClip) return;
-      setBusy(true);
-      try {
-        const result = await lastshot.trimClip(activeClip.path, start, end, false);
-        pushToast(
-          "ok",
-          `Trimmed in ${result.elapsed_ms.toFixed(0)} ms`,
-          `${result.file_name} · ${formatDuration(result.duration_seconds)} · stream copy`,
-        );
-        setActiveClip(null);
-        await refreshClips();
-      } catch (e) {
-        pushToast("err", "Trim failed", String(e));
-      } finally {
-        setBusy(false);
-      }
-    },
-    [activeClip, pushToast, refreshClips],
-  );
 
-  const renameClip = useCallback(
-    async (clip: ClipMetadata, newName: string) => {
-      if (!newName.trim() || newName.trim() === clip.file_name) return;
-      try {
-        const path = await lastshot.renameClip(clip.path, newName.trim());
-        const file_name = path.split(/[\\/]/).pop() ?? newName.trim();
-        setActiveClip((c) =>
-          c?.path === clip.path
-            ? {
-                ...c,
-                path,
-                file_name,
-                title: file_name.replace(/\.mp4$/i, "").replace(/_/g, " "),
-              }
-            : c,
-        );
-        await refreshClips();
-        pushToast("ok", "Clip renamed", file_name);
-      } catch (e) {
-        pushToast("err", "Rename failed", String(e));
-      }
-    },
-    [pushToast, refreshClips],
-  );
 
   const openExternalClip = useCallback(
     async (clip: ClipMetadata) => {
@@ -1421,44 +1332,7 @@ export default function App() {
     [native, pushToast],
   );
 
-  const splitClip = useCallback(
-    async (splitSeconds: number) => {
-      if (!activeClip) return;
-      setBusy(true);
-      try {
-        const r = await lastshot.splitClip(activeClip.path, splitSeconds);
-        pushToast(
-          "ok",
-          "Clip split into 2",
-          `${r.partA.file_name} · ${r.partB.file_name}`,
-        );
-        setActiveClip(null);
-        await refreshClips();
-      } catch (e) {
-        pushToast("err", "Split failed", String(e));
-      } finally {
-        setBusy(false);
-      }
-    },
-    [activeClip, pushToast, refreshClips],
-  );
 
-  const snapshotClip = useCallback(
-    async (clip: ClipMetadata, pngBase64: string) => {
-      try {
-        const base = clip.file_name.replace(/\.mp4$/i, "").replace(/_/g, " ");
-        const path = await lastshot.snapshotToOutput(pngBase64, base);
-        pushToast(
-          "ok",
-          "Frame saved as PNG",
-          native ? path : "Snapshot downloaded",
-        );
-      } catch (e) {
-        pushToast("err", "Snapshot failed", String(e));
-      }
-    },
-    [native, pushToast],
-  );
 
   const clearLibrary = useCallback(async () => {
     setConfirmClear(false);
@@ -2107,6 +1981,17 @@ export default function App() {
                             </div>
                           )}
                           <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-transparent to-transparent pointer-events-none" />
+                          <button
+                            type="button"
+                            title="Open in editor: trim, cut, crop, draw, export"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              sendToEditor([clip.path], { mode: "open" });
+                            }}
+                            className="absolute right-2 top-1.5 z-10 rounded bg-black/75 px-1.5 py-0.5 text-[10px] font-semibold text-white opacity-0 transition-opacity hover:bg-accent group-hover:opacity-100 focus:opacity-100"
+                          >
+                            Edit
+                          </button>
                           <span className="absolute bottom-1.5 left-2 font-mono text-[10px] text-white bg-black/75 px-1.5 py-0.5 rounded border border-white/10">
                             {formatDuration(clip.duration_seconds)}
                           </span>
@@ -2548,6 +2433,7 @@ export default function App() {
                 onCopyForDiscord={copyForDiscord}
                 onShare={(c) => void shareClip(c)}
                 onPopOut={native ? (c) => void popOutClip(c).catch((e) => pushToast("err", "Could not pop out the clip", String(e))) : undefined}
+                onAddToEditor={(paths) => sendToEditor(paths, { mode: "add" })}
                 onToggleFavorite={toggleFavorite}
                 onChanged={refreshClips}
                 onToast={pushToast}
@@ -2561,11 +2447,14 @@ export default function App() {
         ) : tab === "editor" ? (
           /* ================================================== EDITOR */
           <div className="h-full min-h-[640px]">
-            <EditorPanel
+            <EditorView
               clips={clips}
               incoming={editorIncoming}
               onToast={pushToast}
               onRendered={(c) => setClips((prev) => [c, ...prev.filter((x) => x.path !== c.path)])}
+              onClipsChanged={() => void refreshClips()}
+              shareLimitMb={settings.shareSizeMb}
+              active={tab === "editor"}
             />
           </div>
         ) : tab === "audio" ? (
@@ -2664,43 +2553,23 @@ export default function App() {
             {t.body && (
               <div className="mt-1 break-words text-[11px] text-ink-3">{t.body}</div>
             )}
+            {t.action && (
+              <button
+                type="button"
+                onClick={() => {
+                  t.action!.run();
+                  setToasts((all) => all.filter((x) => x.id !== t.id));
+                }}
+                className="mt-1.5 rounded-md bg-accent px-2 py-0.5 text-[11px] font-semibold text-white hover:bg-accent-hover"
+              >
+                {t.action.label}
+              </button>
+            )}
           </div>
         ))}
       </div>
 
       <FramesPanel open={framesOpen} onClose={() => setFramesOpen(false)} onToast={pushToast} />
-
-      {/* Trimmer Modal */}
-      {activeClip && (
-        <ClipTrimmerModal
-          clip={activeClip}
-          flushMs={activeFlushMs}
-          busy={busy}
-          onClose={() => setActiveClip(null)}
-          onCopy={() => copyClip(activeClip)}
-          onReveal={() => revealClip(activeClip)}
-          onOpenExternal={() => void openExternalClip(activeClip)}
-          onRename={(name) => void renameClip(activeClip, name)}
-          onSnapshot={(png) => void snapshotClip(activeClip, png)}
-          onSplit={(t) => void splitClip(t)}
-          onDiscard={async () => {
-            await deleteClip(activeClip);
-            setActiveClip(null);
-          }}
-          onSaveTrimmed={saveTrimmed}
-          onToggleFavorite={() => toggleFavorite(activeClip)}
-          onUpdateTags={(tags) => updateTags(activeClip, tags)}
-          onShare={(start, end) => shareClip(activeClip, { start, end })}
-          onExport={(segments, crop, mode) => exportEdit(segments, crop, mode, activeClip.path)}
-          onMoveToLibrary={activeClip.folder ? () => moveToLibrary(activeClip) : undefined}
-          onOpenInEditor={() => {
-            sendToEditor([activeClip.path]);
-            setActiveClip(null);
-          }}
-          shareLimitMb={settings.shareSizeMb}
-          shareProgress={shareProgress.get(activeClip.path)}
-        />
-      )}
 
       {/* Clear Library Confirmation Dialog */}
       {confirmClear && (

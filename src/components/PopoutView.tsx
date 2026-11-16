@@ -4,7 +4,7 @@ import { popout, type PopView } from "../lib/audio";
 import type { AppSettings, BarState, ClipMetadata, MonitorInfo } from "../lib/types";
 import { cn } from "../utils/cn";
 import AudioPanel from "./AudioPanel";
-import EditorPanel from "./EditorPanel";
+import EditorView from "../editor/EditorView";
 import StudioPanel from "./StudioPanel";
 
 /**
@@ -100,11 +100,17 @@ function EditorHost({ onToast }: { onToast: (tone: Tone, title: string, body?: s
   }, []);
   return (
     <div className="h-full min-h-[560px]">
-      <EditorPanel
+      <EditorView
         clips={clips}
         incoming={null}
         onToast={onToast}
         onRendered={(c) => setClips((prev) => [c, ...prev.filter((x) => x.path !== c.path)])}
+        onClipsChanged={() =>
+          void lastshot
+            .getClips(false)
+            .then(setClips)
+            .catch(() => undefined)
+        }
       />
     </div>
   );

@@ -32,6 +32,8 @@ interface Props {
   onShare: (clip: ClipMetadata) => void;
   /** Pops the clip out into a see-through frame that keeps playing. */
   onPopOut?: (clip: ClipMetadata) => void;
+  /** Puts clips on the editor's timeline (the open edit). */
+  onAddToEditor?: (paths: string[]) => void;
   onToggleFavorite: (clip: ClipMetadata) => void;
   /** Files changed: read the library again. */
   onChanged: () => void;
@@ -463,7 +465,8 @@ function ClipsExplorer(props: Props) {
       ];
     const clip = t.kind === "clip" ? t.clip : null;
     return [
-      { label: t.kind === "folder" ? "Open" : "Open in clip editor", key: "Enter", run: () => open(t), off: many > 1 },
+      { label: t.kind === "folder" ? "Open" : "Open in editor", key: "Enter", run: () => open(t), off: many > 1 },
+      ...(clip && props.onAddToEditor ? [{ label: many > 1 ? `Add ${selectedClips.length} clips to the edit` : "Add to the edit", run: () => props.onAddToEditor?.(selectedClips.length ? selectedClips.map((c) => c.path) : [clip.path]) }] : []),
       ...(clip
         ? [
             { label: "Play", run: () => props.onPlay(clip), off: many > 1 },
@@ -531,7 +534,7 @@ function ClipsExplorer(props: Props) {
           {...common}
           style={{ position: "absolute", top: (first * perRow + i) * ROW_H, left: 0, right: 0, height: ROW_H, gridTemplateColumns: GRID_TEMPLATE }}
           className={cn(
-            "grid cursor-default select-none items-center gap-3 rounded px-2 text-[11px]",
+            "group grid cursor-default select-none items-center gap-3 rounded px-2 text-[11px]",
             sel ? "bg-accent/20 text-ink" : "text-ink-2 hover:bg-surface-3",
             dropOn === path && "ring-1 ring-accent",
             isCut && "opacity-50",
@@ -547,6 +550,7 @@ function ClipsExplorer(props: Props) {
             )}
             {name}
             {c?.favorite && <span className="text-warn">★</span>}
+            {c && <EditBtn onClick={() => props.onOpen(c)} className="ml-auto opacity-0 group-hover:opacity-100" />}
           </span>
           <span className="truncate text-ink-3">{c ? X.clipGame(c) : e.kind === "folder" ? `${e.count} clip${e.count === 1 ? "" : "s"}` : ""}</span>
           <span className="text-ink-3">{fmtDate(c ? c.created_unix_ms : e.kind === "folder" ? (e.latest?.created_unix_ms ?? 0) : 0)}</span>
@@ -585,6 +589,7 @@ function ClipsExplorer(props: Props) {
               <Thumb clip={e.clip} />
               <span className="absolute bottom-1 right-1 rounded bg-black/70 px-1 font-mono text-[10px] text-white">{formatDuration(e.clip.duration_seconds)}</span>
               {e.clip.favorite && <span className="absolute left-1.5 top-1 text-warn drop-shadow">★</span>}
+              <EditBtn onClick={() => props.onOpen(e.clip)} className="absolute right-1.5 top-1.5 opacity-0 group-hover:opacity-100 focus:opacity-100" />
               {props.shareProgress?.has(e.clip.path) && (
                 <span className="absolute left-1 bottom-1 rounded bg-black/70 px-1 font-mono text-[10px] text-white">
                   {Math.round((props.shareProgress.get(e.clip.path) ?? 0) * 100)}%
@@ -860,3 +865,24 @@ function FolderPicker({ title, saveDir, dirs, onPick, onCancel }: { title: strin
 }
 
 export default memo(ClipsExplorer);
+
+/** "Open in editor" on a clip row / tile (shows on hover). */
+function EditBtn({ onClick, className }: { onClick: () => void; className?: string }) {
+  return (
+    <button
+      type="button"
+      title="Open in editor: trim, cut, crop, draw, export"
+      onClick={(ev) => {
+        ev.stopPropagation();
+        onClick();
+      }}
+      onDoubleClick={(ev) => ev.stopPropagation()}
+      className={cn("inline-flex h-5 shrink-0 items-center gap-1 rounded bg-black/70 px-1.5 text-[10px] font-semibold text-white hover:bg-accent", className)}
+    >
+      <svg viewBox="0 0 16 16" className="h-3 w-3 fill-none stroke-current" strokeWidth="1.6" strokeLinecap="round">
+        <path d="M2 14l2.5-.5 8-8-2-2-8 8zM9.5 4.5l2 2" />
+      </svg>
+      Edit
+    </button>
+  );
+}

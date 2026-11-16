@@ -6,6 +6,8 @@
 
 pub mod audio_guard;
 pub mod audio_routing;
+// Lastshot Pro: virtual audio cables (the `pro-cables` feature).
+#[cfg(feature = "pro-cables")]
 pub mod cables;
 pub mod clipmeta;
 pub mod files;
@@ -102,7 +104,8 @@ pub fn run() {
             // are set again whenever the app starts.
             audio_routing::start_watcher(&handle);
 
-            // Audio tab → Cables: Lastshot's own virtual cables.
+            // Audio tab → Cables (Pro): Lastshot's own virtual cables.
+            #[cfg(feature = "pro-cables")]
             cables::init(&handle);
             // Audio tab → Devices: the Audio guard (idle until turned on).
             audio_guard::init(&handle);
@@ -278,7 +281,7 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(invoke_handler(tauri::generate_handler![
             commands::start_replay_buffer,
             commands::stop_replay_buffer,
             commands::get_engine_stats,
@@ -366,17 +369,6 @@ pub fn run() {
             popout::popout_open,
             popout::popout_close,
             popout::popout_list,
-            cables::cables_status,
-            cables::cables_enable,
-            cables::cables_add,
-            cables::cables_remove,
-            cables::cables_rename,
-            cables::cables_set_routes,
-            cables::cables_set_jitter,
-            cables::cables_levels,
-            cables::cables_list_inputs,
-            cables::cables_list_outputs,
-            cables::cables_install_support,
             audio_guard::guard_status,
             audio_guard::guard_set_settings,
             audio_guard::guard_set_default,
@@ -398,7 +390,7 @@ pub fn run() {
             audio_guard::guard_snapshot_rename,
             audio_guard::guard_snapshot_export,
             audio_guard::guard_snapshot_import,
-        ])
+        ]))
         .build(tauri::generate_context!())
         .expect("error while building Lastshot")
         .run(|app, event| {
@@ -408,11 +400,33 @@ pub fn run() {
                 }
             }
             if let tauri::RunEvent::Exit = event {
-                cables::shutdown(app);
-                audio_guard::shutdown(app);
-                audio_routing::voicemeeter::shutdown();
+                quit_cleanup(app);
             }
         });
+}
+
+/// The app's commands, plus the Pro cables' commands when built with them.
+fn invoke_handler(
+    free: impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static,
+) -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
+    #[cfg(feature = "pro-cables")]
+    let pro = cables::invoke_handler();
+    move |invoke| {
+        #[cfg(feature = "pro-cables")]
+        if cables::handles(invoke.message.command()) {
+            return pro(invoke);
+        }
+        free(invoke)
+    }
+}
+
+/// Before Lastshot quits: detach the cables (Pro), undo the Audio guard's
+/// temporary mutes, release Voicemeeter.
+pub(crate) fn quit_cleanup(app: &tauri::AppHandle) {
+    #[cfg(feature = "pro-cables")]
+    cables::shutdown(app);
+    audio_guard::shutdown(app);
+    audio_routing::voicemeeter::shutdown();
 }
 
 /// Adds `dir` to the `asset:` protocol scope so the webview can stream clips
@@ -551,9 +565,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 if let Some(state) = app.try_state::<AppState>() {
                     state.engine.stop();
                 }
-                cables::shutdown(app);
-                audio_guard::shutdown(app);
-                audio_routing::voicemeeter::shutdown();
+                quit_cleanup(app);
                 std::process::exit(0);
             }
             _ => {}

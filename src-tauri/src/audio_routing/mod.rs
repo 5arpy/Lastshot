@@ -6,6 +6,7 @@
 //! it keeps working with every Lastshot window closed.
 
 pub mod app_output;
+pub mod endpoints;
 pub mod voicemeeter;
 
 use std::collections::HashSet;

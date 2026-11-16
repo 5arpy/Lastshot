@@ -28,7 +28,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::audio_routing::app_output;
-use crate::cables::devices;
+use crate::audio_routing::endpoints as devices;
 use crate::commands::AppState;
 pub use model::*;
 use store::{now_ms, SnapshotMeta, Store};
@@ -137,8 +137,24 @@ fn name_of(id: &str) -> String {
         .unwrap_or_else(|| if id.is_empty() { "nothing".into() } else { "a device that is not connected".into() })
 }
 
+/// What the guard needs from Lastshot's virtual cables (Pro). A build
+/// without cables never sets it: then there are no cables.
+pub trait CableHooks: Send + Sync {
+    /// Endpoint ids of every cable (both sides).
+    fn endpoint_ids(&self) -> Vec<String>;
+    /// The cable settings were replaced (a restored snapshot): apply them.
+    fn reload(&self, app: &AppHandle);
+}
+
+static CABLE_HOOKS: std::sync::OnceLock<Box<dyn CableHooks>> = std::sync::OnceLock::new();
+
+/// Called once by the cables module when it starts.
+pub fn set_cable_hooks(h: Box<dyn CableHooks>) {
+    let _ = CABLE_HOOKS.set(h);
+}
+
 fn cable_ids() -> HashSet<String> {
-    devices::cable_endpoints().into_iter().map(|e| e.id).collect()
+    CABLE_HOOKS.get().map(|h| h.endpoint_ids()).unwrap_or_default().into_iter().collect()
 }
 
 /// The output the user chose for `exe` ("Send to").
@@ -221,7 +237,7 @@ fn live_snapshot(app: &AppHandle, reason: &str, patch: Option<(Flow, Role, &str)
         reason: reason.to_string(),
         defaults,
         apps,
-        cables: serde_json::to_value(&s.cables).ok(),
+        cables: (!s.cables.is_null()).then(|| s.cables.clone()),
         guard: Some(g),
     }
 }
@@ -1372,7 +1388,7 @@ fn restore_snapshot(app: &AppHandle, id: &str) -> Result<Vec<Change>, String> {
             })
             .collect();
         s.audio_guard.tidy();
-        let cables_changed = to.cables.as_ref().and_then(|v| serde_json::from_value::<crate::cables::CableSettings>(v.clone()).ok()).filter(|c| *c != s.cables);
+        let cables_changed = to.cables.clone().filter(|c| *c != s.cables);
         if let Some(c) = &cables_changed {
             s.cables = c.clone();
         }
@@ -1380,7 +1396,11 @@ fn restore_snapshot(app: &AppHandle, id: &str) -> Result<Vec<Change>, String> {
         *state.settings.write() = s;
         if cables_changed.is_some() {
             let h = app.clone();
-            std::thread::spawn(move || crate::cables::reload(&h));
+            std::thread::spawn(move || {
+                if let Some(c) = CABLE_HOOKS.get() {
+                    c.reload(&h);
+                }
+            });
         }
     }
     // Defaults.

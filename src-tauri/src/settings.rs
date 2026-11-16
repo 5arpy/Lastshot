@@ -175,9 +175,10 @@ pub struct Settings {
     /// Where each popped-out tab's window was last (logical pixels).
     #[serde(default)]
     pub popout_places: Vec<WindowPlace>,
-    /// Audio tab → Cables.
-    #[serde(default)]
-    pub cables: crate::cables::CableSettings,
+    /// Audio tab → Cables (Pro). Kept as plain JSON so a build without
+    /// cables keeps them untouched; the cables module reads and writes it.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub cables: serde_json::Value,
     /// Audio tab → Devices: the Audio guard (off until turned on).
     #[serde(default)]
     pub audio_guard: crate::audio_guard::GuardSettings,

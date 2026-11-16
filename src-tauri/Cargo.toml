@@ -124,6 +124,9 @@ webview2-com = "0.38"
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 headless-sim = []
+# Lastshot Pro: virtual audio cables (src/cables/, CablesSection.tsx).
+# The free build leaves this off and compiles no cable code.
+pro-cables = []
 
 [profile.dev]
 incremental = true

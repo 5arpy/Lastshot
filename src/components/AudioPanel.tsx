@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
+/// <reference types="vite/client" />
+import { useCallback, useEffect, useRef, useState, type ComponentType, type KeyboardEvent, type PointerEvent } from "react";
 import {
   audio,
   dbToPos,
@@ -11,8 +12,6 @@ import {
   type VmStatus,
 } from "../lib/audio";
 import { lastshot } from "../lib/bridge";
-import { cableOutputIds, type CablesView } from "../lib/cables";
-import CablesSection from "./CablesSection";
 import DevicesSection from "./DevicesSection";
 import { cn } from "../utils/cn";
 
@@ -23,6 +22,15 @@ import { cn } from "../utils/cn";
  */
 
 type Toast = (tone: "ok" | "err" | "warn" | "info", title: string, body?: string) => void;
+
+/**
+ * Lastshot Pro: the Cables section, when this build has it. The free build
+ * has no CablesSection.tsx, so the glob finds nothing and no slot is shown.
+ */
+type CablesSlot = ComponentType<{ live: boolean; onToast: Toast; onCableIds?: (ids: Set<string>) => void }>;
+const CablesSection = (Object.values(import.meta.glob("./CablesSection.tsx", { eager: true })) as { default: CablesSlot }[])[0]
+  ?.default;
+const NO_CABLES = new Set<string>();
 
 const GAIN_MIN = -60;
 const GAIN_MAX = 12;
@@ -83,7 +91,8 @@ export default function AudioPanel({ active = true, onToast }: { active?: boolea
   const [devices, setDevices] = useState<RenderDevice[]>([]);
   const [rules, setRules] = useState<AppOutputRule[]>([]);
   const [starting, setStarting] = useState(false);
-  const [cablesView, setCablesView] = useState<CablesView | null>(null);
+  /** Outputs that are Lastshot cables (Pro), for the "Send to" list. */
+  const [cableIds, setCableIds] = useState<Set<string>>(NO_CABLES);
   const shown = useWindowShown();
   const live = active && shown;
   /** No status refresh over a control that is being moved. */
@@ -342,7 +351,7 @@ export default function AudioPanel({ active = true, onToast }: { active?: boolea
 
       <DevicesSection live={live} onToast={onToast} />
 
-      <CablesSection live={live} onToast={onToast} onView={setCablesView} />
+      {CablesSection && <CablesSection live={live} onToast={onToast} onCableIds={setCableIds} />}
 
       {/* Apps */}
       <section className="panel rounded-xl p-5">
@@ -366,7 +375,7 @@ export default function AudioPanel({ active = true, onToast }: { active?: boolea
                 </div>
                 <label className="flex shrink-0 items-center gap-2 text-[12px] text-ink-3">
                   Send to
-                  <DeviceSelect devices={devices} cableIds={cableOutputIds(cablesView)} value={a.output} onChange={(id) => void sendApp(a, id)} />
+                  <DeviceSelect devices={devices} cableIds={cableIds} value={a.output} onChange={(id) => void sendApp(a, id)} />
                 </label>
               </div>
             ))}

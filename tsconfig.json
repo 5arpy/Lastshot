@@ -19,7 +19,8 @@
     "baseUrl": ".",
     "paths": {
       "@/*": ["src/*"],
-      "lastshot-pro": ["src/popout/no-pro.ts"]
+      "lastshot-pro": ["src/popout/no-pro.ts"],
+      "lastshot-cables": ["src/lib/no-cables.ts"]
     },
 
     /* Linting */

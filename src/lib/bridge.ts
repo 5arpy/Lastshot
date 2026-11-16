@@ -1156,12 +1156,6 @@ export const lastshot = {
     ];
   },
 
-  async setSaveHotkey(accelerator: string): Promise<string> {
-    if (isTauri()) return invoke<string>("set_save_hotkey", { accelerator });
-    browserSettings = { ...browserSettings, hotkeySave: accelerator };
-    return accelerator;
-  },
-
   async minimize(): Promise<void> {
     if (isTauri()) await tauri().window?.getCurrentWindow().minimize();
   },

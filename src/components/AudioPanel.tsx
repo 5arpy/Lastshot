@@ -1,5 +1,6 @@
 /// <reference types="vite/client" />
 import { useCallback, useEffect, useRef, useState, type ComponentType, type KeyboardEvent, type PointerEvent } from "react";
+import CablesModule from "lastshot-cables";
 import {
   audio,
   dbToPos,
@@ -24,12 +25,11 @@ import { cn } from "../utils/cn";
 type Toast = (tone: "ok" | "err" | "warn" | "info", title: string, body?: string) => void;
 
 /**
- * Lastshot Pro: the Cables section, when this build has it. The free build
- * has no CablesSection.tsx, so the glob finds nothing and no slot is shown.
+ * Lastshot Pro: the Cables section, when this build has it (the
+ * `lastshot-cables` alias, VITE_PRO_CABLES=1). The free build gets null.
  */
 type CablesSlot = ComponentType<{ live: boolean; onToast: Toast; onCableIds?: (ids: Set<string>) => void }>;
-const CablesSection = (Object.values(import.meta.glob("./CablesSection.tsx", { eager: true })) as { default: CablesSlot }[])[0]
-  ?.default;
+const CablesSection = CablesModule as CablesSlot | null;
 const NO_CABLES = new Set<string>();
 
 const GAIN_MIN = -60;

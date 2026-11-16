@@ -8,6 +8,7 @@ import {
   filterString,
   fitScale,
   fitView,
+  followStage,
   flipScreenH,
   flipScreenV,
   frameIndex,
@@ -242,5 +243,48 @@ describe("measure and crop", () => {
   });
   it("clamps a crop inside the picture", () => {
     expect(clampCrop({ x: 90, y: -5, w: -40, h: 500 }, { w: 100, h: 100 })).toEqual({ x: 50, y: 0, w: 40, h: 100 });
+  });
+});
+
+describe("following a resized stage", () => {
+  const pic = { w: 1920, h: 1080 };
+  it("keeps a fitted picture fitted at every aspect ratio", () => {
+    for (const content of [pic, { w: 1080, h: 1920 }, { w: 2560, h: 1080 }, { w: 64, h: 64 }, { w: 7680, h: 4320 }]) {
+      const from = { w: 640, h: 360 };
+      const v = fitView(content, from);
+      for (const to of [{ w: 1280, h: 720 }, { w: 200, h: 113 }, { w: 900, h: 300 }, { w: 300, h: 900 }]) {
+        const f = followStage(v, from, to, content, "scale");
+        const fit = fitView(content, to);
+        close(f.scale, fit.scale);
+        close(f.x, fit.x);
+        close(f.y, fit.y);
+      }
+    }
+  });
+  it("scales a zoomed view with the stage and keeps the centre point", () => {
+    const from = { w: 640, h: 360 };
+    const v = { ...IDENTITY, scale: 2, x: 100, y: 50 };
+    const to = { w: 1280, h: 720 };
+    const f = followStage(v, from, to, pic, "scale");
+    close(f.scale, 4);
+    // The picture point at the old centre is at the new centre.
+    const a = toContent(v, pic, { x: 320, y: 180 });
+    const b = toContent(f, pic, { x: 640, y: 360 });
+    close(a.x, b.x);
+    close(a.y, b.y);
+  });
+  it("keeps the zoom in centre mode, and survives a DPI change (CSS stage shrinks)", () => {
+    const v = { ...IDENTITY, scale: 1, x: 300, y: 200 };
+    const c = followStage(v, { w: 600, h: 400 }, { w: 800, h: 400 }, pic, "centre");
+    expect(c.scale).toBe(1);
+    expect(c.x).toBe(400);
+    // 100 % → 150 %: the same physical window is 2/3 the CSS size; the picture keeps its share.
+    const d = followStage({ ...v, rot: 90 }, { w: 600, h: 400 }, { w: 400, h: 266.6667 }, pic, "scale");
+    close(d.scale, 2 / 3, 1e-3);
+    expect(d.rot).toBe(90);
+  });
+  it("ignores empty stages", () => {
+    const v = { ...IDENTITY, scale: 3 };
+    expect(followStage(v, { w: 0, h: 0 }, { w: 10, h: 10 }, pic)).toBe(v);
   });
 });

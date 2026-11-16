@@ -22,6 +22,7 @@ import {
   clampPan,
   fillView,
   fitView,
+  followStage,
   flipScreenH,
   flipScreenV,
   frameIndex,
@@ -46,6 +47,7 @@ import {
   type Pt,
   type Rect,
   type Size,
+  type StageFollow,
   type View,
 } from "./math";
 import {
@@ -67,6 +69,8 @@ import {
 import { copyPng, copyText, savePng, stampName } from "./io";
 import { Btn, Chip, I, Icon, Pop, Sep, Slider } from "./ui";
 import { cn } from "../utils/cn";
+import { onShortcutsChange, splitKeys, effectiveKeys, type Shortcut } from "../lib/shortcuts";
+import { useShortcuts } from "../lib/useShortcuts";
 
 export interface ViewerSettings {
   adjust: Adjust;
@@ -100,6 +104,20 @@ export interface ViewerApi {
   saveFrame: () => Promise<string | null>;
   redraw: () => void;
   stage: () => Size;
+  /** Turns by degrees (keeps a fitted picture fitted). */
+  turn: (deg: number) => void;
+  /** Zooms around the centre. */
+  zoomBy: (f: number) => void;
+  zoom100: () => void;
+  fill: () => void;
+  mirror: () => void;
+  flipV: () => void;
+  /** Resets zoom, turn, flip, colour and crop. */
+  resetAll: () => void;
+  undo: () => boolean;
+  redo: () => boolean;
+  /** Whether the view follows the stage as fitted (not zoomed or panned by the user). */
+  fitted: () => boolean;
 }
 
 export interface ContentPointer {
@@ -121,7 +139,14 @@ export interface ViewerProps {
   homeView?: (content: Size, stage: Size, dpr: number) => View;
   /** Start here instead of the home view (a remembered view). */
   initialView?: View | null;
-  onViewChange?: (v: View, stage: Size, content: Size) => void;
+  /** The stage `initialView` was made for: the view is scaled to the stage it gets now. */
+  initialStage?: Size | null;
+  /** `initialView` was the fitted placement: fit again (keeping its turn and flips). */
+  initialFitted?: boolean;
+  /** How a view the user zoomed or panned follows a stage that changes size (default "centre"). */
+  follow?: StageFollow;
+  /** `fitted`: the view is the fitted placement (it follows the stage as such). */
+  onViewChange?: (v: View, stage: Size, content: Size, fitted: boolean) => void;
   settings?: ViewerSettings;
   onSettingsChange?: (s: ViewerSettings) => void;
   /** Left-drag pans (else only Space+drag / middle button). Default true. */
@@ -135,6 +160,17 @@ export interface ViewerProps {
   /** Show the tool bar ("auto": only while the mouse is over the viewer). */
   bar?: "show" | "auto" | "none";
   barPlace?: "top" | "bottom";
+  /**
+   * "outside" (default): the bar is a row above or below the picture and the
+   * picture gets the rest; tools never cover it. "overlay": the bar floats
+   * over the picture (only where the picture must fill the whole area, e.g.
+   * the snip overlay that lies exactly over the screen).
+   */
+  barLayout?: "outside" | "overlay";
+  /** Space (tapped, not held for panning) plays / pauses the video. */
+  spacePlays?: boolean;
+  /** Ctrl+Z / Ctrl+Y undo turns, flips, crop and colour (default true). */
+  undo?: boolean;
   /** Show the video row (speed, frame step, loop, onion skin). */
   videoBar?: boolean;
   /** Extra buttons at the end of the bar. */
@@ -175,6 +211,10 @@ export default function Viewer(props: ViewerProps) {
     videoBar = !!props.video,
     keys = true,
     exportKeys = true,
+    barLayout = "outside",
+    follow = "centre",
+    spacePlays = false,
+    undo: undoOn = true,
   } = props;
 
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -195,15 +235,38 @@ export default function Viewer(props: ViewerProps) {
   const settings = props.settings ?? ownSettings;
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
-  const patch = useCallback(
-    (p: Partial<ViewerSettings>) => {
-      const next = { ...settingsRef.current, ...p };
+  const applySettings = useCallback(
+    (next: ViewerSettings) => {
       settingsRef.current = next;
       if (props.onSettingsChange) props.onSettingsChange(next);
       else setOwnSettings(next);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [props.onSettingsChange],
+  );
+  // Undo / redo of the things a user sets (colour, grid, crop, turn, flips;
+  // not zoom and pan). Slider drags count as one step.
+  type Snap = { s: ViewerSettings; rot: number; flipH: boolean; flipV: boolean };
+  const undoStack = useRef<Snap[]>([]);
+  const redoStack = useRef<Snap[]>([]);
+  const lastRemember = useRef(0);
+  const viewForSnap = useRef<View | null>(null);
+  const remember = useCallback((coalesce = false) => {
+    const now = performance.now();
+    const merge = coalesce && now - lastRemember.current < 700;
+    lastRemember.current = now;
+    if (merge) return;
+    const v = viewForSnap.current;
+    undoStack.current.push({ s: settingsRef.current, rot: v?.rot ?? 0, flipH: !!v?.flipH, flipV: !!v?.flipV });
+    if (undoStack.current.length > 100) undoStack.current.shift();
+    redoStack.current = [];
+  }, []);
+  const patch = useCallback(
+    (p: Partial<ViewerSettings>) => {
+      remember(true);
+      applySettings({ ...settingsRef.current, ...p });
+    },
+    [applySettings, remember],
   );
 
   const content = useMemo(() => contentSize(natural, settings.crop), [natural, settings.crop]);
@@ -216,10 +279,12 @@ export default function Viewer(props: ViewerProps) {
   );
   const [view, setViewState] = useState<View>(IDENTITY);
   const viewRef = useRef<View>(IDENTITY);
+  viewForSnap.current = viewRef.current;
   const placed = useRef(false);
   const setView = useCallback(
     (v: View) => {
       viewRef.current = v;
+      viewForSnap.current = v;
       setViewState(v);
     },
     [],
@@ -280,25 +345,40 @@ export default function Viewer(props: ViewerProps) {
     };
   }, [source, video, version]);
 
-  // First placement, and keeping the picture placed while the stage resizes
-  // (until the user zooms or pans).
+  // First placement, and keeping the picture placed while the stage resizes:
+  // a fitted picture stays fitted, a zoomed or panned one follows the stage
+  // as `follow` says (frames: it scales with the window).
   const userMoved = useRef(false);
   const lastStage = useRef<Size>({ w: 0, h: 0 });
+  /** The fitted placement, keeping the view's turn and flips. */
+  const placeHome = useCallback(
+    (c: Size, st: Size, v: View) => {
+      if (props.homeView) {
+        const h = home(c, st);
+        return { ...h, rot: v.rot, flipH: v.flipH, flipV: v.flipV };
+      }
+      return fitView(c, st, v);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [props.homeView, home],
+  );
   useEffect(() => {
     if (stage.w <= 0 || stage.h <= 0 || content.w <= 0 || content.h <= 0) return;
     if (!placed.current) {
       placed.current = true;
-      if (props.initialView) {
+      const iv = props.initialView;
+      if (iv && props.initialFitted) {
+        userMoved.current = false;
+        setView(placeHome(content, stage, iv));
+      } else if (iv) {
         userMoved.current = true;
-        setView(props.initialView);
+        const from = props.initialStage;
+        setView(from && from.w > 0 && from.h > 0 ? followStage(iv, from, stage, content, follow) : iv);
       } else setView(home(content, stage));
     } else if (!userMoved.current) {
-      setView({ ...home(content, stage), rot: viewRef.current.rot, flipH: viewRef.current.flipH, flipV: viewRef.current.flipV, scale: home(content, stage).scale });
-    } else if (lastStage.current.w > 0) {
-      // Keep the same picture point at the centre.
-      const dx = (stage.w - lastStage.current.w) / 2;
-      const dy = (stage.h - lastStage.current.h) / 2;
-      if (dx || dy) setView({ ...viewRef.current, x: viewRef.current.x + dx, y: viewRef.current.y + dy });
+      setView(placeHome(content, stage, viewRef.current));
+    } else if (lastStage.current.w > 0 && (lastStage.current.w !== stage.w || lastStage.current.h !== stage.h)) {
+      setView(followStage(viewRef.current, lastStage.current, stage, content, follow));
     }
     lastStage.current = stage;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -314,7 +394,7 @@ export default function Viewer(props: ViewerProps) {
   );
 
   useEffect(() => {
-    props.onViewChange?.(view, stage, content);
+    props.onViewChange?.(view, stage, content, !userMoved.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, stage, content]);
 
@@ -516,18 +596,50 @@ export default function Viewer(props: ViewerProps) {
   const zoom100 = useCallback(() => move(actualView(stage, viewRef.current, dpr)), [stage, dpr, move]);
   const fill = useCallback(() => move(fillView(content, stage, viewRef.current)), [content, stage, move]);
   const resetAll = useCallback(() => {
+    remember();
     userMoved.current = false;
     setView(home(content, stage));
-    patch({ adjust: NO_ADJUST, mono: false, crop: null });
+    applySettings({ ...settingsRef.current, adjust: NO_ADJUST, mono: false, crop: null });
     setCompare("off");
-  }, [content, stage, home, patch, setView]);
+  }, [content, stage, home, applySettings, remember, setView]);
   const centre = (): Pt => ({ x: stage.w / 2, y: stage.h / 2 });
   const zoomBy = (f: number, at?: Pt) => move(zoomAt(viewRef.current, at ?? centre(), f, dpr, fitView(content, stage).scale / 4));
-  const turn = (deg: number) => {
-    const v = rotateBy(viewRef.current, deg);
-    // Keep it fitted when it was.
-    if (!userMoved.current) setView(fitView(content, stage, v));
+  /** A turn or flip: a fitted picture stays fitted. */
+  const reorient = (v: View) => {
+    if (!userMoved.current) setView(placeHome(content, stage, v));
     else move(v);
+  };
+  const turn = (deg: number) => {
+    remember();
+    reorient(rotateBy(viewRef.current, deg));
+  };
+  const mirror = () => {
+    remember();
+    setView(flipScreenH(viewRef.current));
+  };
+  const flipVert = () => {
+    remember();
+    setView(flipScreenV(viewRef.current));
+  };
+  const restore = (from: Snap[], to: Snap[]): boolean => {
+    const sn = from.pop();
+    if (!sn) return false;
+    const v = viewRef.current;
+    to.push({ s: settingsRef.current, rot: v.rot, flipH: v.flipH, flipV: v.flipV });
+    applySettings(sn.s);
+    reorient({ ...v, rot: sn.rot, flipH: sn.flipH, flipV: sn.flipV });
+    lastRemember.current = 0;
+    return true;
+  };
+  const undoStep = () => {
+    const ok = restore(undoStack.current, redoStack.current);
+    say(ok ? "Undone" : "Nothing to undo");
+    return ok;
+  };
+  const redoStep = () => {
+    const ok = restore(redoStack.current, undoStack.current);
+    say(ok ? "Redone" : "Nothing to redo");
+    return ok;
   };
 
   const frame = useCallback((): HTMLCanvasElement | null => {
@@ -580,8 +692,19 @@ export default function Viewer(props: ViewerProps) {
       saveFrame,
       redraw,
       stage: () => stage,
+      turn,
+      zoomBy: (f: number) => zoomBy(f),
+      zoom100,
+      fill,
+      mirror,
+      flipV: flipVert,
+      resetAll,
+      undo: undoStep,
+      redo: redoStep,
+      fitted: () => !userMoved.current,
     }),
-    [fit, move, frame, copyFrame, saveFrame, redraw, stage],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [fit, move, frame, copyFrame, saveFrame, redraw, stage, content, dpr, zoom100, fill, resetAll],
   );
 
   // Video helpers
@@ -655,6 +778,7 @@ export default function Viewer(props: ViewerProps) {
     if (e.button === 1) e.preventDefault();
     const p = stagePt(e);
     const panning = e.button === 1 || (e.button === 0 && spaceRef.current);
+    if (panning) spaceTap.current = false;
     (e.currentTarget as Element).setPointerCapture(e.pointerId);
     if (panning) {
       dragRef.current = { kind: "pan", x0: e.clientX, y0: e.clientY, v0: viewRef.current, moved: false, tap: false };
@@ -778,106 +902,115 @@ export default function Viewer(props: ViewerProps) {
   }, []);
 
   // ---------------------------------------------------------------- keys
-  const keyRef = useRef<(e: KeyboardEvent) => void>(() => undefined);
-  keyRef.current = (e: KeyboardEvent) => {
-    if (isTyping(e.target) || e.defaultPrevented) return;
-    const k = e.key;
-    const lower = k.toLowerCase();
-    const plain = !e.ctrlKey && !e.altKey && !e.metaKey;
-    const done = () => {
-      e.preventDefault();
-      e.stopPropagation();
-    };
-    if (e.ctrlKey && !e.altKey && k === "0") return done(), resetAll();
-    if (exportKeys && e.ctrlKey && !e.shiftKey && lower === "c" && !window.getSelection()?.toString()) return done(), void copyFrame();
-    if (exportKeys && e.ctrlKey && !e.shiftKey && lower === "s") return done(), void saveFrame();
-    if (compare !== "off" && e.ctrlKey && lower === "v") return; // paste handler
-    if (!plain) return;
-    switch (k) {
-      case "0":
-        return done(), fit();
-      case "1":
-        return done(), zoom100();
-      case "2":
-        return done(), fill();
-      case "+":
-      case "=":
-        return done(), zoomBy(1.5);
-      case "-":
-      case "_":
-        return done(), zoomBy(1 / 1.5);
-      case "[":
-        return done(), turn(-90);
-      case "]":
-        return done(), turn(90);
-      case "{":
-        return done(), turn(-15);
-      case "}":
-        return done(), turn(15);
-    }
-    switch (lower) {
-      case "h":
-        done();
-        return setView(e.shiftKey ? flipScreenV(viewRef.current) : flipScreenH(viewRef.current));
-      case "m":
-        return done(), patch({ mono: !settingsRef.current.mono });
-      case "g": {
-        done();
-        const order: GridSpec["kind"][] = ["off", "thirds", "custom"];
-        const cur = settingsRef.current.grid;
-        return patch({ grid: { ...cur, kind: order[(order.indexOf(cur.kind) + 1) % 3] } });
-      }
-      case "c":
-        if (e.shiftKey) return done(), setCropping((c) => !c);
-        done();
+  // On the app's shortcut registry (scope "viewer"): rebindable in
+  // Settings, listed in the cheat sheet, never while typing.
+  const toggleVideo = () => {
+    if (!video) return;
+    if (video.paused) void video.play().catch(() => undefined);
+    else video.pause();
+  };
+  const cycleGrid = () => {
+    const order: GridSpec["kind"][] = ["off", "thirds", "custom"];
+    const cur = settingsRef.current.grid;
+    patch({ grid: { ...cur, kind: order[(order.indexOf(cur.kind) + 1) % 3] } });
+  };
+  const cycleCompare = () => {
+    if (!compareWith) return takeCompareFromFrame();
+    const order: CompareMode[] = ["off", "wipe", "diff", "side"];
+    setCompare(order[(order.indexOf(compare) + 1) % order.length]);
+  };
+  const hasVideo = () => !!video;
+  const shortcuts: Shortcut[] = [
+    { id: "fit", keys: "0", label: "Fit the whole picture", group: "Zoom", run: fit },
+    { id: "actual", keys: "1", label: "100 % (one picture pixel per screen pixel)", group: "Zoom", run: zoom100 },
+    { id: "fill", keys: "2", label: "Fill the view", group: "Zoom", run: fill },
+    { id: "zoom-in", keys: "+ | =", label: "Zoom in", group: "Zoom", run: () => zoomBy(1.5) },
+    { id: "zoom-out", keys: "- | _", label: "Zoom out", group: "Zoom", run: () => zoomBy(1 / 1.5) },
+    { id: "turn-right", keys: "R | ]", label: "Turn right 90°", group: "Turn and mirror", run: () => turn(90) },
+    { id: "turn-left", keys: "Shift+R | [", label: "Turn left 90°", group: "Turn and mirror", run: () => turn(-90) },
+    { id: "turn-right-15", keys: "}", label: "Turn right 15°", group: "Turn and mirror", run: () => turn(15) },
+    { id: "turn-left-15", keys: "{", label: "Turn left 15°", group: "Turn and mirror", run: () => turn(-15) },
+    { id: "mirror", keys: "H", label: "Mirror left↔right", group: "Turn and mirror", run: mirror },
+    { id: "flip", keys: "Shift+H", label: "Flip upside down", group: "Turn and mirror", run: flipVert },
+    { id: "value", keys: "M", label: "Value check (grey)", group: "Inspect", run: () => patch({ mono: !settingsRef.current.mono }) },
+    { id: "grid", keys: "G", label: "Grid: thirds · custom · off", group: "Inspect", run: cycleGrid },
+    {
+      id: "picker",
+      keys: "C",
+      label: "Colour picker",
+      group: "Inspect",
+      run: () => {
         setInspector((v) => !v);
-        return setMeasuring(false);
-      case "d":
-        done();
+        setMeasuring(false);
+      },
+    },
+    { id: "crop", keys: "Shift+C", label: "Crop", group: "Inspect", run: () => setCropping((c) => !c) },
+    {
+      id: "measure",
+      keys: "D",
+      label: "Measure",
+      group: "Inspect",
+      run: () => {
         setMeasuring((v) => !v);
         setMeasureLine(null);
-        return setInspector(false);
-      case "e":
-        return done(), setPop((p) => (p === "colour" ? null : "colour"));
-      case "w": {
-        done();
-        if (!compareWith) return takeCompareFromFrame();
-        const order: CompareMode[] = ["off", "wipe", "diff", "side"];
-        return setCompare(order[(order.indexOf(compare) + 1) % order.length]);
-      }
-    }
-    if (!video) return;
-    switch (lower) {
-      case ",":
-      case "<":
-        return done(), step(e.shiftKey ? -10 : -1);
-      case ".":
-      case ">":
-        return done(), step(e.shiftKey ? 10 : 1);
-      case "j":
-        return done(), setSpeed(nextSpeed(settingsRef.current.speed, -1));
-      case "k":
-        return done(), setSpeed(1);
-      case "l":
-        if (e.shiftKey) return done(), patch({ loopAll: !settingsRef.current.loopAll });
-        return done(), setSpeed(nextSpeed(settingsRef.current.speed, 1));
-      case "a":
-        if (e.shiftKey) return done(), patch({ ab: { a: null, b: null } });
-        return done(), markA();
-      case "b":
-        return done(), markB();
-      case "n":
-        return done(), patch({ onion: ((settingsRef.current.onion + 1) % 3) as 0 | 1 | 2 });
-    }
+        setInspector(false);
+      },
+    },
+    { id: "compare", keys: "W", label: "Compare: set B, then cycle wipe · difference · side by side", group: "Inspect", run: cycleCompare },
+    { id: "colour", keys: "E", label: "Colour adjustments", group: "Inspect", run: () => setPop((p) => (p === "colour" ? null : "colour")) },
+    { id: "copy", keys: "Ctrl+C", label: "Copy this frame as a picture", group: "Picture", run: () => void copyFrame(), when: () => exportKeys && !window.getSelection()?.toString() },
+    { id: "save", keys: "Ctrl+S", label: "Save this frame as PNG", group: "Picture", run: () => void saveFrame(), when: () => exportKeys },
+    { id: "reset", keys: "Ctrl+0", label: "Reset zoom, turn, flip, colour and crop", group: "Picture", run: resetAll },
+    { id: "undo", keys: "Ctrl+Z", label: "Undo (turn, flip, crop, colour, grid)", group: "Picture", run: () => void undoStep(), when: () => undoOn && undoStack.current.length > 0 },
+    { id: "redo", keys: "Ctrl+Y | Ctrl+Shift+Z", label: "Redo", group: "Picture", run: () => void redoStep(), when: () => undoOn && redoStack.current.length > 0 },
+    { id: "play", keys: "K", label: "Play / pause at normal speed", group: "Video", when: hasVideo, run: () => (setSpeed(1), toggleVideo()) },
+    { id: "slower", keys: "J", label: "Slower", group: "Video", when: hasVideo, run: () => setSpeed(nextSpeed(settingsRef.current.speed, -1)) },
+    { id: "faster", keys: "L", label: "Faster", group: "Video", when: hasVideo, run: () => setSpeed(nextSpeed(settingsRef.current.speed, 1)) },
+    { id: "frame-back", keys: ",", label: "One frame back", group: "Video", when: hasVideo, run: () => step(-1) },
+    { id: "frame-on", keys: ".", label: "One frame on", group: "Video", when: hasVideo, run: () => step(1) },
+    { id: "frame-back-10", keys: "<", label: "10 frames back", group: "Video", when: hasVideo, run: () => step(-10) },
+    { id: "frame-on-10", keys: ">", label: "10 frames on", group: "Video", when: hasVideo, run: () => step(10) },
+    { id: "loop", keys: "Shift+L", label: "Loop the whole clip", group: "Video", when: hasVideo, run: () => patch({ loopAll: !settingsRef.current.loopAll }) },
+    { id: "loop-a", keys: "A", label: "Loop from here (A)", group: "Video", when: hasVideo, run: () => void markA() },
+    { id: "loop-b", keys: "B", label: "Loop to here (B)", group: "Video", when: hasVideo, run: () => void markB() },
+    { id: "loop-clear", keys: "Shift+A", label: "Clear the A–B loop", group: "Video", when: hasVideo, run: () => patch({ ab: { a: null, b: null } }) },
+    { id: "onion", keys: "N", label: "Onion skin: off · 1 · 2 frames", group: "Video", when: hasVideo, run: () => patch({ onion: ((settingsRef.current.onion + 1) % 3) as 0 | 1 | 2 }) },
+  ];
+  useShortcuts("viewer", shortcuts, keys);
+  // Tooltips follow rebinding.
+  const [, setKeysVersion] = useState(0);
+  useEffect(() => onShortcutsChange(() => setKeysVersion((n) => n + 1)), []);
+  const tip = (id: string, label: string) => {
+    const sc = shortcuts.find((x) => x.id === id);
+    const first = sc && keys ? splitKeys(effectiveKeys("viewer", sc))[0] : undefined;
+    return first ? `${label} (${first})` : label;
   };
+
+  // Space: held, it pans with the left button; tapped, it plays / pauses
+  // (with `spacePlays`). Ctrl+V while comparing loads picture B.
+  const spaceTap = useRef(false);
   useEffect(() => {
     if (!keys) return;
     const down = (e: KeyboardEvent) => {
-      if (e.code === "Space" && !isTyping(e.target)) spaceRef.current = true;
-      keyRef.current(e);
+      if (e.code !== "Space" || isTyping(e.target)) return;
+      spaceRef.current = true;
+      if (!e.repeat) spaceTap.current = true;
+      if (spacePlays && video) e.preventDefault();
     };
     const up = (e: KeyboardEvent) => {
-      if (e.code === "Space") spaceRef.current = false;
+      if (e.code !== "Space") return;
+      spaceRef.current = false;
+      const tap = spaceTap.current;
+      spaceTap.current = false;
+      if (tap && spacePlays && video && !isTyping(e.target)) {
+        e.preventDefault();
+        if (video.paused) void video.play().catch(() => undefined);
+        else video.pause();
+      }
+    };
+    const blur = () => {
+      spaceRef.current = false;
+      spaceTap.current = false;
     };
     const paste = (e: ClipboardEvent) => {
       if (compare === "off") return;
@@ -890,66 +1023,51 @@ export default function Viewer(props: ViewerProps) {
     };
     window.addEventListener("keydown", down);
     window.addEventListener("keyup", up);
+    window.addEventListener("blur", blur);
     window.addEventListener("paste", paste);
     return () => {
       window.removeEventListener("keydown", down);
       window.removeEventListener("keyup", up);
+      window.removeEventListener("blur", blur);
       window.removeEventListener("paste", paste);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keys, compare]);
+  }, [keys, compare, spacePlays, video]);
 
   // ---------------------------------------------------------------- render
   const pct = Math.round(zoomPercent(view, dpr));
   const pictureFilter = cssFilter(settings);
   const atHome = stage.w > 0 && content.w > 0 && sameView(view, home(content, stage));
-  const showBar = bar === "show" || (bar === "auto" && (inside || overBar || pop !== null));
+  // Outside the picture the bar keeps its row (the picture never jumps).
+  const showBar = bar === "show" || (bar === "auto" && (barLayout === "outside" || inside || overBar || pop !== null));
   const s = settings;
   const fmtPct = (v: number) => `${Math.round(v * 100)}%`;
   const total = video && video.duration ? Math.max(1, Math.round(video.duration * fps)) : 0;
-  const cursor = dragRef.current?.kind === "pan" && dragRef.current.moved ? "grabbing" : measuring || cropping || inspector || props.pointer ? "crosshair" : leftDragPans ? "grab" : "default";
-
-  return (
-    <div
-      ref={wrapRef}
-      className={cn("relative h-full w-full touch-none select-none overflow-hidden", props.className)}
-      style={{ cursor }}
-      onPointerDown={onPointerDown}
-      onPointerMove={onPointerMove}
-      onPointerUp={onPointerUp}
-      onPointerCancel={() => (dragRef.current = null)}
-      onPointerEnter={() => setInside(true)}
-      onPointerLeave={() => {
-        setInside(false);
-        setHover(null);
-      }}
-      onDoubleClick={(e) => {
-        if ((e.target as HTMLElement).closest("[data-viewer-ui]")) return;
-        if (props.onDoubleClick) return props.onDoubleClick();
-        if (props.pointer || measuring || cropping) return;
-        const p = stagePt(e);
-        if (pct < 99) move(zoomAt(viewRef.current, p, 1 / dpr / viewRef.current.scale, dpr));
-        else fit();
-      }}
-      onContextMenu={(e) => e.preventDefault()}
-      data-viewer
-    >
-      <div className="absolute inset-0" style={{ isolation: "isolate" }}>
-        <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" style={{ filter: pictureFilter === "none" ? undefined : pictureFilter }} />
-        <canvas
-          ref={cmpRef}
-          className="absolute inset-0 h-full w-full"
-          style={{
-            display: compareWith && (compare === "wipe" || compare === "diff") ? undefined : "none",
-            filter: pictureFilter === "none" ? undefined : pictureFilter,
-            mixBlendMode: compare === "diff" ? "difference" : undefined,
-            clipPath: compare === "wipe" ? `inset(0 0 0 ${(wipe * 100).toFixed(2)}%)` : undefined,
-          }}
-        />
-        <canvas ref={ovlRef} className="absolute inset-0 h-full w-full" />
+  const outside = barLayout === "outside" && bar !== "none";
+  const swatches =
+    picked.length > 0 && inspector ? (
+      <div data-viewer-ui className={cn("z-20 flex gap-1 rounded-lg border border-white/10 bg-[#14161c]/85 p-1", outside ? "w-fit" : "absolute bottom-2 left-2")} onPointerDown={(e) => e.stopPropagation()}>
+        {picked.map((h) => (
+          <button
+            key={h}
+            type="button"
+            title={`${h}: click to copy again`}
+            onClick={() => {
+              void copyText(h);
+              say(`Copied ${h}`);
+            }}
+            className="h-5 w-5 rounded border border-white/30"
+            style={{ background: h }}
+          />
+        ))}
       </div>
-
-      {bar !== "none" && (
+    ) : null;
+  const hint =
+    cropping && !cropDraft ? (
+      <div className={cn("pointer-events-none z-20 rounded-md bg-black/75 px-2 py-1 text-[11px] text-white", outside ? "w-fit" : "absolute bottom-2 right-2")}>Drag a box over the part to keep · Esc cancels</div>
+    ) : null;
+  const barEl =
+    bar !== "none" ? (
         <div
           data-viewer-ui
           onPointerEnter={() => setOverBar(true)}
@@ -957,8 +1075,11 @@ export default function Viewer(props: ViewerProps) {
           onPointerDown={(e) => e.stopPropagation()}
           onDoubleClick={(e) => e.stopPropagation()}
           className={cn(
-            "absolute left-2 right-2 z-20 flex flex-col gap-1 transition-opacity duration-150",
-            barPlace === "top" ? "top-2" : "bottom-2",
+            outside
+              ? cn("relative z-20 flex shrink-0 flex-col gap-1 bg-[#101217] px-1.5 py-1", barPlace === "top" ? "border-b border-white/10" : "border-t border-white/10")
+              : cn("absolute left-2 right-2 z-20 flex flex-col gap-1 transition-opacity duration-150", barPlace === "top" ? "top-2" : "bottom-2"),
+            // Menus open upwards from a bar at the bottom.
+            barPlace === "bottom" && "[&_.viewer-pop]:bottom-full [&_.viewer-pop]:mb-1 [&_.viewer-pop]:mt-0",
             showBar ? "opacity-100" : "pointer-events-none opacity-0",
           )}
         >
@@ -977,20 +1098,20 @@ export default function Viewer(props: ViewerProps) {
                 </div>
               </Pop>
             </div>
-            <Btn title="Fit the whole picture (0)" on={atHome} onClick={fit}>
+            <Btn title={tip("fit", "Fit the whole picture")} on={atHome} onClick={fit}>
               <Icon d={I.fit} />
             </Btn>
-            <Btn wide title="100 %: one picture pixel per screen pixel (1)" on={pct === 100} onClick={zoom100}>
+            <Btn wide title={tip("actual", "100 %: one picture pixel per screen pixel")} on={pct === 100} onClick={zoom100}>
               1:1
             </Btn>
-            <Btn title="Fill the view (2)" onClick={fill}>
+            <Btn title={tip("fill", "Fill the view")} onClick={fill}>
               <Icon d={I.fill} />
             </Btn>
             <Sep />
-            <Btn title="Turn left 90° ([)" onClick={() => turn(-90)}>
+            <Btn title={tip("turn-left", "Turn left 90°")} onClick={() => turn(-90)}>
               <Icon d={I.rotL} />
             </Btn>
-            <Btn title="Turn right 90° (])" onClick={() => turn(90)}>
+            <Btn title={tip("turn-right", "Turn right 90°")} onClick={() => turn(90)}>
               <Icon d={I.rotR} />
             </Btn>
             <div className="relative">
@@ -1008,18 +1129,18 @@ export default function Viewer(props: ViewerProps) {
                 </div>
               </Pop>
             </div>
-            <Btn title="Mirror left↔right: an artist's mirror check (H)" on={view.flipH} onClick={() => setView(flipScreenH(viewRef.current))}>
+            <Btn title={tip("mirror", "Mirror left↔right: an artist's mirror check")} on={view.flipH} onClick={mirror}>
               <Icon d={I.mirror} />
             </Btn>
-            <Btn title="Flip upside down (Shift+H)" on={view.flipV} onClick={() => setView(flipScreenV(viewRef.current))}>
+            <Btn title={tip("flip", "Flip upside down")} on={view.flipV} onClick={flipVert}>
               <Icon d={I.flipV} />
             </Btn>
             <Sep />
-            <Btn title="Value check: show only light and dark (M)" on={s.mono} onClick={() => patch({ mono: !s.mono })}>
+            <Btn title={tip("value", "Value check: show only light and dark")} on={s.mono} onClick={() => patch({ mono: !s.mono })}>
               <Icon d={I.value} />
             </Btn>
             <div className="relative">
-              <Btn title="Grid: thirds or your own (G cycles)" on={s.grid.kind !== "off"} onClick={() => setPop(pop === "grid" ? null : "grid")}>
+              <Btn title={tip("grid", "Grid: thirds or your own")} on={s.grid.kind !== "off"} onClick={() => setPop(pop === "grid" ? null : "grid")}>
                 <Icon d={I.grid} />
               </Btn>
               <Pop open={pop === "grid"} onClose={() => setPop(null)} className="min-w-[250px]">
@@ -1058,7 +1179,7 @@ export default function Viewer(props: ViewerProps) {
               </Pop>
             </div>
             <Btn
-              title="Colour picker: hover for x, y and colour; click copies the hex (C)"
+              title={tip("picker", "Colour picker: hover for x, y and colour; click copies the hex")}
               on={inspector}
               onClick={() => {
                 setInspector(!inspector);
@@ -1068,7 +1189,7 @@ export default function Viewer(props: ViewerProps) {
               <Icon d={I.picker} />
             </Btn>
             <Btn
-              title="Measure: drag a line for its length and angle in pixels; Shift locks to 45° (D)"
+              title={tip("measure", "Measure: drag a line for its length and angle in pixels; Shift locks to 45°")}
               on={measuring}
               onClick={() => {
                 setMeasuring(!measuring);
@@ -1084,7 +1205,7 @@ export default function Viewer(props: ViewerProps) {
               </span>
             </Btn>
             <div className="relative">
-              <Btn title="Compare two pictures: wipe, difference or side by side (W)" on={compare !== "off"} onClick={() => setPop(pop === "compare" ? null : "compare")}>
+              <Btn title={tip("compare", "Compare two pictures: wipe, difference or side by side")} on={compare !== "off"} onClick={() => setPop(pop === "compare" ? null : "compare")}>
                 <Icon d={I.compare} />
               </Btn>
               <Pop open={pop === "compare"} onClose={() => setPop(null)} className="min-w-[260px]">
@@ -1138,7 +1259,7 @@ export default function Viewer(props: ViewerProps) {
               </Pop>
             </div>
             <div className="relative">
-              <Btn title="Colour: brightness, contrast, saturation, hue, invert, tint (E)" on={!isNeutral(s.adjust)} onClick={() => setPop(pop === "colour" ? null : "colour")}>
+              <Btn title={tip("colour", "Colour: brightness, contrast, saturation, hue, invert, tint")} on={!isNeutral(s.adjust)} onClick={() => setPop(pop === "colour" ? null : "colour")}>
                 <Icon d={I.colour} />
               </Btn>
               <Pop open={pop === "colour"} onClose={() => setPop(null)} className="min-w-[270px]">
@@ -1146,13 +1267,19 @@ export default function Viewer(props: ViewerProps) {
               </Pop>
             </div>
             <Sep />
-            <Btn title={exportKeys ? "Copy this frame as a picture (Ctrl+C)" : "Copy this frame as a picture"} onClick={() => void copyFrame()}>
+            <Btn title={exportKeys ? tip("copy", "Copy this frame as a picture") : "Copy this frame as a picture"} onClick={() => void copyFrame()}>
               <Icon d={I.copy} />
             </Btn>
-            <Btn title={exportKeys ? "Save this frame as a lossless PNG in the Screenshots folder (Ctrl+S)" : "Save this frame as a lossless PNG"} onClick={() => void saveFrame()}>
+            <Btn title={exportKeys ? tip("save", "Save this frame as a lossless PNG in the Screenshots folder") : "Save this frame as a lossless PNG"} onClick={() => void saveFrame()}>
               <Icon d={I.save} />
             </Btn>
-            <Btn title="Reset zoom, turn, flip, colour and crop (Ctrl+0)" onClick={resetAll}>
+            <Btn title={tip("undo", "Undo")} disabled={!undoStack.current.length} onClick={() => void undoStep()}>
+              <Icon d={I.undo} />
+            </Btn>
+            <Btn title={tip("redo", "Redo")} disabled={!redoStack.current.length} onClick={() => void redoStep()}>
+              <Icon d={I.redo} />
+            </Btn>
+            <Btn title={tip("reset", "Reset zoom, turn, flip, colour and crop")} onClick={resetAll}>
               <Icon d={I.reset} />
             </Btn>
             {props.extra}
@@ -1161,93 +1288,128 @@ export default function Viewer(props: ViewerProps) {
                 <Icon d={I.help} />
               </Btn>
               <Pop open={pop === "help"} onClose={() => setPop(null)} className="right-0 min-w-[300px]">
-                <Help video={!!video} />
+                <Help video={!!video} list={keys ? shortcuts : []} />
               </Pop>
             </div>
           </div>
 
           {video && videoBar && (
             <div className="flex w-fit max-w-full flex-wrap items-center gap-0.5 rounded-lg border border-white/10 bg-[#14161c]/85 p-0.5 text-white shadow-lg backdrop-blur">
-              <Btn title="Back 10 frames (Shift+,)" onClick={() => step(-10)}>
+              <Btn title={tip("frame-back-10", "Back 10 frames")} onClick={() => step(-10)}>
                 <Icon d={I.prev10} />
               </Btn>
-              <Btn title="Back one frame (,) · Ctrl+wheel scrubs" onClick={() => step(-1)}>
+              <Btn title={tip("frame-back", "Back one frame") + " · Ctrl+wheel scrubs"} onClick={() => step(-1)}>
                 <Icon d={I.prev} />
               </Btn>
               <span className="px-1 font-mono text-[10px] text-white/75" title="Frame number">
                 {frameIndex(time, fps)}
                 {total ? ` / ${total}` : ""}
               </span>
-              <Btn title="Forward one frame (.)" onClick={() => step(1)}>
+              <Btn title={tip("frame-on", "Forward one frame")} onClick={() => step(1)}>
                 <Icon d={I.next} />
               </Btn>
-              <Btn title="Forward 10 frames (Shift+.)" onClick={() => step(10)}>
+              <Btn title={tip("frame-on-10", "Forward 10 frames")} onClick={() => step(10)}>
                 <Icon d={I.next10} />
               </Btn>
               <Sep />
-              <Btn title="Slower (J)" onClick={() => setSpeed(nextSpeed(s.speed, -1))}>
+              <Btn title={tip("slower", "Slower")} onClick={() => setSpeed(nextSpeed(s.speed, -1))}>
                 −
               </Btn>
-              <Btn wide title="Speed; click for normal (K)" on={s.speed !== 1} onClick={() => setSpeed(1)}>
+              <Btn wide title="Speed; click for normal" on={s.speed !== 1} onClick={() => setSpeed(1)}>
                 <span className="font-mono">{s.speed}×</span>
               </Btn>
-              <Btn title="Faster (L)" onClick={() => setSpeed(nextSpeed(s.speed, 1))}>
+              <Btn title={tip("faster", "Faster")} onClick={() => setSpeed(nextSpeed(s.speed, 1))}>
                 +
               </Btn>
               <Sep />
-              <Btn title="Loop the whole clip (Shift+L)" on={s.loopAll} onClick={() => patch({ loopAll: !s.loopAll })}>
+              <Btn title={tip("loop", "Loop the whole clip")} on={s.loopAll} onClick={() => patch({ loopAll: !s.loopAll })}>
                 <Icon d={I.loop} />
               </Btn>
-              <Btn wide title="Loop from here: set A (A)" on={s.ab.a !== null} onClick={markA}>
+              <Btn wide title={tip("loop-a", "Loop from here: set A")} on={s.ab.a !== null} onClick={markA}>
                 A{s.ab.a !== null ? ` ${s.ab.a.toFixed(2)}` : ""}
               </Btn>
-              <Btn wide title="Loop to here: set B (B)" on={s.ab.b !== null} onClick={markB}>
+              <Btn wide title={tip("loop-b", "Loop to here: set B")} on={s.ab.b !== null} onClick={markB}>
                 B{s.ab.b !== null ? ` ${s.ab.b.toFixed(2)}` : ""}
               </Btn>
               {(s.ab.a !== null || s.ab.b !== null) && (
-                <Btn title="Clear the A–B loop (Shift+A)" onClick={() => patch({ ab: { a: null, b: null } })}>
+                <Btn title={tip("loop-clear", "Clear the A–B loop")} onClick={() => patch({ ab: { a: null, b: null } })}>
                   ✕
                 </Btn>
               )}
               <Sep />
-              <Btn wide title="Onion skin: ghost the frames before (red) and after (green) while paused (N)" on={s.onion > 0} onClick={() => patch({ onion: ((s.onion + 1) % 3) as 0 | 1 | 2 })}>
+              <Btn wide title={tip("onion", "Onion skin: ghost the frames before (red) and after (green) while paused")} on={s.onion > 0} onClick={() => patch({ onion: ((s.onion + 1) % 3) as 0 | 1 | 2 })}>
                 <Icon d={I.onion} />
                 {s.onion > 0 && <span className="ml-0.5 font-mono">{s.onion}</span>}
               </Btn>
             </div>
           )}
+          {outside && swatches}
+          {outside && hint}
         </div>
-      )}
+    ) : null;
+  const cursor = dragRef.current?.kind === "pan" && dragRef.current.moved ? "grabbing" : measuring || cropping || inspector || props.pointer ? "crosshair" : leftDragPans ? "grab" : "default";
+
+  const stageEl = (
+    <div
+      ref={wrapRef}
+      className={cn("relative touch-none select-none overflow-hidden", outside ? "min-h-0 w-full flex-1" : "h-full w-full", !outside && props.className)}
+      style={{ cursor }}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={() => (dragRef.current = null)}
+      onPointerEnter={() => setInside(true)}
+      onPointerLeave={() => {
+        setInside(false);
+        setHover(null);
+      }}
+      onDoubleClick={(e) => {
+        if ((e.target as HTMLElement).closest("[data-viewer-ui]")) return;
+        if (props.onDoubleClick) return props.onDoubleClick();
+        if (props.pointer || measuring || cropping) return;
+        const p = stagePt(e);
+        if (pct < 99) move(zoomAt(viewRef.current, p, 1 / dpr / viewRef.current.scale, dpr));
+        else fit();
+      }}
+      onContextMenu={(e) => e.preventDefault()}
+      data-viewer
+    >
+      <div className="absolute inset-0" style={{ isolation: "isolate" }}>
+        <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" style={{ filter: pictureFilter === "none" ? undefined : pictureFilter }} />
+        <canvas
+          ref={cmpRef}
+          className="absolute inset-0 h-full w-full"
+          style={{
+            display: compareWith && (compare === "wipe" || compare === "diff") ? undefined : "none",
+            filter: pictureFilter === "none" ? undefined : pictureFilter,
+            mixBlendMode: compare === "diff" ? "difference" : undefined,
+            clipPath: compare === "wipe" ? `inset(0 0 0 ${(wipe * 100).toFixed(2)}%)` : undefined,
+          }}
+        />
+        <canvas ref={ovlRef} className="absolute inset-0 h-full w-full" />
+      </div>
+      {!outside && barEl}
 
       {inspector && hover && hover.rgba && (
         <PixelLabel x={hover.p.x + (s.crop?.x ?? 0)} y={hover.p.y + (s.crop?.y ?? 0)} rgba={hover.rgba} at={hover.at} stage={stage} />
       )}
 
-      {picked.length > 0 && inspector && (
-        <div data-viewer-ui className="absolute bottom-2 left-2 z-20 flex gap-1 rounded-lg border border-white/10 bg-[#14161c]/85 p-1" onPointerDown={(e) => e.stopPropagation()}>
-          {picked.map((h) => (
-            <button
-              key={h}
-              type="button"
-              title={`${h}: click to copy again`}
-              onClick={() => {
-                void copyText(h);
-                say(`Copied ${h}`);
-              }}
-              className="h-5 w-5 rounded border border-white/30"
-              style={{ background: h }}
-            />
-          ))}
-        </div>
-      )}
+      {!outside && swatches}
 
       {status && (
         <div className="pointer-events-none absolute bottom-2 left-1/2 z-30 -translate-x-1/2 rounded-md bg-black/80 px-2.5 py-1 text-[11px] text-white">{status}</div>
       )}
-      {cropping && !cropDraft && (
-        <div className="pointer-events-none absolute bottom-2 right-2 z-20 rounded-md bg-black/75 px-2 py-1 text-[11px] text-white">Drag a box over the part to keep · Esc cancels</div>
-      )}
+      {!outside && hint}
       <EscCancel active={cropping || measuring} onCancel={() => (setCropping(false), setMeasuring(false), setMeasureLine(null), setCropDraft(null))} />
+    </div>
+  );
+  if (!outside)
+    return stageEl;
+  return (
+    <div className={cn("relative flex h-full w-full flex-col overflow-hidden", props.className)} data-viewer-root>
+      {barPlace === "top" && barEl}
+      {stageEl}
+      {barPlace === "bottom" && barEl}
     </div>
   );
 }
@@ -1325,37 +1487,19 @@ function AdjustPanel({ value, onChange }: { value: Adjust; onChange: (a: Adjust)
   );
 }
 
-function Help({ video }: { video: boolean }) {
-  const rows: [string, string][] = [
+function Help({ video, list }: { video: boolean; list: Shortcut[] }) {
+  const mouse: [string, string][] = [
     ["Wheel", "zoom at the cursor"],
     ["Drag · Space+drag · middle", "pan"],
-    ["0 · 1 · 2", "fit · 100 % · fill"],
-    ["+ · −", "zoom in · out"],
-    ["[ · ]", "turn 90°  ({ } 15°, Alt+wheel free)"],
-    ["H · Shift+H", "mirror · flip upside down"],
-    ["M", "value check (grey)"],
-    ["G", "grid: thirds · custom · off"],
-    ["C", "colour picker (click copies)"],
-    ["D", "measure (Shift: 45° steps)"],
-    ["Shift+C", "crop"],
-    ["W", "compare: set B · cycle modes"],
-    ["E", "colour adjustments"],
-    ["Ctrl+C · Ctrl+S", "copy · save the frame (PNG)"],
-    ["Ctrl+0", "reset everything"],
+    ["Alt+wheel", "turn freely (Shift: 1°)"],
     ["Double-click", "fit ↔ 100 %"],
   ];
-  const vrows: [string, string][] = [
-    [", · .", "one frame back · on (Shift: 10)"],
-    ["Ctrl+wheel", "scrub frames"],
-    ["J · K · L", "slower · normal · faster"],
-    ["A · B · Shift+A", "loop from · to · clear"],
-    ["Shift+L", "loop the whole clip"],
-    ["N", "onion skin: off · 1 · 2 frames"],
-  ];
+  if (video) mouse.push(["Ctrl+wheel", "scrub frames"]);
+  const rows = list.filter((x) => video || x.group !== "Video").map((x) => [splitKeys(effectiveKeys("viewer", x)).join(" · "), x.label] as [string, string]);
   return (
     <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
-      {(video ? [...rows, ...vrows] : rows).map(([k, v]) => (
-        <div key={k} className="contents">
+      {[...mouse, ...rows.filter(([k]) => k)].map(([k, v]) => (
+        <div key={k + v} className="contents">
           <span className="whitespace-nowrap font-mono text-[10px] text-white">{k}</span>
           <span className="text-white/65">{v}</span>
         </div>

@@ -247,6 +247,29 @@ export function pixelAt(view: View, content: Size, p: Pt): Pt | null {
   return { x, y };
 }
 
+/**
+ * How a view follows a stage that changed size (a window or panel resized,
+ * or moved to a monitor with other scaling):
+ * - "scale": the picture scales with the stage (by the change of the fit
+ *   scale) and the picture point at the centre stays at the centre. A fitted
+ *   picture stays fitted; a zoomed one keeps its zoom relative to the window
+ *   (PureRef / pop-out frames).
+ * - "centre": the zoom stays; only the centre point is kept (image editors).
+ */
+export type StageFollow = "scale" | "centre";
+
+export function followStage(view: View, from: Size, to: Size, content: Size, mode: StageFollow = "scale"): View {
+  if (from.w <= 0 || from.h <= 0 || to.w <= 0 || to.h <= 0) return view;
+  const k = mode === "scale" && content.w > 0 && content.h > 0 ? fitScale(content, to, view.rot) / fitScale(content, from, view.rot) : 1;
+  if (!Number.isFinite(k) || k <= 0) return view;
+  return {
+    ...view,
+    scale: view.scale * k,
+    x: to.w / 2 + (view.x - from.w / 2) * k,
+    y: to.h / 2 + (view.y - from.h / 2) * k,
+  };
+}
+
 /** A view that puts the picture exactly over a stage rectangle (no rotation). */
 export function viewForRect(content: Size, r: Rect): View {
   return { ...IDENTITY, scale: content.w > 0 ? r.w / content.w : 1, x: r.x + r.w / 2, y: r.y + r.h / 2 };

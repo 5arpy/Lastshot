@@ -78,7 +78,7 @@ export function Pop({ open, onClose, children, className }: { open: boolean; onC
       onPointerDown={(e) => e.stopPropagation()}
       onWheel={(e) => e.stopPropagation()}
       className={cn(
-        "absolute z-30 mt-1 min-w-[220px] rounded-lg border border-white/10 bg-[#1c1e25]/97 p-2.5 text-[11px] text-white/85 shadow-2xl backdrop-blur",
+        "viewer-pop absolute z-30 mt-1 min-w-[220px] rounded-lg border border-white/10 bg-[#1c1e25]/97 p-2.5 text-[11px] text-white/85 shadow-2xl backdrop-blur",
         className,
       )}
     >
@@ -159,6 +159,8 @@ export const I = {
   copy: "M5 5h8v9H5zM3 11V2h8",
   save: "M3 2h8l2 2v10H3zM5 2v4h5V2M5 14V9h6v5",
   reset: "M2.5 8a5.5 5.5 0 1 0 2-4.2M2 2v3h3",
+  undo: "M5 4 2 7l3 3M2 7h7.5a4 4 0 0 1 0 8H7",
+  redo: "M11 4l3 3-3 3M14 7H6.5a4 4 0 0 0 0 8H9",
   help: "M6 6a2 2 0 1 1 3 1.7c-.6.4-1 .8-1 1.6M8 12v.5",
   popout: "M9 2h5v5M14 2L7 9M12 10v4H2V4h4",
   onion: "M8 3a5 5 0 1 0 0 10A5 5 0 0 0 8 3zM5 3.5a5 5 0 0 0 0 9M11 3.5a5 5 0 0 1 0 9",

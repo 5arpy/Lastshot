@@ -581,6 +581,8 @@ export default function SnipOverlay() {
             leftDragPans={false}
             bar="show"
             barPlace="bottom"
+            // The picture lies exactly over the screen here, so the bar floats.
+            barLayout="overlay"
             exportKeys={false}
             homeView={(c) => viewForRect(c, cssRect(sel))}
             onViewChange={(v, _st, c) => setZoomed(!sameView(v, viewForRect(c, cssRect(sel))))}

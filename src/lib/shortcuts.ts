@@ -40,6 +40,8 @@ export interface Shortcut {
    * tab is not a clash, because `when` lets only one of them run.
    */
   context?: string;
+  /** A mouse gesture ("Ctrl+Wheel"): listed in the cheat sheet and Settings, never matched, rebound or checked for clashes. */
+  mouse?: boolean;
 }
 
 export interface ShortcutInfo {
@@ -48,6 +50,7 @@ export interface ShortcutInfo {
   label: string;
   group?: string;
   context?: string;
+  mouse?: boolean;
   /** Keys as built in. */
   defaultKeys: string;
   /** Keys in effect (after the user's override). */
@@ -188,12 +191,12 @@ export function effectiveKeys(scope: string, s: Pick<Shortcut, "keys" | "label" 
   return o !== undefined ? o : s.keys;
 }
 
-function remember(scope: string, s: Pick<Shortcut, "keys" | "label" | "id" | "group" | "context">) {
+function remember(scope: string, s: Pick<Shortcut, "keys" | "label" | "id" | "group" | "context" | "mouse">) {
   const id = idOf(s);
   const k = keyOf(scope, id);
   const old = known.get(k);
-  if (!old || old.defaultKeys !== s.keys || old.label !== s.label || old.group !== s.group || old.context !== s.context) {
-    known.set(k, { scope, id, label: s.label, group: s.group, context: s.context, defaultKeys: s.keys });
+  if (!old || old.defaultKeys !== s.keys || old.label !== s.label || old.group !== s.group || old.context !== s.context || old.mouse !== s.mouse) {
+    known.set(k, { scope, id, label: s.label, group: s.group, context: s.context, mouse: s.mouse, defaultKeys: s.keys });
     return true;
   }
   return false;
@@ -298,7 +301,7 @@ export function withKeys(label: string, scope: string, id: string): string {
 export function conflictsFor(scope: string, id: string, combo: string): ShortcutInfo[] {
   const c = normalizeCombo(combo);
   if (!c) return [];
-  const all = allShortcuts();
+  const all = allShortcuts().filter((s) => !s.mouse);
   const me = all.find((s) => s.scope === scope && s.id === id);
   return all.filter(
     (s) =>
@@ -311,7 +314,7 @@ export function conflictsFor(scope: string, id: string, combo: string): Shortcut
 /** Every shortcut (any scope) that `combo` runs, for "what does Ctrl+D do?". */
 export function usesOf(combo: string): ShortcutInfo[] {
   const c = normalizeCombo(combo);
-  return c ? allShortcuts().filter((s) => splitKeys(s.keys).includes(c)) : [];
+  return c ? allShortcuts().filter((s) => !s.mouse && splitKeys(s.keys).includes(c)) : [];
 }
 
 export interface KeyClash {
@@ -327,9 +330,9 @@ export interface KeyClash {
  * (`appScope`) combo also used in a tab. The same key in two different tabs
  * is fine. Pass defaults (`keys` = built-in) or what is in effect.
  */
-export function findClashes(list: { scope: string; id: string; label: string; keys: string; context?: string }[], appScope = "global"): KeyClash[] {
+export function findClashes(list: { scope: string; id: string; label: string; keys: string; context?: string; mouse?: boolean }[], appScope = "global"): KeyClash[] {
   const by = new Map<string, { scope: string; id: string; label: string; context?: string }[]>();
-  for (const s of list)
+  for (const s of list.filter((x) => !x.mouse))
     for (const c of new Set(splitKeys(s.keys))) {
       const l = by.get(c) ?? [];
       l.push({ scope: s.scope, id: s.id, label: s.label, context: s.context });
@@ -372,7 +375,7 @@ export function dispatchKey(e: KeyboardEvent): boolean {
   for (const r of [...regs].sort((a, b) => Number(a.scope === APP) - Number(b.scope === APP) || b.seq - a.seq)) {
     if (disabledScopes.has(r.scope)) continue;
     for (const s of r.list) {
-      if (typing && !s.inText) continue;
+      if (s.mouse || (typing && !s.inText)) continue;
       if (!splitKeys(effectiveKeys(r.scope, s)).includes(combo)) continue;
       if (s.when && !safeWhen(s.when)) continue;
       e.preventDefault();

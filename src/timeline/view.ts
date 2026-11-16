@@ -3,6 +3,8 @@
  * time at the left edge. Ctrl+wheel zooms around the mouse, "fit" shows the
  * whole timeline.
  */
+import { type Item, end } from "./model";
+
 export interface TlView {
   pxPerSec: number;
   /** Time at the left edge of the lanes, seconds. */
@@ -22,6 +24,64 @@ export function zoomAt(v: TlView, factor: number, anchorX: number): TlView {
   const t = xToTime(v, anchorX);
   const pxPerSec = clampZoom(v.pxPerSec * factor);
   return { pxPerSec, scroll: Math.max(0, t - anchorX / pxPerSec) };
+}
+
+/**
+ * Room after the last item: the playhead and the view may go there (the
+ * preview shows black), so the end is never a wall. 30 % of the length,
+ * at least 10 s.
+ */
+export function endRoom(length: number): number {
+  return Math.max(0, length) + Math.max(10, length * 0.3);
+}
+
+/** Keeps the view inside 0 .. endRoom(length) (the left edge never past it). */
+export function clampScroll(v: TlView, length: number, width: number): TlView {
+  const max = Math.max(0, endRoom(length) - width / v.pxPerSec);
+  const scroll = Math.min(Math.max(0, v.scroll), max);
+  return scroll === v.scroll ? v : { ...v, scroll };
+}
+
+/**
+ * Where keyboard zoom anchors: the playhead when it is on screen, else the
+ * middle of the lanes (lane pixels).
+ */
+export function keyZoomAnchor(v: TlView, playhead: number, width: number): number {
+  const x = timeToX(v, playhead);
+  return x >= 0 && x <= width ? x : width / 2;
+}
+
+/**
+ * The view that shows `a..b` (seconds) in `width` pixels: what dragging the
+ * edges of the overview box does.
+ */
+export function viewOfSpan(a: number, b: number, width: number): TlView {
+  const lo = Math.max(0, Math.min(a, b));
+  const hi = Math.max(lo + 0.05, Math.max(a, b));
+  const pxPerSec = clampZoom(width / (hi - lo));
+  return { pxPerSec, scroll: lo };
+}
+
+/**
+ * Follow the playhead while playing. "page": jump a screen when it leaves;
+ * "smooth": keep it at 40 % of the width once it gets there.
+ */
+export function follow(v: TlView, t: number, width: number, mode: "page" | "smooth"): TlView {
+  if (mode === "page") {
+    const x = timeToX(v, t);
+    if (x >= 0 && x <= width - 8) return v;
+    return { ...v, scroll: Math.max(0, t - (width * 0.05) / v.pxPerSec) };
+  }
+  const want = Math.max(0, t - (width * 0.4) / v.pxPerSec);
+  return want > v.scroll || timeToX(v, t) < 0 ? { ...v, scroll: want } : v;
+}
+
+/** A step towards `to` for animated zoom (k = 0..1 of the way). */
+export function easeView(from: TlView, to: TlView, k: number): TlView {
+  const e = 1 - Math.pow(1 - Math.min(1, Math.max(0, k)), 3);
+  // Zoom in log space so it feels even.
+  const z = Math.exp(Math.log(from.pxPerSec) + (Math.log(to.pxPerSec) - Math.log(from.pxPerSec)) * e);
+  return { pxPerSec: z, scroll: from.scroll + (to.scroll - from.scroll) * e };
 }
 
 /** Shows `0..length` in `width` pixels, with a little room at the end. */
@@ -90,3 +150,31 @@ export function parseTime(text: string, now: number): number | null {
   if (rel === "-") return Math.max(0, now - v);
   return v;
 }
+
+/**
+ * The clip edge nearest to `t` on one track, within `tol` seconds (the
+ * trim handle under the pointer, inside or just outside the clip). On a cut
+ * between two clips, the side the pointer is on wins.
+ */
+export function edgeNear<I extends Item>(items: I[], t: number, tol: number): { item: I; edge: "left" | "right"; t: number } | null {
+  let best: { item: I; edge: "left" | "right"; t: number; d: number } | null = null;
+  for (const it of items) {
+    const a = it.start;
+    const b = end(it);
+    // A tiny clip keeps a middle to grab: edges get at most a third each.
+    const room = Math.min(tol, (b - a) / 3);
+    for (const [edge, x] of [["left", a], ["right", b]] as const) {
+      const d = Math.abs(t - x);
+      if (d > tol) continue;
+      const inside = edge === "left" ? t >= a : t <= b;
+      if (inside && d > room) continue;
+      // Prefer the clip the pointer is over.
+      const score = d + (inside ? 0 : tol * 0.5);
+      if (!best || score < best.d) best = { item: it, edge, t: x, d: score };
+    }
+  }
+  return best && { item: best.item, edge: best.edge, t: best.t };
+}
+
+/** Edge hit size in pixels: a little wider when zoomed far out. */
+export const edgePx = (pxPerSec: number) => (pxPerSec < 5 ? 10 : 8);

@@ -11,7 +11,7 @@ import "../viewer/keys";
 import "../popout/frameKeys";
 import { EDITOR_KEYS, SNIP_KEYS } from "../editor/keyTables";
 
-const defaults = () => allShortcuts().map((s) => ({ scope: s.scope, id: s.id, label: s.label, keys: s.defaultKeys, context: s.context }));
+const defaults = () => allShortcuts().map((s) => ({ scope: s.scope, id: s.id, label: s.label, keys: s.defaultKeys, context: s.context, mouse: s.mouse }));
 
 describe("default shortcuts", () => {
   it("covers every scope's table", () => {

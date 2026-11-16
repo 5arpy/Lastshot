@@ -11,6 +11,9 @@
  *
  * `keys` is one binding such as "Ctrl+Shift+Z", "Space", "S" or "=". Aliases
  * are separate entries with the same label; tooltips show the first one.
+ *
+ * Entries with `mouse: true` (group "Mouse") list the timeline's mouse
+ * gestures for the cheat sheet; they never run from the keyboard.
  */
 
 export interface Shortcut {
@@ -23,6 +26,8 @@ export interface Shortcut {
   when?: () => boolean;
   /** "object": only while a picture object is selected (keys may repeat outside it). */
   context?: string;
+  /** A mouse gesture, shown in the cheat sheet only (never matched to a key press). */
+  mouse?: boolean;
 }
 
 const slug = (s: string) =>
@@ -72,7 +77,13 @@ export interface EditorActions {
   duplicate: () => void;
   selectAll: () => void;
   deselect: () => void;
+  /** Selects nothing (keeps the tool). */
+  deselectAll: () => void;
   nudge: (frames: number) => void;
+  /** Moves the selected clips to the next track of their kind up (-1) or down (1). */
+  moveTrack: (dir: -1 | 1) => void;
+  /** Follow the playhead while playing: off → page → smooth → off. */
+  toggleFollow: () => void;
   toggleEnable: () => void;
   toggleSnap: () => void;
   toggleMagnet: () => void;
@@ -101,6 +112,41 @@ export interface EditorActions {
   /** An overlay object is selected (keys act on it instead of clips). */
   objectFocus: () => boolean;
 }
+
+const noop = () => undefined;
+
+/** The timeline's mouse gestures (cheat sheet only). */
+export const MOUSE_GESTURES: { keys: string; label: string }[] = [
+  { keys: "Wheel", label: "Scroll the timeline sideways" },
+  { keys: "Shift+Wheel", label: "Scroll the tracks up and down" },
+  { keys: "Ctrl+Wheel", label: "Zoom at the pointer" },
+  { keys: "Alt+Wheel", label: "Zoom at the pointer" },
+  { keys: "Z+Wheel", label: "Zoom at the pointer (hold Z; Z with + or - zooms too)" },
+  { keys: "Ctrl+Shift+Wheel", label: "Track taller / shorter" },
+  { keys: "Middle-drag", label: "Pan the timeline" },
+  { keys: "Drag the overview", label: "Scroll (the strip above the ruler)" },
+  { keys: "Drag the overview box edge", label: "Zoom to that span" },
+  { keys: "Ctrl+drag the overview", label: "Zoom around the pointer (or drag up / down)" },
+  { keys: "Drag the ruler", label: "Move the playhead (snaps to cuts and markers)" },
+  { keys: "Ctrl+drag the ruler", label: "Zoom (right or down = closer)" },
+  { keys: "Drag the playhead", label: "Move the playhead (grab it anywhere on the line)" },
+  { keys: "Shift+drag the playhead", label: "Move the playhead without snapping" },
+  { keys: "Click an empty track", label: "Playhead there; selects the gap (Delete closes it)" },
+  { keys: "Double-click a clip edge", label: "Playhead to that cut" },
+  { keys: "Double-click a clip", label: "Select it and show its settings" },
+  { keys: "Double-click a marker", label: "Rename the marker" },
+  { keys: "Drag a clip", label: "Move (snaps; drag to the side to scroll)" },
+  { keys: "Alt+drag a clip", label: "Move a copy" },
+  { keys: "Shift+drag a clip", label: "Change track only, keep the time (no snapping)" },
+  { keys: "Ctrl+drag a clip", label: "Insert (pushes clips right)" },
+  { keys: "Drag a clip edge", label: "Trim" },
+  { keys: "Ctrl+drag a clip edge", label: "Ripple trim" },
+  { keys: "Alt+drag a cut", label: "Roll the cut" },
+  { keys: "Shift while dragging", label: "Snapping off for this drag" },
+  { keys: "Drag empty space", label: "Select with a box (Shift adds)" },
+  { keys: "Drag a track's bottom border", label: "Track taller / shorter" },
+  { keys: "Right-click", label: "Menu for the clip, gap, track or ruler" },
+];
 
 export function editorKeymap(a: EditorActions): Shortcut[] {
   const obj = a.objectFocus;
@@ -148,11 +194,16 @@ export function editorKeymap(a: EditorActions): Shortcut[] {
     { keys: "Ctrl+V", label: "Paste at the playhead", group: "Edit", run: a.paste },
     { keys: "Ctrl+D", label: "Duplicate", group: "Edit", run: a.duplicate },
     { keys: "Ctrl+A", label: "Select all", group: "Edit", run: a.selectAll },
+    { keys: "Ctrl+Shift+A", label: "Select none", group: "Edit", run: a.deselectAll },
     { keys: "Escape", label: "Deselect / back to Select tool", group: "Edit", run: a.deselect },
     { keys: ",", label: "Nudge left one frame", group: "Edit", run: () => a.nudge(-1) },
     { keys: ".", label: "Nudge right one frame", group: "Edit", run: () => a.nudge(1) },
     { keys: "Shift+,", label: "Nudge left ten frames", group: "Edit", run: () => a.nudge(-10) },
     { keys: "Shift+.", label: "Nudge right ten frames", group: "Edit", run: () => a.nudge(10) },
+    { keys: "Alt+ArrowLeft", label: "Nudge left one frame", group: "Edit", run: () => a.nudge(-1), when: notObj },
+    { keys: "Alt+ArrowRight", label: "Nudge right one frame", group: "Edit", run: () => a.nudge(1), when: notObj },
+    { keys: "Alt+ArrowUp", label: "Move to the track above", group: "Edit", run: () => a.moveTrack(-1), when: notObj },
+    { keys: "Alt+ArrowDown", label: "Move to the track below", group: "Edit", run: () => a.moveTrack(1), when: notObj },
     { keys: "D", label: "Turn the clip off / on", group: "Edit", run: a.toggleEnable },
     { keys: "Ctrl+Shift+D", label: "Detach audio", group: "Edit", run: a.detachAudio },
     { keys: "[", label: "Select everything left of the playhead", group: "Edit", run: () => a.selectSide(-1) },
@@ -168,6 +219,8 @@ export function editorKeymap(a: EditorActions): Shortcut[] {
     { keys: "-", label: "Zoom out", group: "Timeline", run: () => a.zoom(1 / 1.5) },
     { keys: "Shift+Z", label: "Zoom to fit", group: "Timeline", run: a.fit },
     { keys: "\\", label: "Zoom to fit", group: "Timeline", run: a.fit },
+    { keys: "Shift+F", label: "Follow the playhead (off, page, smooth)", group: "Timeline", run: a.toggleFollow },
+    ...MOUSE_GESTURES.map((m) => ({ ...m, group: "Mouse", run: noop, mouse: true })),
     // Annotate (on the picture)
     { keys: "T", label: "Text", group: "Annotate", run: () => a.tool("text") },
     { keys: "R", label: "Rectangle", group: "Annotate", run: () => a.tool("rect") },
@@ -351,7 +404,7 @@ export function findShortcut(list: Shortcut[], e: KeyboardEvent): Shortcut | nul
   if (isTyping(e.target)) return null;
   const name = keyName(e);
   for (const s of list) {
-    if (normKeys(s.keys) !== name) continue;
+    if (s.mouse || normKeys(s.keys) !== name) continue;
     if (s.when && !s.when()) continue;
     return s;
   }

@@ -24,6 +24,8 @@ export interface Track {
   volume?: number;
   /** -1 left .. 1 right. */
   pan?: number;
+  /** Row height in the timeline, px (unset = the host's default for the kind). */
+  height?: number;
 }
 
 export interface Item {

@@ -31,13 +31,13 @@ export function toRegistry(list: Shortcut[]): Reg[] {
   const byAction = new Map<string, Reg>();
   for (const s of list) {
     const k = `${s.group ?? ""}\u0001${s.label}\u0001${s.context ?? ""}`;
-    const combo = regCombo(s.keys);
+    const combo = s.mouse ? s.keys : regCombo(s.keys);
     const hit = byAction.get(k);
     if (hit) {
       if (combo && !splitKeys(hit.keys).includes(combo)) hit.keys = `${hit.keys} | ${combo}`;
       continue;
     }
-    const e: Reg = { id: s.id.replace(/^[a-z]+\./, ""), keys: combo, label: s.label, group: s.group, run: s.run, when: s.when, context: s.context };
+    const e: Reg = { id: s.id.replace(/^[a-z]+\./, ""), keys: combo, label: s.label, group: s.group, run: s.run, when: s.when, context: s.context, mouse: s.mouse };
     byAction.set(k, e);
     out.push(e);
   }
@@ -60,7 +60,7 @@ export function matchKey(scope: string, list: Reg[], e: KeyboardEvent): Reg | nu
   const c = comboFromEvent(e);
   if (!c) return null;
   for (const s of list) {
-    if (!splitKeys(effectiveKeys(scope, s)).includes(c)) continue;
+    if (s.mouse || !splitKeys(effectiveKeys(scope, s)).includes(c)) continue;
     if (s.when && !s.when()) continue;
     return s;
   }

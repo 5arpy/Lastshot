@@ -513,6 +513,16 @@ export default function ShortcutsSettings({
           const isRec = rec?.key === k;
           const custom = k in overrides;
           const mine = clashesOf(k);
+          if (s.mouse)
+            return (
+              <div key={k}>
+                {showHead && <div className="pt-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-ink-4">{head}</div>}
+                <div className="flex items-center justify-between gap-3 py-1.5">
+                  <span className="min-w-0 text-[12px] text-ink">{s.label}</span>
+                  <span className="shrink-0 px-1.5 text-[11px] text-ink-3">{s.keys}</span>
+                </div>
+              </div>
+            );
           return (
             <div key={k}>
               {showHead && <div className="pt-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-ink-4">{head}</div>}

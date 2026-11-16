@@ -15,6 +15,7 @@ import {
   closeGap,
   extractRange,
   itemsFrom,
+  moveItems,
   nextPoint,
   pasteItems,
   patchItems as patchTl,
@@ -28,10 +29,11 @@ import {
   shiftItems,
   splitAt,
   trimItem,
+  type Move,
 } from "../timeline/ops";
 import { History } from "../timeline/history";
-import TimelineView, { type EditPhase, type TimelineApi } from "../timeline/TimelineView";
-import { type TlView, clampZoom, fitView, parseTime, reveal, timecode, zoomAt } from "../timeline/view";
+import TimelineView, { type ContextHit, type EditPhase, type TimelineApi } from "../timeline/TimelineView";
+import { type TlView, clampScroll, clampZoom, easeView, fitView, follow, keyZoomAnchor, parseTime, timecode, zoomAt } from "../timeline/view";
 import { cn } from "../utils/cn";
 import { editorApi } from "./api";
 import { drawFrame } from "./compose";
@@ -110,7 +112,15 @@ type Ask = { title: string; body?: string; ok: string; danger?: boolean; field?:
  * The open project and its undo history, kept while the editor is not on
  * screen (switching tabs unmounts it) so coming back finds both as they were.
  */
-const session: { p: EdProject | null; hist: History<EdProject>; savedAt: number } = { p: null, hist: new History<EdProject>(), savedAt: 0 };
+const session: { p: EdProject | null; hist: History<EdProject>; savedAt: number; view: { id: string; v: TlView } | null } = {
+  p: null,
+  hist: new History<EdProject>(),
+  savedAt: 0,
+  view: null,
+};
+
+/** The project with the timeline's zoom and scroll as they are now. */
+const withView = (p: EdProject): EdProject => (session.view?.id === p.id ? { ...p, view: session.view.v } : p);
 
 /** Discarding `path` keeps the project: it holds other media or objects. */
 const discardKeeps = (p: EdProject, path: string) => p.tl.items.some((i) => i.path !== path);
@@ -129,7 +139,7 @@ function resume(): EdProject {
 function saveOpen(cur: EdProject, rest = loadProjects().filter((x) => x.id !== cur.id)): boolean {
   const stamp = Date.now();
   session.savedAt = stamp;
-  return saveProjects([{ ...cur, updated: stamp }, ...rest]);
+  return saveProjects([{ ...withView(cur), updated: stamp }, ...rest]);
 }
 
 export default function EditorView(props: EditorProps) {
@@ -236,10 +246,52 @@ export default function EditorView(props: EditorProps) {
   const [busy, setBusy] = useState<{ label: string; p: number | null } | null>(null);
   const [ghost, setGhost] = useState<{ track: string; start: number; duration: number; label: string } | null>(null);
   const [belowHint, setBelowHint] = useState<string | null>(null);
-  const [view, setViewState] = useState<TlView>(() => p.view ?? { pxPerSec: 40, scroll: 0 });
+  const [view, setViewState] = useState<TlView>(() => (session.view?.id === p.id ? session.view.v : p.view) ?? { pxPerSec: 40, scroll: 0 });
   const viewRef = useRef(view);
   viewRef.current = view;
-  const setView = useCallback((v: TlView) => setViewState({ pxPerSec: clampZoom(v.pxPerSec), scroll: Math.max(0, v.scroll) }), []);
+  const glide = useRef(0);
+  /** Zoom and scroll, kept in reach: never before 0 or far past the end. */
+  const showView = useCallback((v: TlView) => {
+    const w = tlApi.current?.lanesWidth() ?? 800;
+    const c = clampScroll({ pxPerSec: clampZoom(v.pxPerSec), scroll: Math.max(0, v.scroll) }, projectLength(pRef.current), w);
+    viewRef.current = c;
+    session.view = { id: pRef.current.id, v: c };
+    setViewState(c);
+  }, []);
+  /** Straight away (wheel, drags): stops a glide in progress. */
+  const setView = useCallback(
+    (v: TlView) => {
+      cancelAnimationFrame(glide.current);
+      showView(v);
+    },
+    [showView],
+  );
+  /** Smoothly (keys, buttons, fit). */
+  const glideTo = useCallback(
+    (to: TlView) => {
+      cancelAnimationFrame(glide.current);
+      const from = viewRef.current;
+      const t0 = performance.now();
+      const step = () => {
+        const k = Math.min(1, (performance.now() - t0) / 170);
+        showView(easeView(from, to, k));
+        if (k < 1) glide.current = requestAnimationFrame(step);
+      };
+      glide.current = requestAnimationFrame(step);
+    },
+    [showView],
+  );
+  useEffect(() => () => cancelAnimationFrame(glide.current), []);
+  const [followMode, setFollowMode] = usePersist<"off" | "page" | "smooth">("follow", "page");
+  const followRef = useRef(followMode);
+  followRef.current = followMode;
+  const [flash, setFlash] = useState<string | null>(null);
+  const flashTimer = useRef(0);
+  const say = (text: string) => {
+    setFlash(text);
+    window.clearTimeout(flashTimer.current);
+    flashTimer.current = window.setTimeout(() => setFlash(null), 1800);
+  };
   const focusArea = useRef<"preview" | "timeline" | "other">("timeline");
   const tlApi = useRef<TimelineApi | null>(null);
   const clipboard = useRef<EdItem[]>([]);
@@ -258,17 +310,25 @@ export default function EditorView(props: EditorProps) {
 
   const fit = useCallback(() => {
     const w = tlApi.current?.lanesWidth() ?? 800;
-    setView(fitView(Math.max(5, projectLength(pRef.current)), w));
-  }, [setView]);
+    glideTo(fitView(Math.max(5, projectLength(pRef.current)), w));
+  }, [glideTo]);
+  // First open of a project without a saved view: the whole edit.
+  useEffect(() => {
+    if (!view.scroll && view.pxPerSec === 40 && !p.view && session.view?.id !== p.id) requestAnimationFrame(() => setView(fitView(Math.max(5, projectLength(pRef.current)), tlApi.current?.lanesWidth() ?? 800)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  // Keep the playhead in view while playing.
+  // Keep the playhead in view while playing: a page at a time, or smoothly.
   useEffect(
     () =>
       player.subscribe((t, pl) => {
-        if (!pl) return;
+        const mode = followRef.current;
+        if (!pl || mode === "off") return;
         const w = tlApi.current?.lanesWidth() ?? 800;
         const v = viewRef.current;
-        if (t > v.scroll + w / v.pxPerSec || t < v.scroll) setView(reveal(v, t, w, 0.05));
+        const next = follow(v, t, w, mode);
+        // Smooth: only whole steps of 2 px (one re-render per step, not per frame).
+        if (next !== v && Math.abs(next.scroll - v.scroll) * v.pxPerSec >= 2) setView(next);
       }),
     [player, setView],
   );
@@ -389,7 +449,7 @@ export default function EditorView(props: EditorProps) {
   const switchTo = (next: EdProject) => {
     const cur = pRef.current;
     const list = loadProjects().filter((x) => x.id !== cur.id && x.id !== next.id);
-    saveProjects([{ ...next, updated: Date.now() }, ...(isEmpty(cur) && !cur.source ? [] : [{ ...cur, updated: cur.updated }]), ...list]);
+    saveProjects([{ ...next, updated: Date.now() }, ...(isEmpty(cur) && !cur.source ? [] : [{ ...withView(cur), updated: cur.updated }]), ...list]);
     hist.current.clear();
     gesture.current = null;
     player.pause();
@@ -401,8 +461,9 @@ export default function EditorView(props: EditorProps) {
     setCrop(null);
     player.setProject(next);
     player.seek(0);
+    session.view = null;
     if (next.view) setView(next.view);
-    else requestAnimationFrame(fit);
+    else requestAnimationFrame(() => setView(fitView(Math.max(5, projectLength(pRef.current)), tlApi.current?.lanesWidth() ?? 800)));
   };
 
   // Files sent from the rest of the app (Open in editor, drops on the tab,
@@ -940,6 +1001,22 @@ export default function EditorView(props: EditorProps) {
     : null;
 
   // ------------------------------------------------------------ keys
+  /** Selected clips to the next track up or down that takes them (Alt+Up / Alt+Down). */
+  const moveToTrack = (dir: -1 | 1) => {
+    const cur = pRef.current;
+    const tracks = cur.tl.tracks;
+    const ids = new Set(unlocked([...selRef.current]));
+    const moves: Move[] = [];
+    for (const it of cur.tl.items) {
+      if (!ids.has(it.id)) continue;
+      let k = tracks.findIndex((t) => t.id === it.track) + dir;
+      while (k >= 0 && k < tracks.length && (tracks[k].locked || !accepts(tracks[k].kind as TrackKind, it))) k += dir;
+      if (k >= 0 && k < tracks.length) moves.push({ id: it.id, start: it.start, track: tracks[k].id });
+    }
+    if (!moves.length) return say(selRef.current.size ? `No track ${dir < 0 ? "above" : "below"} takes this` : "Select a clip first");
+    apply({ ...cur, tl: moveItems(cur.tl, moves, "overwrite", editOpts()) }, "once", dir < 0 ? "Move up a track" : "Move down a track");
+  };
+
   const actions: EditorActions = {
     togglePlay: () => {
       shuttle.current = 0;
@@ -986,18 +1063,22 @@ export default function EditorView(props: EditorProps) {
     trimLeft: () => apply({ ...pRef.current, tl: rippleTrimToPlayhead(pRef.current.tl, player.time, "left", selRef.current.size ? selRef.current : null) }, "once", "Trim start"),
     trimRight: () => apply({ ...pRef.current, tl: rippleTrimToPlayhead(pRef.current.tl, player.time, "right", selRef.current.size ? selRef.current : null) }, "once", "Trim end"),
     undo: () => {
+      const label = hist.current.undoLabel;
       const prev = hist.current.undo(pRef.current);
-      if (!prev) return;
+      if (!prev) return say("Nothing to undo");
       pRef.current = prev;
       setP(prev);
       setHv((x) => x + 1);
+      say(`Undo: ${label ?? "last change"}`);
     },
     redo: () => {
+      const label = hist.current.redoLabel;
       const nx = hist.current.redo(pRef.current);
-      if (!nx) return;
+      if (!nx) return say("Nothing to redo");
       pRef.current = nx;
       setP(nx);
       setHv((x) => x + 1);
+      say(`Redo: ${label ?? "change"}`);
     },
     copy: () => void copySel(),
     cut: () => {
@@ -1011,6 +1092,16 @@ export default function EditorView(props: EditorProps) {
       if (tool !== "select") return setTool("select");
       setSel(new Set());
       setGap(null);
+    },
+    deselectAll: () => {
+      setSel(new Set());
+      setGap(null);
+    },
+    moveTrack: (dir) => moveToTrack(dir),
+    toggleFollow: () => {
+      const next = followMode === "off" ? "page" : followMode === "page" ? "smooth" : "off";
+      setFollowMode(next);
+      say(next === "off" ? "Follow the playhead: off" : next === "page" ? "Follow the playhead: a page at a time" : "Follow the playhead: smoothly");
     },
     nudge: (n) => {
       const ids = unlocked(withLinked(pRef.current.tl, selRef.current));
@@ -1031,8 +1122,10 @@ export default function EditorView(props: EditorProps) {
       if (t !== null) player.seek(t);
     },
     zoom: (f) => {
+      // Around the playhead when it is on screen, else the middle; smooth.
       const v = viewRef.current;
-      setView(zoomAt(v, f, Math.max(0, (player.time - v.scroll) * v.pxPerSec)));
+      const w = tlApi.current?.lanesWidth() ?? 800;
+      glideTo(zoomAt(v, f, keyZoomAnchor(v, player.time, w)));
     },
     fit,
     tool: (t) => setTool(t as Tool),
@@ -1206,9 +1299,35 @@ export default function EditorView(props: EditorProps) {
     });
   };
 
-  const onContext = (e: React.MouseEvent, h: { item?: EdItem; track: Track | null; t: number }) => {
+  const onContext = (e: React.MouseEvent, h: ContextHit<EdItem>) => {
     const at = { x: e.clientX, y: e.clientY };
     const cur = pRef.current;
+    if (h.area === "header" && h.track) return trackMenu(h.track, at);
+    if (h.area === "ruler") {
+      const near = cur.tl.markers.find((m) => Math.abs(m.t - h.t) * viewRef.current.pxPerSec < 8);
+      const { inPoint: a, outPoint: b } = cur.tl;
+      setMenu({
+        at,
+        items: [
+          { label: "Move the playhead here", run: () => player.seek(h.t) },
+          { label: "Mark in here", key: "I", run: () => markRange(h.t, b !== null && b <= h.t ? null : b, "Mark in") },
+          { label: "Mark out here", key: "O", run: () => markRange(a !== null && a >= h.t ? null : a, h.t, "Mark out") },
+          { label: "Clear in and out", key: "Alt+X", disabled: a === null && b === null, run: () => markRange(null, null, "Clear in and out") },
+          { sep: true, label: "" },
+          { label: "Add a marker here", key: "M", run: () => apply({ ...cur, tl: addMarker(cur.tl, h.t).tl }, "once", "Add marker") },
+          ...(near
+            ? [
+                { label: "Rename this marker…", run: () => setAsk({ title: "Marker name", ok: "Save", field: near.label ?? "", run: (v) => apply({ ...pRef.current, tl: patchMarker(pRef.current.tl, near.id, { label: v.trim() }) }, "once", "Name marker") }) },
+                { label: "Delete this marker", danger: true, run: () => apply({ ...cur, tl: removeMarker(cur.tl, near.id) }, "once", "Delete marker") },
+              ]
+            : []),
+          { sep: true, label: "" },
+          { label: "Zoom to fit", key: "\\", run: fit },
+          { label: followMode === "off" ? "Follow the playhead: off" : followMode === "page" ? "Follow the playhead: by page" : "Follow the playhead: smooth", key: "Shift+F", run: actions.toggleFollow },
+        ],
+      });
+      return;
+    }
     if (!h.item) {
       const g = h.track ? (() => {
         const items = cur.tl.items.filter((i) => i.track === h.track!.id);
@@ -1325,7 +1444,9 @@ export default function EditorView(props: EditorProps) {
   })();
   const undoL = hist.current.undoLabel;
   const redoL = hist.current.redoLabel;
-  const trackHeight = useCallback((t: Track) => TRACK_H[t.kind] ?? 48, []);
+  const trackHeight = useCallback((t: Track) => t.height ?? TRACK_H[t.kind] ?? 48, []);
+  // Row heights are a view setting: no undo step, saved with the project.
+  const onTrackHeight = useCallback((t: Track, h: number) => setP((x) => (pRef.current = { ...x, tl: patchTrack(x.tl, t.id, { height: h }) })), []);
   const previewTool: Tool = tool === "blade" || tool === "slip" ? "select" : tool;
 
   const arrange = {
@@ -1551,10 +1672,19 @@ export default function EditorView(props: EditorProps) {
           <Btn title={k("Add a marker")} onClick={actions.marker}>
             <Ico d={I.marker} />
           </Btn>
+          <Btn
+            title={`${k("Follow the playhead (off, page, smooth)", followMode === "off" ? "Follow the playhead: off" : followMode === "page" ? "Follow the playhead: a page at a time" : "Follow the playhead: smoothly")}`}
+            on={followMode !== "off"}
+            onClick={actions.toggleFollow}
+          >
+            <Ico d={followMode === "smooth" ? "M2 8h9M8 5l3 3-3 3M13 3v10" : "M2 8h8M7 5l3 3-3 3M12 3v10M14 3v10"} />
+          </Btn>
           <Sep />
           <AddTrack p={p} onAdd={(kind) => apply({ ...pRef.current, tl: addTrack(pRef.current.tl, makeTrack(kind, tracksOf(pRef.current.tl, kind).length + 1), kind === "audio" ? pRef.current.tl.tracks.length : pRef.current.tl.tracks.findIndex((t) => t.kind === kind)) }, "once", "Add track")} />
           <span className="flex-1" />
-          <span className="mr-2 text-[10.5px] text-ink-4">{sel.size ? `${sel.size} selected` : gap ? "Gap selected: Del closes it" : ""}</span>
+          <span className={cn("mr-2 text-[10.5px]", flash ? "text-ink-2" : "text-ink-4")} aria-live="polite">
+            {flash ?? (sel.size ? `${sel.size} selected` : gap ? "Gap selected: Del closes it" : "")}
+          </span>
           <Btn title={k("Zoom out")} onClick={() => actions.zoom(1 / 1.5)}>
             <Ico d={I.zoomOut} />
           </Btn>
@@ -1565,9 +1695,12 @@ export default function EditorView(props: EditorProps) {
             value={Math.round((Math.log(view.pxPerSec / 0.02) / Math.log(2400 / 0.02)) * 1000)}
             onChange={(e) => {
               const z = 0.02 * Math.pow(2400 / 0.02, Number(e.target.value) / 1000);
-              actions.zoom(z / view.pxPerSec);
+              const w = tlApi.current?.lanesWidth() ?? 800;
+              setView(zoomAt(view, z / view.pxPerSec, keyZoomAnchor(view, player.time, w)));
             }}
-            title="Zoom (Ctrl+wheel on the timeline, + and -)"
+            // Hand the keys back to the editor once the slider is let go.
+            onPointerUp={(e) => (e.currentTarget as HTMLInputElement).blur()}
+            title="Zoom (Ctrl+wheel or Z+wheel on the timeline, + and -)"
             className="w-28 accent-[var(--color-accent)]"
           />
           <Btn title={k("Zoom in")} onClick={() => actions.zoom(1.5)}>
@@ -1603,6 +1736,8 @@ export default function EditorView(props: EditorProps) {
             onEdit={setTl}
             accepts={(tr, it) => accepts(tr.kind as TrackKind, it)}
             trackHeight={trackHeight}
+            onTrackHeight={onTrackHeight}
+            cloneItem={(it, id) => ({ ...it, id, shape: it.shape ? { ...it.shape, id } : undefined })}
             renderItem={(it, g, s) => <ItemContent it={it} g={g} selected={s} onFx={onFx} />}
             itemClass={itemTone}
             renderHeader={(tr) => (
@@ -1623,7 +1758,10 @@ export default function EditorView(props: EditorProps) {
               if (it.shape?.kind === "text") {
                 player.seek(Math.max(player.time, it.start));
                 setEditing(it.id);
-              } else if (it.kind === "video" || it.kind === "image") {
+              } else {
+                // Select it and show its settings.
+                setSel(new Set([it.id]));
+                setGap(null);
                 setShowInsp(true);
               }
             }}

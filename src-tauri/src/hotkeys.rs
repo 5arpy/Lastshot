@@ -145,6 +145,8 @@ pub fn on_shortcut(app: &AppHandle, shortcut: &Shortcut, state: ShortcutState) {
         crate::recording::toggle(app.clone());
     } else if crate::audio_guard::is_mic_hotkey(app, shortcut) {
         crate::audio_guard::toggle_mic(app);
+    } else if crate::frames::is_hotkey(shortcut) {
+        crate::frames::on_hotkey(app);
     }
 }
 

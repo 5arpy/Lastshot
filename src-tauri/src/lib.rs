@@ -13,6 +13,8 @@ pub mod commands;
 pub mod editor;
 pub mod foreground;
 pub mod frames;
+#[cfg(feature = "pro-board")]
+pub mod pro_board;
 pub mod hotkeys;
 pub mod media;
 pub mod paths;
@@ -145,6 +147,9 @@ pub fn run() {
 
             recording::sync_bar(&handle);
 
+            // Pop-out frames: reopen the ones that were open, own shortcut.
+            frames::init(&handle);
+
             if let Err(e) =
                 hotkeys::register_all(&handle, &save_key, &toggle_key, &snip_key, &record_key)
             {
@@ -260,6 +265,7 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             popout::on_event(window, event);
+            frames::on_event(window, event);
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == snip::SNIP_LABEL
                     || window.label() == recording::BAR_LABEL
@@ -369,6 +375,25 @@ pub fn run() {
             popout::popout_list,
             frames::viewer_copy_png,
             frames::viewer_save_png,
+            frames::frame_open,
+            frames::frame_list,
+            frames::frame_update,
+            frames::frame_set_rect,
+            frames::frame_fullscreen,
+            frames::frame_raise,
+            frames::frame_close,
+            frames::frame_close_all,
+            frames::frame_click_through_all,
+            frames::frame_hide_all,
+            frames::frame_layout,
+            frames::frame_get_hotkey,
+            frames::frame_set_hotkey,
+            frames::frame_from_clipboard,
+            frames::frame_show_panel,
+            #[cfg(feature = "pro-board")]
+            pro_board::board_keep_picture,
+            #[cfg(feature = "pro-board")]
+            pro_board::board_allow,
             cables::cables_status,
             cables::cables_enable,
             cables::cables_add,
@@ -481,7 +506,8 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         true,
         &[&save, &last30, &record_item, &snip_item, &snip_rec_item, &bar_item, &toggle],
     )?;
-    let menu = Menu::with_items(app, &[&capture, &sep, &show, &folder, &sep, &quit])?;
+    let frames_menu = frames::tray_menu(app)?;
+    let menu = Menu::with_items(app, &[&capture, &frames_menu, &sep, &show, &folder, &sep, &quit])?;
 
     let mut builder = TrayIconBuilder::with_id("lastshot-tray")
         .menu(&menu)
@@ -559,7 +585,9 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 audio_routing::voicemeeter::shutdown();
                 std::process::exit(0);
             }
-            _ => {}
+            other => {
+                frames::on_tray(app, other);
+            }
         })
         .on_tray_icon_event(|tray, event| {
             match event {

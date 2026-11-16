@@ -14,6 +14,8 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "src"),
+      // Open core: Lastshot Pro code only with VITE_PRO_BOARD=1 (src/popout/pro-api.ts).
+      "lastshot-pro": path.resolve(__dirname, process.env.VITE_PRO_BOARD === "1" ? "src/pro/index.ts" : "src/popout/no-pro.ts"),
     },
   },
   server: {

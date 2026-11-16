@@ -137,3 +137,8 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# Dependencies (Tauri, serde, tokio, image...) are not on the media hot
+# paths, which live in this crate and keep opt-level 3: build them for size.
+[profile.release.package."*"]
+opt-level = "s"

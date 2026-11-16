@@ -13,6 +13,7 @@ import { isIntegratedAdapter } from "../lib/gpu";
 import { cn } from "../utils/cn";
 import { Choice, Row, Section, Toggle } from "./ui";
 import AppAudioPicker from "./AppAudioPicker";
+import ShortcutsSettings from "./ShortcutsSettings";
 import { screenshotsDir, shownPath } from "../lib/pathDisplay";
 import { getTheme, onThemeChange, setTheme, type ThemeChoice } from "../lib/theme";
 
@@ -971,6 +972,15 @@ export default function SettingsPanel({
         </Row>
       </Section>
 
+      {/* ---------------------------------------------------------- Shortcuts */}
+      <Section
+        id="shortcuts"
+        title="Shortcuts"
+        description="Keys inside Lastshot's windows. Change, add or remove any of them; the global hotkeys are under Recording and Screenshots."
+      >
+        <ShortcutsSettings settings={settings} onChange={onChange} />
+      </Section>
+
       {/* ---------------------------------------------------------------- App */}
       <Section
         id="app"
@@ -1020,6 +1030,13 @@ export default function SettingsPanel({
               </button>
             ))}
           </div>
+        </Row>
+        <Row label="Interface size" hint="Every Lastshot window, on every screen. Ctrl+plus, Ctrl+minus and Ctrl+0 change it too.">
+          <Choice
+            options={[0.8, 0.9, 1, 1.1, 1.25, 1.5].map((v) => ({ value: v, label: `${Math.round(v * 100)}%` }))}
+            value={Math.round((settings.uiScale ?? 1) * 100) / 100}
+            onPick={(v) => onChange({ uiScale: v })}
+          />
         </Row>
         <Row
           label="Streamer mode"

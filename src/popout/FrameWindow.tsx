@@ -22,6 +22,7 @@ import { actualView, fitView, flipScreenH, flipScreenV, zoomAt, type Size, type 
 import { naturalSize } from "../viewer/render";
 import { assetUrl } from "../lib/bridge";
 import { useShortcuts } from "../lib/useShortcuts";
+import { fk } from "./frameKeys";
 import NumberField from "../components/NumberField";
 import { cn } from "../utils/cn";
 import {
@@ -539,21 +540,18 @@ function FrameChrome({
   useShortcuts(
     "frame",
     [
-      { id: "close", keys: "Ctrl+W", label: "Close this frame", group: "Frame", run: close },
-      { id: "full", keys: "F", label: "Full screen on or off", group: "Frame", run: toggleFull },
+      { ...fk("close"), run: close },
+      { ...fk("full"), run: toggleFull },
       {
-        id: "leave-full",
-        keys: "Escape",
-        label: "Leave full screen",
-        group: "Frame",
+        ...fk("leave-full"),
         run: () => void frames.fullscreen(id, false).then(setFull),
         when: () => full,
       },
-      { id: "on-top", keys: "T", label: "Always on top", group: "Frame", run: () => patch({ onTop: !frame.onTop }) },
-      { id: "through", keys: "X", label: "Click-through (clicks reach the app below)", group: "Frame", run: () => patch({ clickThrough: true }) },
-      { id: "opacity-down", keys: "Shift+-", label: "Less opaque", group: "Frame", run: () => setOpacityBy(-0.1) },
-      { id: "opacity-up", keys: "Shift+=", label: "More opaque", group: "Frame", run: () => setOpacityBy(0.1) },
-      { id: "menu", keys: "Shift+F10", label: "The frame's menu", group: "Frame", run: () => setMenu({ x: 12, y: 12 }) },
+      { ...fk("on-top"), run: () => patch({ onTop: !frame.onTop }) },
+      { ...fk("through"), run: () => patch({ clickThrough: true }) },
+      { ...fk("opacity-down"), run: () => setOpacityBy(-0.1) },
+      { ...fk("opacity-up"), run: () => setOpacityBy(0.1) },
+      { ...fk("menu"), run: () => setMenu({ x: 12, y: 12 }) },
     ],
     takesKeys,
   );

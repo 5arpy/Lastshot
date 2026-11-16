@@ -70,8 +70,53 @@ import {
 import { copyPng, copyText, savePng, stampName } from "./io";
 import { Btn, Chip, I, Icon, Pop, Sep, Slider } from "./ui";
 import { cn } from "../utils/cn";
-import { onShortcutsChange, splitKeys, effectiveKeys, type Shortcut } from "../lib/shortcuts";
+import { declareShortcuts, onShortcutsChange, splitKeys, effectiveKeys, type Shortcut } from "../lib/shortcuts";
 import { useShortcuts } from "../lib/useShortcuts";
+
+/** The viewer keys (rebindable in Settings → Shortcuts, listed in the cheat sheet). */
+export const VIEWER_KEYS: { id: string; keys: string; label: string; group: string }[] = [
+  { id: "fit", keys: "0", label: "Fit the whole picture", group: "Zoom" },
+  { id: "actual", keys: "1", label: "100 % (one picture pixel per screen pixel)", group: "Zoom" },
+  { id: "fill", keys: "2", label: "Fill the view", group: "Zoom" },
+  { id: "zoom-in", keys: "+ | =", label: "Zoom in", group: "Zoom" },
+  { id: "zoom-out", keys: "- | _", label: "Zoom out", group: "Zoom" },
+  { id: "turn-right", keys: "R | ]", label: "Turn right 90°", group: "Turn and mirror" },
+  { id: "turn-left", keys: "Shift+R | [", label: "Turn left 90°", group: "Turn and mirror" },
+  { id: "turn-right-15", keys: "}", label: "Turn right 15°", group: "Turn and mirror" },
+  { id: "turn-left-15", keys: "{", label: "Turn left 15°", group: "Turn and mirror" },
+  { id: "mirror", keys: "H", label: "Mirror left↔right", group: "Turn and mirror" },
+  { id: "flip", keys: "Shift+H", label: "Flip upside down", group: "Turn and mirror" },
+  { id: "value", keys: "M", label: "Value check (grey)", group: "Inspect" },
+  { id: "grid", keys: "G", label: "Grid: thirds · custom · off", group: "Inspect" },
+  { id: "picker", keys: "C", label: "Colour picker", group: "Inspect" },
+  { id: "crop", keys: "Shift+C", label: "Crop", group: "Inspect" },
+  { id: "measure", keys: "D", label: "Measure", group: "Inspect" },
+  { id: "compare", keys: "W", label: "Compare: set B, then cycle wipe · difference · side by side", group: "Inspect" },
+  { id: "colour", keys: "E", label: "Colour adjustments", group: "Inspect" },
+  { id: "copy", keys: "Ctrl+C", label: "Copy this frame as a picture", group: "Picture" },
+  { id: "save", keys: "Ctrl+S", label: "Save this frame as PNG", group: "Picture" },
+  { id: "reset", keys: "Ctrl+0", label: "Reset zoom, turn, flip, colour and crop", group: "Picture" },
+  { id: "undo", keys: "Ctrl+Z", label: "Undo (turn, flip, crop, colour, grid)", group: "Picture" },
+  { id: "redo", keys: "Ctrl+Y | Ctrl+Shift+Z", label: "Redo", group: "Picture" },
+  { id: "play", keys: "K", label: "Play / pause at normal speed", group: "Video" },
+  { id: "slower", keys: "J", label: "Slower", group: "Video" },
+  { id: "faster", keys: "L", label: "Faster", group: "Video" },
+  { id: "frame-back", keys: ",", label: "One frame back", group: "Video" },
+  { id: "frame-on", keys: ".", label: "One frame on", group: "Video" },
+  { id: "frame-back-10", keys: "<", label: "10 frames back", group: "Video" },
+  { id: "frame-on-10", keys: ">", label: "10 frames on", group: "Video" },
+  { id: "loop", keys: "Shift+L", label: "Loop the whole clip", group: "Video" },
+  { id: "loop-a", keys: "A", label: "Loop from here (A)", group: "Video" },
+  { id: "loop-b", keys: "B", label: "Loop to here (B)", group: "Video" },
+  { id: "loop-clear", keys: "Shift+A", label: "Clear the A–B loop", group: "Video" },
+  { id: "onion", keys: "N", label: "Onion skin: off · 1 · 2 frames", group: "Video" },
+];
+declareShortcuts("viewer", VIEWER_KEYS);
+const vk = (id: string) => {
+  const k = VIEWER_KEYS.find((x) => x.id === id);
+  if (!k) throw new Error(`no viewer key ${id}`);
+  return k;
+};
 
 export interface ViewerSettings {
   adjust: Adjust;
@@ -924,60 +969,54 @@ export default function Viewer(props: ViewerProps) {
   };
   const hasVideo = () => !!video;
   const shortcuts: Shortcut[] = [
-    { id: "fit", keys: "0", label: "Fit the whole picture", group: "Zoom", run: fit },
-    { id: "actual", keys: "1", label: "100 % (one picture pixel per screen pixel)", group: "Zoom", run: zoom100 },
-    { id: "fill", keys: "2", label: "Fill the view", group: "Zoom", run: fill },
-    { id: "zoom-in", keys: "+ | =", label: "Zoom in", group: "Zoom", run: () => zoomBy(1.5) },
-    { id: "zoom-out", keys: "- | _", label: "Zoom out", group: "Zoom", run: () => zoomBy(1 / 1.5) },
-    { id: "turn-right", keys: "R | ]", label: "Turn right 90°", group: "Turn and mirror", run: () => turn(90) },
-    { id: "turn-left", keys: "Shift+R | [", label: "Turn left 90°", group: "Turn and mirror", run: () => turn(-90) },
-    { id: "turn-right-15", keys: "}", label: "Turn right 15°", group: "Turn and mirror", run: () => turn(15) },
-    { id: "turn-left-15", keys: "{", label: "Turn left 15°", group: "Turn and mirror", run: () => turn(-15) },
-    { id: "mirror", keys: "H", label: "Mirror left↔right", group: "Turn and mirror", run: mirror },
-    { id: "flip", keys: "Shift+H", label: "Flip upside down", group: "Turn and mirror", run: flipVert },
-    { id: "value", keys: "M", label: "Value check (grey)", group: "Inspect", run: () => patch({ mono: !settingsRef.current.mono }) },
-    { id: "grid", keys: "G", label: "Grid: thirds · custom · off", group: "Inspect", run: cycleGrid },
+    { ...vk("fit"), run: fit },
+    { ...vk("actual"), run: zoom100 },
+    { ...vk("fill"), run: fill },
+    { ...vk("zoom-in"), run: () => zoomBy(1.5) },
+    { ...vk("zoom-out"), run: () => zoomBy(1 / 1.5) },
+    { ...vk("turn-right"), run: () => turn(90) },
+    { ...vk("turn-left"), run: () => turn(-90) },
+    { ...vk("turn-right-15"), run: () => turn(15) },
+    { ...vk("turn-left-15"), run: () => turn(-15) },
+    { ...vk("mirror"), run: mirror },
+    { ...vk("flip"), run: flipVert },
+    { ...vk("value"), run: () => patch({ mono: !settingsRef.current.mono }) },
+    { ...vk("grid"), run: cycleGrid },
     {
-      id: "picker",
-      keys: "C",
-      label: "Colour picker",
-      group: "Inspect",
+      ...vk("picker"),
       run: () => {
         setInspector((v) => !v);
         setMeasuring(false);
       },
     },
-    { id: "crop", keys: "Shift+C", label: "Crop", group: "Inspect", run: () => setCropping((c) => !c) },
+    { ...vk("crop"), run: () => setCropping((c) => !c) },
     {
-      id: "measure",
-      keys: "D",
-      label: "Measure",
-      group: "Inspect",
+      ...vk("measure"),
       run: () => {
         setMeasuring((v) => !v);
         setMeasureLine(null);
         setInspector(false);
       },
     },
-    { id: "compare", keys: "W", label: "Compare: set B, then cycle wipe · difference · side by side", group: "Inspect", run: cycleCompare },
-    { id: "colour", keys: "E", label: "Colour adjustments", group: "Inspect", run: () => setPop((p) => (p === "colour" ? null : "colour")) },
-    { id: "copy", keys: "Ctrl+C", label: "Copy this frame as a picture", group: "Picture", run: () => void copyFrame(), when: () => exportKeys && !window.getSelection()?.toString() },
-    { id: "save", keys: "Ctrl+S", label: "Save this frame as PNG", group: "Picture", run: () => void saveFrame(), when: () => exportKeys },
-    { id: "reset", keys: "Ctrl+0", label: "Reset zoom, turn, flip, colour and crop", group: "Picture", run: resetAll },
-    { id: "undo", keys: "Ctrl+Z", label: "Undo (turn, flip, crop, colour, grid)", group: "Picture", run: () => void undoStep(), when: () => undoOn && undoStack.current.length > 0 },
-    { id: "redo", keys: "Ctrl+Y | Ctrl+Shift+Z", label: "Redo", group: "Picture", run: () => void redoStep(), when: () => undoOn && redoStack.current.length > 0 },
-    { id: "play", keys: "K", label: "Play / pause at normal speed", group: "Video", when: hasVideo, run: () => (setSpeed(1), toggleVideo()) },
-    { id: "slower", keys: "J", label: "Slower", group: "Video", when: hasVideo, run: () => setSpeed(nextSpeed(settingsRef.current.speed, -1)) },
-    { id: "faster", keys: "L", label: "Faster", group: "Video", when: hasVideo, run: () => setSpeed(nextSpeed(settingsRef.current.speed, 1)) },
-    { id: "frame-back", keys: ",", label: "One frame back", group: "Video", when: hasVideo, run: () => step(-1) },
-    { id: "frame-on", keys: ".", label: "One frame on", group: "Video", when: hasVideo, run: () => step(1) },
-    { id: "frame-back-10", keys: "<", label: "10 frames back", group: "Video", when: hasVideo, run: () => step(-10) },
-    { id: "frame-on-10", keys: ">", label: "10 frames on", group: "Video", when: hasVideo, run: () => step(10) },
-    { id: "loop", keys: "Shift+L", label: "Loop the whole clip", group: "Video", when: hasVideo, run: () => patch({ loopAll: !settingsRef.current.loopAll }) },
-    { id: "loop-a", keys: "A", label: "Loop from here (A)", group: "Video", when: hasVideo, run: () => void markA() },
-    { id: "loop-b", keys: "B", label: "Loop to here (B)", group: "Video", when: hasVideo, run: () => void markB() },
-    { id: "loop-clear", keys: "Shift+A", label: "Clear the A–B loop", group: "Video", when: hasVideo, run: () => patch({ ab: { a: null, b: null } }) },
-    { id: "onion", keys: "N", label: "Onion skin: off · 1 · 2 frames", group: "Video", when: hasVideo, run: () => patch({ onion: ((settingsRef.current.onion + 1) % 3) as 0 | 1 | 2 }) },
+    { ...vk("compare"), run: cycleCompare },
+    { ...vk("colour"), run: () => setPop((p) => (p === "colour" ? null : "colour")) },
+    { ...vk("copy"), run: () => void copyFrame(), when: () => exportKeys && !window.getSelection()?.toString() },
+    { ...vk("save"), run: () => void saveFrame(), when: () => exportKeys },
+    { ...vk("reset"), run: resetAll },
+    { ...vk("undo"), run: () => void undoStep(), when: () => undoOn && undoStack.current.length > 0 },
+    { ...vk("redo"), run: () => void redoStep(), when: () => undoOn && redoStack.current.length > 0 },
+    { ...vk("play"), when: hasVideo, run: () => (setSpeed(1), toggleVideo()) },
+    { ...vk("slower"), when: hasVideo, run: () => setSpeed(nextSpeed(settingsRef.current.speed, -1)) },
+    { ...vk("faster"), when: hasVideo, run: () => setSpeed(nextSpeed(settingsRef.current.speed, 1)) },
+    { ...vk("frame-back"), when: hasVideo, run: () => step(-1) },
+    { ...vk("frame-on"), when: hasVideo, run: () => step(1) },
+    { ...vk("frame-back-10"), when: hasVideo, run: () => step(-10) },
+    { ...vk("frame-on-10"), when: hasVideo, run: () => step(10) },
+    { ...vk("loop"), when: hasVideo, run: () => patch({ loopAll: !settingsRef.current.loopAll }) },
+    { ...vk("loop-a"), when: hasVideo, run: () => void markA() },
+    { ...vk("loop-b"), when: hasVideo, run: () => void markB() },
+    { ...vk("loop-clear"), when: hasVideo, run: () => patch({ ab: { a: null, b: null } }) },
+    { ...vk("onion"), when: hasVideo, run: () => patch({ onion: ((settingsRef.current.onion + 1) % 3) as 0 | 1 | 2 }) },
   ];
   useShortcuts("viewer", shortcuts, keys);
   // Tooltips follow rebinding.

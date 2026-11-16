@@ -4,7 +4,7 @@
  * frame, a playing clip (or, in Lastshot Pro, a reference board or a live
  * view). These helpers open, list and change frames from any window.
  */
-import type { View } from "../viewer/math";
+import type { Size, View } from "../viewer/math";
 import { DEFAULT_SETTINGS, type ViewerSettings } from "../viewer/Viewer";
 
 export type FrameKind = "image" | "video" | "board" | "live";
@@ -14,7 +14,7 @@ export interface Frame {
   kind: FrameKind;
   src: string;
   title: string;
-  /** Outer rectangle, physical px. */
+  /** The content's rectangle (the picture; tools grow outside it), physical px. */
   x: number;
   y: number;
   w: number;
@@ -84,6 +84,10 @@ export interface Layout {
 /** What an image/video frame remembers (stored in `Frame.view`). */
 export interface FrameViewState {
   v?: View | null;
+  /** The stage (CSS px) `v` was made for: a restored view is scaled to the stage it gets. */
+  st?: Size | null;
+  /** `v` was the fitted placement: it is fitted again (keeping its turn and flips). */
+  fit?: boolean;
   s?: ViewerSettings;
   /** Video: where it was and whether it played. */
   t?: number;
@@ -99,6 +103,17 @@ export const EVT_ASK_CLOSE = "lastshot://frame-ask-close";
 export const LABEL_PREFIX = "frame-";
 /** The Pop-outs panel drives a frame's view: `{ id, cmd }`. */
 export const EVT_CMD = "lastshot://frame-cmd";
+/** To one frame: its content size (physical px) and where its tools are. */
+export const EVT_CONTENT = "lastshot://frame-content";
+/** To one frame: Ctrl+Alt held over it made it clickable for now (true), or that ended. */
+export const EVT_PEEK = "lastshot://frame-peek";
+
+export interface ContentInfo {
+  w: number;
+  h: number;
+  side: "top" | "bottom" | "none";
+  chrome: number;
+}
 
 /** What the Pop-outs panel can ask a frame's viewer to do. */
 export type FrameCmd = "zoomIn" | "zoomOut" | "fit" | "actual" | "flipH" | "flipV" | "gray" | "grid" | "reset";
@@ -135,6 +150,18 @@ export const frames = {
   setHotkey: (hotkey: string) => invoke<string>("frame_set_hotkey", { hotkey }),
   fromClipboard: () => invoke<Frame>("frame_from_clipboard"),
   showPanel: () => invoke<void>("frame_show_panel"),
+  /** Shows the tools strip outside the content (`height` CSS px) or removes it (0). */
+  chrome: (id: string, height: number) => invoke<"top" | "bottom" | "none">("frame_chrome", { id, height }),
+  onContent(handler: (c: ContentInfo) => void): Promise<() => void> {
+    const t = window.__TAURI__;
+    if (!t) return Promise.resolve(() => undefined);
+    return t.event.listen<ContentInfo>(EVT_CONTENT, (e) => handler(e.payload));
+  },
+  onPeek(handler: (on: boolean) => void): Promise<() => void> {
+    const t = window.__TAURI__;
+    if (!t) return Promise.resolve(() => undefined);
+    return t.event.listen<boolean>(EVT_PEEK, (e) => handler(!!e.payload));
+  },
   onChange(handler: (list: Frame[]) => void): Promise<() => void> {
     const t = window.__TAURI__;
     if (!t) return Promise.resolve(() => undefined);

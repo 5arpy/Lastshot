@@ -434,6 +434,7 @@ pub fn run() {
             frames::frame_list,
             frames::frame_update,
             frames::frame_set_rect,
+            frames::frame_chrome,
             frames::frame_fullscreen,
             frames::frame_raise,
             frames::frame_close,
@@ -588,6 +589,8 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     )?;
     let frames_menu = frames::tray_menu(app)?;
     let menu = Menu::with_items(app, &[&capture, &frames_menu, &sep, &show, &folder, &sep, &quit])?;
+    // "Frames: turn off click-through" on top while any frame ignores the mouse.
+    frames::tray_attach(app, &menu)?;
 
     let mut builder = TrayIconBuilder::with_id("lastshot-tray")
         .menu(&menu)

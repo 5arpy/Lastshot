@@ -11,12 +11,13 @@
  */
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import pro from "lastshot-pro";
-import Viewer, { DEFAULT_SETTINGS, type ViewerSettings } from "../viewer/Viewer";
+import Viewer, { DEFAULT_SETTINGS, type ViewerApi, type ViewerSettings } from "../viewer/Viewer";
 import { Btn, Icon } from "../viewer/ui";
-import type { View } from "../viewer/math";
+import { actualView, fitView, flipScreenH, flipScreenV, zoomAt, type View } from "../viewer/math";
+import { naturalSize } from "../viewer/render";
 import { assetUrl } from "../lib/bridge";
 import { cn } from "../utils/cn";
-import { frames, type Frame, type FrameViewState, type Layout } from "./frames";
+import { frames, type Frame, type FrameCmd, type FrameViewState, type Layout } from "./frames";
 import { dragRect, snapRect, snapTargets, type Edge, type R } from "./snap";
 
 const SNAP_PX = 10;
@@ -365,6 +366,51 @@ function MediaBody({ frame, say, onFullscreen }: { frame: Frame; say: (m: string
   );
   const url = useMemo(() => assetUrl(frame.src) || frame.src, [frame.src]);
 
+  // The Pop-outs panel in the main window drives the view (a click-through
+  // frame cannot be clicked).
+  const api = useRef<ViewerApi | null>(null);
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  const sourceRef = useRef(source);
+  sourceRef.current = source;
+  useEffect(() => {
+    let off: (() => void) | undefined;
+    let alive = true;
+    const setS = (s: ViewerSettings) => {
+      setSettings(s);
+      save({ s });
+    };
+    const run = (cmd: FrameCmd) => {
+      const a = api.current;
+      const s = settingsRef.current;
+      if (cmd === "gray") return setS({ ...s, adjust: { ...s.adjust, grayscale: s.adjust.grayscale >= 0.5 ? 0 : 1 } });
+      if (cmd === "grid")
+        return setS({ ...s, grid: { ...s.grid, kind: s.grid.kind === "off" ? (s.grid.cols === 4 && s.grid.rows === 4 ? "thirds" : "custom") : "off" } });
+      if (!a) return;
+      const v = a.getView();
+      const st = a.stage();
+      const n = naturalSize(sourceRef.current);
+      const c = n.w > 0 && n.h > 0 ? n : null;
+      const dpr = window.devicePixelRatio || 1;
+      const centre = { x: st.w / 2, y: st.h / 2 };
+      if (cmd === "zoomIn") a.setView(zoomAt(v, centre, 1.25, dpr));
+      else if (cmd === "zoomOut") a.setView(zoomAt(v, centre, 1 / 1.25, dpr, c ? fitView(c, st).scale / 4 : undefined));
+      else if (cmd === "fit") a.fit();
+      else if (cmd === "actual") a.setView(actualView(st, v, dpr));
+      else if (cmd === "flipH") a.setView(flipScreenH(v));
+      else if (cmd === "flipV") a.setView(flipScreenV(v));
+      else if (cmd === "reset") {
+        setS({ ...s, adjust: { ...s.adjust, grayscale: 0 }, grid: { ...s.grid, kind: "off" } });
+        if (c) a.setView(fitView(c, st));
+      }
+    };
+    void frames.onCommand(frame.id, run).then((u) => (alive ? (off = u) : u()));
+    return () => {
+      alive = false;
+      off?.();
+    };
+  }, [frame.id, save]);
+
   useEffect(() => {
     if (frame.kind !== "image") return;
     const img = new Image();
@@ -429,6 +475,7 @@ function MediaBody({ frame, say, onFullscreen }: { frame: Frame; say: (m: string
         bar="auto"
         barPlace="bottom"
         videoBar={frame.kind === "video"}
+        apiRef={api}
         initialView={(saved.v as View | undefined) ?? null}
         onViewChange={(v) => save({ v })}
         settings={settings}

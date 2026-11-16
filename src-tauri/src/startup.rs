@@ -58,6 +58,13 @@ pub fn ensure_main(app: &AppHandle, visible: bool) -> Option<tauri::WebviewWindo
     let mut conf = conf;
     conf.visible = visible;
     conf.create = true;
+    if is_test_instance() {
+        // Test copies never cover the user's screen or take the focus.
+        conf.center = false;
+        conf.x = Some(-24000.0);
+        conf.y = Some(100.0);
+        conf.focus = false;
+    }
     let w = tauri::WebviewWindowBuilder::from_config(app, &conf).ok()?.build().ok()?;
     crate::studio::allow_camera(&w);
     if let Some(state) = app.try_state::<crate::commands::AppState>() {

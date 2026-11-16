@@ -5,6 +5,8 @@ import StudioPanel from "./components/StudioPanel";
 import FolderSidebar, { matchesFolder } from "./components/FolderSidebar";
 import ClipTrimmerModal from "./components/ClipTrimmerModal";
 import ClipsExplorer from "./components/ClipsExplorer";
+import FramesPanel from "./popout/FramesPanel";
+import { PICTURE_FILE, frames as popFrames, isPictureType, popOutClip, popOutPicture, popOutPicturePath } from "./popout/frames";
 import type { Loc as ExplorerLoc } from "./lib/explorer";
 import { isInside as pathInside, samePath as pathSame } from "./lib/explorer";
 import PipelinePanel from "./components/PipelinePanel";
@@ -131,6 +133,9 @@ export default function App() {
   const [tab, setTab] = useState<"home" | "clips" | "editor" | "studio" | "audio" | "settings">("home");
   // Tabs shown in a window of their own (Audio, Editor, Studio).
   const [popped, setPopped] = useState<PopView[]>([]);
+  // Pop-out frames: the panel and how many frames are open.
+  const [framesOpen, setFramesOpen] = useState(false);
+  const [frameCount, setFrameCount] = useState(0);
   const poppedRef = useRef<PopView[]>([]);
   // Files handed to the Editor (drag & drop on its tab, "Open in Editor").
   const [editorIncoming, setEditorIncoming] = useState<{ paths: string[]; seq: number } | null>(null);
@@ -440,9 +445,15 @@ export default function App() {
             if (paths.length) sendToEditor(paths);
             return;
           }
+          // Pictures dropped anywhere else pop out as frames.
+          const pics = paths.filter((p) => PICTURE_FILE.test(p));
+          if (pics.length) {
+            for (const p of pics) void popOutPicturePath(p).catch((e) => pushToast("err", "Could not pop out the picture", String(e)));
+            return;
+          }
           const video = paths.find((p) => /\.(mp4|mov|m4v)$/i.test(p));
           if (video) void openFile(video);
-          else if (paths.length) pushToast("warn", "Not a video", "Lastshot opens MP4, MOV and M4V files.");
+          else if (paths.length) pushToast("warn", "Not a video or picture", "Lastshot opens MP4, MOV and M4V videos, and pops out PNG, JPG, GIF, WebP and BMP pictures.");
         }),
       ),
     );
@@ -1807,6 +1818,34 @@ export default function App() {
     return isIntegratedAdapter(active?.adapter);
   }, [monitors, settings.monitorIndex]);
 
+  // Pop-out frames: count, "show the panel" (tray, a frame's bar), and
+  // pictures pasted with Ctrl+V.
+  useEffect(() => {
+    if (!native) return;
+    let alive = true;
+    const offs: Array<() => void> = [];
+    const keep = (p: Promise<() => void>) => void p.then((u) => (alive ? offs.push(u) : u()));
+    void popFrames.list().then((l) => alive && setFrameCount(l.length));
+    keep(popFrames.onChange((l) => setFrameCount(l.length)));
+    keep(popFrames.onPanel(() => setFramesOpen(true)));
+    const paste = (e: ClipboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      const file = Array.from(e.clipboardData?.items ?? [])
+        .find((i) => i.kind === "file" && isPictureType(i.type))
+        ?.getAsFile();
+      if (!file) return;
+      e.preventDefault();
+      void popOutPicture(file, "Pasted picture").catch((err) => pushToast("err", "Could not pop out the picture", String(err)));
+    };
+    window.addEventListener("paste", paste);
+    return () => {
+      alive = false;
+      window.removeEventListener("paste", paste);
+      offs.forEach((u) => u());
+    };
+  }, [native, pushToast]);
+
   return (
     <div className="relative flex h-screen w-screen flex-col overflow-hidden bg-app text-ink">
       <TitleBar armed={armed} native={native} version={APP_VERSION} />
@@ -1856,6 +1895,23 @@ export default function App() {
         </div>
 
         <div className="flex items-center gap-2.5 font-mono text-[11px]">
+          {native && (
+            <button
+              type="button"
+              onClick={() => setFramesOpen((o) => !o)}
+              title="Pop-out frames: see-through pictures and clips on top of other apps (paste a picture with Ctrl+V or drop one here)"
+              className={cn(
+                "flex items-center gap-1.5 rounded-md border px-2.5 py-1 font-sans text-[12px] transition-colors",
+                framesOpen ? "border-accent/50 bg-accent/15 text-accent-fg" : "border-line bg-surface text-ink-3 hover:border-accent hover:text-ink",
+              )}
+            >
+              <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 fill-none stroke-current" strokeWidth="1.5">
+                <path d="M2 4h8v7H2zM6 2h8v7" />
+              </svg>
+              Pop-outs
+              {frameCount > 0 && <span className="rounded-full bg-accent/25 px-1.5 font-mono text-[10px] text-accent-fg">{frameCount}</span>}
+            </button>
+          )}
           {isPopView(tab) && !popped.includes(tab) && native && (
             <button
               type="button"
@@ -2467,6 +2523,7 @@ export default function App() {
                 onReveal={revealPath}
                 onCopyForDiscord={copyForDiscord}
                 onShare={(c) => void shareClip(c)}
+                onPopOut={native ? (c) => void popOutClip(c).catch((e) => pushToast("err", "Could not pop out the clip", String(e))) : undefined}
                 onToggleFavorite={toggleFavorite}
                 onChanged={refreshClips}
                 onToast={pushToast}
@@ -2586,6 +2643,8 @@ export default function App() {
           </div>
         ))}
       </div>
+
+      <FramesPanel open={framesOpen} onClose={() => setFramesOpen(false)} onToast={pushToast} />
 
       {/* Trimmer Modal */}
       {activeClip && (

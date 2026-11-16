@@ -50,6 +50,7 @@ type TauriGlobal = {
       handler: (e: { payload: T }) => void,
     ) => Promise<() => void>;
     emitTo: (target: string, event: string, payload?: unknown) => Promise<void>;
+    emit?: (event: string, payload?: unknown) => Promise<void>;
   };
   window?: {
     getCurrentWindow: () => {

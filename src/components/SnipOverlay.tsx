@@ -3,6 +3,8 @@ import { lastshot, isTauri, showCurrentWindow } from "../lib/bridge";
 import type { SnipCapture, SnipWindowRect } from "../lib/types";
 import { cn } from "../utils/cn";
 import Viewer from "../viewer/Viewer";
+import { Btn, Icon } from "../viewer/ui";
+import { popOutCanvas } from "../popout/frames";
 import { sameView, viewForRect, type Pt } from "../viewer/math";
 
 /**
@@ -243,8 +245,32 @@ export default function SnipOverlay() {
   }, [capture, select]);
 
   // ------------------------------------------------------------ finish
+  /** Pins the snip (with its markup) where it was taken, as a pop-out frame. */
+  const popOut = useCallback(async () => {
+    const c = canvasRef.current;
+    if (!c || !sel || busy || !isTauri()) return;
+    setBusy("Popping out…");
+    try {
+      type Pos = { x: number; y: number };
+      const w = window.__TAURI__?.window?.getCurrentWindow() as unknown as { outerPosition?: () => Promise<Pos> } | undefined;
+      const origin = (await w?.outerPosition?.().catch(() => null)) ?? { x: 0, y: 0 };
+      await popOutCanvas(c, "Snip", undefined, { x: origin.x + sel.x, y: origin.y + sel.y });
+      await lastshot.snipCancel();
+    } catch (e) {
+      setError(String(e));
+      setBusy(null);
+    }
+  }, [sel, busy]);
+
   /** Host buttons at the end of the viewer's bar. */
-  const snipExtra: React.ReactNode = null;
+  const snipExtra: React.ReactNode = isTauri() ? (
+    <Btn title="Pop out: pin this snip on top of other apps, see-through (Ctrl+P)" wide onClick={() => void popOut()}>
+      <span className="flex items-center gap-1">
+        <Icon d="M2 5h8v8H2zM6 2h8v8" />
+        Pop out
+      </span>
+    </Btn>
+  ) : null;
 
   const finish = useCallback(
     async (save: boolean) => {
@@ -315,6 +341,9 @@ export default function SnipOverlay() {
       } else if (e.ctrlKey && k === "s") {
         e.preventDefault();
         void finish(true);
+      } else if (e.ctrlKey && k === "p") {
+        e.preventDefault();
+        void popOut();
       } else if (!e.ctrlKey && !e.altKey) {
         const t = TOOLS.find((t) => t.key.toLowerCase() === k);
         if (t) setTool(t.id);
@@ -322,7 +351,7 @@ export default function SnipOverlay() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [sel, hover, mode, cancel, finish, startRecording, select, selectAll]);
+  }, [sel, hover, mode, cancel, finish, popOut, startRecording, select, selectAll]);
 
   // ------------------------------------------------------------ picking pointer
   const onPickDown = (e: React.PointerEvent) => {

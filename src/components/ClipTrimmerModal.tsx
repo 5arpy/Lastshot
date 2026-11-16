@@ -23,6 +23,8 @@ import {
 import { clamp, formatBytes, formatTimecode } from "../lib/format";
 import { cn } from "../utils/cn";
 import Viewer, { type ViewerApi } from "../viewer/Viewer";
+import { Btn, Icon } from "../viewer/ui";
+import { popOutCanvas, popOutClip } from "../popout/frames";
 import type { Size, View } from "../viewer/math";
 
 type Thumb = "start" | "end" | "playhead" | null;
@@ -517,8 +519,35 @@ export default function ClipTrimmerModal({
     }
   };
 
-  /** Host buttons at the end of the viewer's bar. */
-  const viewerExtra: React.ReactNode = null;
+  /** Host buttons at the end of the viewer's bar: pop out into a frame. */
+  const setStatusError = (m: string) => {
+    setStatus(m);
+    window.setTimeout(() => setStatus(null), 3500);
+  };
+  const popFrame = () => {
+    const c = viewerApi.current?.frame();
+    if (!c) return;
+    const t = videoRef.current?.currentTime ?? playhead;
+    const name = `${clip.file_name.replace(/\.[^.]+$/, "")} @ ${formatTimecode(t)}`;
+    void run("Popping out…", () => popOutCanvas(c, name).then(() => undefined)).catch((e) => setStatusError(String(e)));
+  };
+  const popClip = () => {
+    const v = videoRef.current;
+    void popOutClip(clip, { t: v?.currentTime ?? playhead, playing: true, muted: true }).catch((e) => setStatusError(String(e)));
+  };
+  const viewerExtra: React.ReactNode = lastshot.isTauri() ? (
+    <>
+      <Btn title="Pop out this frame: a see-through picture on top of other apps" onClick={popFrame}>
+        <Icon d="M2 5h8v8H2zM6 2h8v8" />
+      </Btn>
+      <Btn title="Pop out the clip: keeps playing and looping on top of other apps" wide onClick={popClip}>
+        <span className="flex items-center gap-1">
+          <Icon d="M2 5h8v8H2zM5 7.5v3l2.5-1.5z" />
+          Clip
+        </span>
+      </Btn>
+    </>
+  ) : null;
 
   const takeSnapshot = () => {
     const v = videoRef.current;

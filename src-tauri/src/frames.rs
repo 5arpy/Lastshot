@@ -310,6 +310,35 @@ fn place(win: &WebviewWindow, x: i32, y: i32, w: u32, h: u32) {
     let _ = win.set_size(tauri::PhysicalSize::new(w.max(40), h.max(30)));
 }
 
+/// Click-through on or off. Runs on the main thread so the window style is
+/// in place before `keep_visible` looks at it.
+fn set_click_through(app: &AppHandle, win: &WebviewWindow, on: bool) {
+    let w = win.clone();
+    let _ = app.run_on_main_thread(move || {
+        let _ = w.set_ignore_cursor_events(on);
+        keep_visible(&w);
+    });
+}
+
+/// Click-through makes the window WS_EX_TRANSPARENT | WS_EX_LAYERED (tao).
+/// A layered window that was never given its alpha is not drawn at all, so
+/// give it full alpha: the picture's own opacity is drawn by the page.
+fn keep_visible(win: &WebviewWindow) {
+    #[cfg(windows)]
+    if let Ok(hwnd) = win.hwnd() {
+        use windows::Win32::Foundation::{COLORREF, HWND};
+        use windows::Win32::UI::WindowsAndMessaging::{GetWindowLongPtrW, SetLayeredWindowAttributes, GWL_EXSTYLE, LWA_ALPHA, WS_EX_LAYERED};
+        let h = HWND(hwnd.0 as _);
+        unsafe {
+            if GetWindowLongPtrW(h, GWL_EXSTYLE) as u32 & WS_EX_LAYERED.0 != 0 {
+                let _ = SetLayeredWindowAttributes(h, COLORREF(0), 255, LWA_ALPHA);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = win;
+}
+
 fn screens(app: &AppHandle) -> Vec<(i32, i32, u32, u32)> {
     app.available_monitors()
         .unwrap_or_default()
@@ -334,6 +363,9 @@ fn build_window(app: &AppHandle, f: &Frame) -> Result<WebviewWindow, String> {
         .resizable(true)
         .skip_taskbar(true)
         .always_on_top(f.on_top)
+        // Never takes the keyboard focus, not even when clicked: Blender (or
+        // whatever is traced in) keeps it.
+        .focusable(false)
         .focused(false)
         .visible(false)
         .drag_and_drop(false)
@@ -345,7 +377,10 @@ fn build_window(app: &AppHandle, f: &Frame) -> Result<WebviewWindow, String> {
     place(&win, f.x, f.y, f.w, f.h);
     #[cfg(feature = "pro-board")]
     crate::pro_board::on_window(&win, &f.kind);
-    let _ = win.set_ignore_cursor_events(f.click_through);
+    if f.click_through {
+        let _ = win.set_ignore_cursor_events(true);
+        keep_visible(&win);
+    }
     if !f.hidden {
         show_quietly(&win);
     }
@@ -370,7 +405,11 @@ fn initial_rect(app: &AppHandle, nw: u32, nh: u32, at: Option<(i32, i32)>) -> (i
             (a.position.x, a.position.y, a.size.width, a.size.height)
         })
         .unwrap_or((0, 0, 1920, 1040));
-    let (w, h) = fit_size(nw, nh, (aw as f64 * 0.45) as u32, (ah as f64 * 0.55) as u32, 160);
+    let (w, h) = match at {
+        // Pinned where it was snipped: its own size, as long as it fits.
+        Some(_) => fit_size(nw, nh, aw, ah, 60),
+        None => fit_size(nw, nh, (aw as f64 * 0.45) as u32, (ah as f64 * 0.55) as u32, 160),
+    };
     let (x, y) = match at {
         Some((x, y)) => (x, y),
         None => {
@@ -501,7 +540,11 @@ pub async fn frame_open(app: AppHandle, req: OpenFrame) -> Result<Frame, String>
     if !src.is_empty() {
         allow_file(&app, &src);
     }
-    let (nw, nh) = (req.width.unwrap_or(800).max(1), req.height.unwrap_or(600).max(1));
+    let from_file = if req.width.is_none() && kind == "image" && !src.is_empty() { file_picture_size(&src) } else { None };
+    let (nw, nh) = match from_file {
+        Some((w, h)) => (w.max(1), h.max(1)),
+        None => (req.width.unwrap_or(800).max(1), req.height.unwrap_or(600).max(1)),
+    };
     let at = req.x.zip(req.y);
     let (x, y, w, h) = initial_rect(&app, nw, nh, at);
     let title = req.title.clone().unwrap_or_else(|| {
@@ -562,7 +605,7 @@ pub fn frame_update(app: AppHandle, id: String, patch: FramePatch) -> Result<Fra
             let _ = win.set_always_on_top(f.on_top);
         }
         if through {
-            let _ = win.set_ignore_cursor_events(f.click_through);
+            set_click_through(&app, &win, f.click_through);
         }
         if shown {
             if f.hidden {
@@ -572,11 +615,9 @@ pub fn frame_update(app: AppHandle, id: String, patch: FramePatch) -> Result<Fra
             }
         }
     }
-    // A view-only change (zoom, colour…) is the frame's own business: only
-    // window-level changes are told to every window.
-    if patch.view.is_none() || top || through || shown || patch.opacity.is_some() || patch.title.is_some() {
-        announce(&app);
-    }
+    // Every window hears it (view changes too, so the Pop-outs panel shows
+    // flip, grayscale and grid); frames save their view at most every 0.7 s.
+    announce(&app);
     Ok(f)
 }
 
@@ -782,7 +823,60 @@ pub fn picture_size(b: &[u8]) -> Option<(u32, u32)> {
         let h = i32::from_le_bytes(b[22..26].try_into().ok()?);
         return Some((w.unsigned_abs(), h.unsigned_abs()));
     }
+    if b.len() >= 10 && (b.starts_with(b"GIF87a") || b.starts_with(b"GIF89a")) {
+        return Some((u16::from_le_bytes([b[6], b[7]]) as u32, u16::from_le_bytes([b[8], b[9]]) as u32));
+    }
+    if b.starts_with(&[0xFF, 0xD8]) {
+        return jpeg_size(b);
+    }
+    if b.len() >= 30 && &b[..4] == b"RIFF" && &b[8..12] == b"WEBP" {
+        return match &b[12..16] {
+            b"VP8X" => Some((u32::from_le_bytes([b[24], b[25], b[26], 0]) + 1, u32::from_le_bytes([b[27], b[28], b[29], 0]) + 1)),
+            b"VP8L" => {
+                let v = u32::from_le_bytes([b[21], b[22], b[23], b[24]]);
+                Some(((v & 0x3FFF) + 1, ((v >> 14) & 0x3FFF) + 1))
+            }
+            b"VP8 " => Some((u16::from_le_bytes([b[26], b[27]]) as u32 & 0x3FFF, u16::from_le_bytes([b[28], b[29]]) as u32 & 0x3FFF)),
+            _ => None,
+        };
+    }
     None
+}
+
+/// Width and height from a JPEG's first frame header (SOF0-SOF15).
+fn jpeg_size(b: &[u8]) -> Option<(u32, u32)> {
+    let mut i = 2;
+    while i + 9 < b.len() {
+        if b[i] != 0xFF {
+            i += 1;
+            continue;
+        }
+        let m = b[i + 1];
+        if m == 0xFF {
+            i += 1;
+            continue;
+        }
+        if m == 0x01 || (0xD0..=0xD9).contains(&m) {
+            i += 2;
+            continue;
+        }
+        let len = u16::from_be_bytes([b[i + 2], b[i + 3]]) as usize;
+        if (0xC0..=0xCF).contains(&m) && m != 0xC4 && m != 0xC8 && m != 0xCC {
+            let h = u16::from_be_bytes([b[i + 5], b[i + 6]]) as u32;
+            let w = u16::from_be_bytes([b[i + 7], b[i + 8]]) as u32;
+            return (w > 0 && h > 0).then_some((w, h));
+        }
+        i += 2 + len;
+    }
+    None
+}
+
+/// A picture file's size from its first 256 KB (EXIF can push the JPEG header).
+fn file_picture_size(path: &str) -> Option<(u32, u32)> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    std::fs::File::open(path).ok()?.take(256 * 1024).read_to_end(&mut buf).ok()?;
+    picture_size(&buf)
 }
 
 /// Asks the main window to show its Pop-outs panel.
@@ -1125,6 +1219,22 @@ mod tests {
         assert_eq!(picture_ext(b"GIF89a.."), Some("gif"));
         assert_eq!(picture_ext(b"RIFF\0\0\0\0WEBPVP8 "), Some("webp"));
         assert_eq!(picture_ext(b"<svg"), None);
+    }
+
+    #[test]
+    fn gif_jpeg_and_webp_sizes() {
+        let gif = [b'G', b'I', b'F', b'8', b'9', b'a', 0x40, 0x01, 0xF0, 0x00];
+        assert_eq!(picture_size(&gif), Some((320, 240)));
+        // SOI, APP0 (len 16), SOF0 8-bit 300x200.
+        let mut jpg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+        jpg.extend_from_slice(&[0; 14]);
+        jpg.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0xC8, 0x01, 0x2C, 0x03]);
+        jpg.extend_from_slice(&[0; 12]);
+        assert_eq!(picture_size(&jpg), Some((300, 200)));
+        let mut webp = b"RIFF\0\0\0\0WEBPVP8X".to_vec();
+        webp.extend_from_slice(&[0; 8]);
+        webp.extend_from_slice(&[0x7F, 0x02, 0x00, 0xDF, 0x01, 0x00]);
+        assert_eq!(picture_size(&webp), Some((640, 480)));
     }
 
     #[test]

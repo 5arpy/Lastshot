@@ -30,6 +30,8 @@ interface Props {
   onReveal: (path: string) => void;
   onCopyForDiscord: (paths: string[]) => void;
   onShare: (clip: ClipMetadata) => void;
+  /** Pops the clip out into a see-through frame that keeps playing. */
+  onPopOut?: (clip: ClipMetadata) => void;
   onToggleFavorite: (clip: ClipMetadata) => void;
   /** Files changed: read the library again. */
   onChanged: () => void;
@@ -465,6 +467,7 @@ function ClipsExplorer(props: Props) {
       ...(clip
         ? [
             { label: "Play", run: () => props.onPlay(clip), off: many > 1 },
+            ...(props.onPopOut ? [{ label: "Pop out (on top, see-through)", run: () => props.onPopOut?.(clip), off: many > 1 }] : []),
             { label: "Copy for Discord", key: "Ctrl+C", run: () => props.onCopyForDiscord(selectedClips.map((c) => c.path)) },
             { label: "Shrink & copy", run: () => props.onShare(clip), off: many > 1 },
             { label: clip.favorite ? "Unstar" : "Star", run: () => props.onToggleFavorite(clip), off: many > 1 },

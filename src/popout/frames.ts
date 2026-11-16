@@ -70,6 +70,11 @@ export interface FrameViewState {
 export const EVT_FRAMES = "lastshot://frames";
 export const EVT_PANEL = "lastshot://frames-panel";
 export const LABEL_PREFIX = "frame-";
+/** The Pop-outs panel drives a frame's view: `{ id, cmd }`. */
+export const EVT_CMD = "lastshot://frame-cmd";
+
+/** What the Pop-outs panel can ask a frame's viewer to do. */
+export type FrameCmd = "zoomIn" | "zoomOut" | "fit" | "actual" | "flipH" | "flipV" | "gray" | "grid" | "reset";
 
 function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const t = window.__TAURI__;
@@ -100,6 +105,19 @@ export const frames = {
     const t = window.__TAURI__;
     if (!t) return Promise.resolve(() => undefined);
     return t.event.listen<Frame[]>(EVT_FRAMES, (e) => handler(e.payload));
+  },
+  /** Sends a view command to one frame window. */
+  command(id: string, cmd: FrameCmd): Promise<void> {
+    const t = window.__TAURI__;
+    if (!t) return Promise.resolve();
+    return t.event.emitTo(LABEL_PREFIX + id, EVT_CMD, { id, cmd });
+  },
+  onCommand(id: string, handler: (cmd: FrameCmd) => void): Promise<() => void> {
+    const t = window.__TAURI__;
+    if (!t) return Promise.resolve(() => undefined);
+    return t.event.listen<{ id: string; cmd: FrameCmd }>(EVT_CMD, (e) => {
+      if (e.payload?.id === id) handler(e.payload.cmd);
+    });
   },
   onPanel(handler: () => void): Promise<() => void> {
     const t = window.__TAURI__;
@@ -151,10 +169,34 @@ export async function popOutPicture(f: Blob, title?: string): Promise<Frame> {
   return frames.open({ kind: "image", data, title: title ?? ((f as File).name || "Picture"), width: size.w, height: size.h });
 }
 
-/** Pops out a canvas (a clip frame, a snip) as a picture. */
-export async function popOutCanvas(c: HTMLCanvasElement, title: string, view?: FrameViewState): Promise<Frame> {
+/** Pops out a canvas (a clip frame, a snip) as a picture; `at` = screen px. */
+export async function popOutCanvas(
+  c: HTMLCanvasElement,
+  title: string,
+  view?: FrameViewState,
+  at?: { x: number; y: number },
+): Promise<Frame> {
   const data = c.toDataURL("image/png");
-  return frames.open({ kind: "image", data, title, width: c.width, height: c.height, view });
+  return frames.open({ kind: "image", data, title, width: c.width, height: c.height, view, x: at?.x, y: at?.y });
+}
+
+/** Pops out a picture file that is already on disk (a drop from Explorer). */
+export function popOutPicturePath(path: string): Promise<Frame> {
+  return frames.open({ kind: "image", path });
+}
+
+export const PICTURE_FILE = /\.(png|jpe?g|gif|webp|bmp)$/i;
+
+/** Settings that show what the panel's toggles mean for this frame. */
+export function viewFlags(f: Frame): { gray: boolean; grid: boolean; flipH: boolean; flipV: boolean; zoom: number | null } {
+  const st = (f.view ?? {}) as FrameViewState;
+  return {
+    gray: (st.s?.adjust?.grayscale ?? 0) >= 0.5,
+    grid: !!st.s?.grid && st.s.grid.kind !== "off",
+    flipH: !!st.v?.flipH,
+    flipV: !!st.v?.flipV,
+    zoom: null,
+  };
 }
 
 /** Pops out a clip that keeps playing in its own window. */

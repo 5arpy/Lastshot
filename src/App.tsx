@@ -1142,6 +1142,28 @@ export default function App() {
     }
   }, [native, patchSettings, pushToast]);
 
+  // Clips explorer: folders dropped or typed in are LINKED (their paths go
+  // into libraryFolders); nothing is copied and unlinking deletes nothing.
+  const linkLibraryFolders = useCallback(
+    async (dirs: string[]) => {
+      const cur = settingsRef.current.libraryFolders ?? [];
+      const fresh = dirs.filter(
+        (d, i) => !pathSame(d, settingsRef.current.outputDir) && !cur.some((f) => pathSame(f, d)) && dirs.findIndex((x) => pathSame(x, d)) === i,
+      );
+      if (!fresh.length) return;
+      await patchSettings({ libraryFolders: [...cur, ...fresh] });
+      pushToast("ok", fresh.length === 1 ? "Folder linked" : `${fresh.length} folders linked`, [...fresh, "Nothing was copied; its files show up in Clips."].join("\n"));
+    },
+    [patchSettings, pushToast],
+  );
+  const unlinkLibraryFolder = useCallback(
+    async (dir: string) => {
+      const cur = settingsRef.current.libraryFolders ?? [];
+      await patchSettings({ libraryFolders: cur.filter((f) => !pathSame(f, dir)) });
+    },
+    [patchSettings],
+  );
+
   // Folders changed: rescan so their clips appear (or disappear) right away.
   const folderKey = (settings.libraryFolders ?? []).join("|");
   const firstFolderKey = useRef(folderKey);
@@ -2555,6 +2577,8 @@ export default function App() {
                 navRequest={explorerNav}
                 onLocation={setExplorerLoc}
                 shareProgress={shareProgress}
+                onLinkFolders={native ? linkLibraryFolders : undefined}
+                onUnlinkFolder={unlinkLibraryFolder}
               />
             </section>
           </div>

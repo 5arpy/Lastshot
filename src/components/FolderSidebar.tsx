@@ -3,6 +3,8 @@ import type { ClipMetadata, DiskInfo } from "../lib/types";
 import { folderName, formatBytes } from "../lib/format";
 import { cn } from "../utils/cn";
 import { shownPath } from "../lib/pathDisplay";
+import { togglePin, usePins } from "../lib/pins";
+import { isInside } from "../lib/explorer";
 
 /** Folder filter: "all", "save", an extra folder path, or "dir:<path>" (a subfolder of the save folder). */
 export type FolderFilter = string;
@@ -75,6 +77,7 @@ function FolderRow({
   onPick,
   onOpen,
   onRemove,
+  removeLabel = "Stop showing this folder (files stay where they are)",
 }: {
   group: Group;
   active: boolean;
@@ -83,6 +86,7 @@ function FolderRow({
   onPick: () => void;
   onOpen?: () => void;
   onRemove?: () => void;
+  removeLabel?: string;
 }) {
   return (
     <div
@@ -130,8 +134,8 @@ function FolderRow({
             <button
               type="button"
               onClick={onRemove}
-              title="Stop showing this folder (files stay where they are)"
-              aria-label={`Stop showing ${group.label}`}
+              title={removeLabel}
+              aria-label={`${removeLabel}: ${group.label}`}
               className="rounded px-1 text-[11px] leading-4 text-ink-3 hover:text-danger"
             >
               ×
@@ -202,6 +206,18 @@ export default function FolderSidebar({
       perDrive,
     };
   }, [clips, outputDir, libraryFolders]);
+  const pins = usePins();
+  const pinned: Group[] = useMemo(
+    () =>
+      pins.map((p) => ({
+        key: p.path,
+        label: p.name,
+        path: p.path,
+        ...sum(clips.filter((c) => isInside(c.path, p.path))),
+      })),
+    [pins, clips],
+  );
+  const isOn = (path: string) => samePath(value.startsWith("dir:") ? value.slice(4) : value === "save" ? outputDir : value, path);
 
   return (
     <aside className="panel flex flex-col gap-3 rounded-xl p-3">
@@ -227,9 +243,27 @@ export default function FolderSidebar({
         ))}
       </div>
 
+      {pinned.length > 0 && (
+        <div className="space-y-0.5 border-t border-line pt-2">
+          <div className="px-1 pb-1 text-[10px] font-semibold uppercase tracking-wider text-ink-3">Pinned</div>
+          {pinned.map((g) => (
+            <FolderRow
+              key={g.key}
+              group={g}
+              icon="📌"
+              active={isOn(g.path)}
+              onPick={() => onChange(g.path)}
+              onOpen={() => onOpenFolder(g.path)}
+              onRemove={() => togglePin(g.path)}
+              removeLabel="Unpin (the folder stays)"
+            />
+          ))}
+        </div>
+      )}
+
       <div className="space-y-0.5 border-t border-line pt-2">
         <div className="flex items-center justify-between px-1 pb-1">
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-3">Other folders</span>
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-3">Linked folders</span>
           <button
             type="button"
             onClick={onAddFolder}
@@ -241,7 +275,7 @@ export default function FolderSidebar({
         </div>
         {extras.length === 0 ? (
           <p className="px-1 pb-1 text-[11px] leading-snug text-ink-4">
-            Add a folder (OBS, ShadowPlay, Downloads…) to edit and share its videos here.
+            Add or drop a folder (OBS, ShadowPlay, Downloads…) to see its files here. It is linked, not copied.
           </p>
         ) : (
           extras.map((g) => (

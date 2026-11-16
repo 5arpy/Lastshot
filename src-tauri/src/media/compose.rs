@@ -1,18 +1,22 @@
-//! Timeline render for the Editor panel: a main video track (clips and
-//! still images, back to back), overlays on top (images and text, which the
-//! window rasterises to PNG), and any number of audio pieces (clip sound,
-//! music, voice-overs) mixed together. Uses only Media Foundation for
-//! decoding and encoding, like `shrink`, so the app stays small.
+//! Timeline render for the Editor panel: picture tracks (clips and still
+//! images, each placed with its crop, quarter turn, flip, size and position),
+//! blur/pixelate boxes, overlays on top (images and text, which the window
+//! rasterises to PNG), and any number of audio pieces (clip sound, music,
+//! voice-overs) mixed together with pan, EQ and a noise gate. Uses only Media
+//! Foundation for decoding and encoding, like `shrink`, so the app stays small.
 //!
-//! Frames are produced at a constant rate: for each output frame the main
-//! track's frame at that moment is placed (letterboxed) on a black canvas,
-//! overlays are blended on top, and the frame goes to the H.264 encoder.
-//! Audio is mixed first into 48 kHz stereo and written alongside.
+//! Frames are produced at a constant rate: for each output frame every
+//! picture active at that moment is drawn bottom track first onto a black
+//! NV12 canvas (`compose_px`), the boxes are blurred or pixelated, overlays
+//! are blended on top, and the frame goes to the H.264 encoder. Audio is
+//! mixed first into 48 kHz stereo and written alongside.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use super::compose_fx;
+use super::compose_px::{self, CropF, Pose};
 use super::recorder::{RecorderError, RResult, HNS_PER_SECOND};
 
 /// Output audio format.
@@ -26,11 +30,14 @@ pub struct Project {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
-    /// Main track, in time order, not overlapping.
+    /// Picture pieces of every video track (`z` orders the tracks).
     pub video: Vec<VideoItem>,
     #[serde(default)]
     pub overlays: Vec<Overlay>,
-    /// Every sound: clip sound of main-track clips and separate audio.
+    /// Blur / pixelate boxes, applied after the pictures, under overlays.
+    #[serde(default)]
+    pub regions: Vec<Region>,
+    /// Every sound: clip sound of picture clips and separate audio.
     #[serde(default)]
     pub audio: Vec<AudioItem>,
     /// Aim for this file size (MB) instead of full quality.
@@ -44,7 +51,7 @@ pub struct VideoItem {
     /// A video file (its picture), or None for a still image.
     #[serde(default)]
     pub path: Option<PathBuf>,
-    /// Still image: PNG data URL, already `width x height`.
+    /// Still image: PNG data URL (placed like a video of that size).
     #[serde(default)]
     pub png: Option<String>,
     /// Where it sits on the timeline, seconds.
@@ -53,6 +60,55 @@ pub struct VideoItem {
     /// Where in the source file it starts, seconds.
     #[serde(default)]
     pub src_in: f64,
+    /// Track order: 0 = bottom, higher is drawn on top.
+    #[serde(default)]
+    pub z: i32,
+    /// Part of the source shown, as fractions.
+    #[serde(default)]
+    pub crop: Option<CropF>,
+    #[serde(default)]
+    pub flip_h: bool,
+    #[serde(default)]
+    pub flip_v: bool,
+    /// Clockwise quarter turn: 0, 90, 180, 270.
+    #[serde(default)]
+    pub rot90: f64,
+    /// 1 = fit the frame (cover with `fill`).
+    #[serde(default = "one64")]
+    pub scale: f64,
+    /// Centre, as fractions of the frame.
+    #[serde(default = "half")]
+    pub cx: f64,
+    #[serde(default = "half")]
+    pub cy: f64,
+    #[serde(default)]
+    pub fill: bool,
+}
+
+impl VideoItem {
+    pub fn pose(&self) -> Pose {
+        let fin = |v: f64, d: f64| if v.is_finite() { v } else { d };
+        Pose {
+            crop: self.crop.and_then(|c| {
+                let x = fin(c.x, 0.0).clamp(0.0, 1.0);
+                let y = fin(c.y, 0.0).clamp(0.0, 1.0);
+                let w = fin(c.w, 1.0).clamp(0.0, 1.0 - x);
+                let h = fin(c.h, 1.0).clamp(0.0, 1.0 - y);
+                (w > 1e-4 && h > 1e-4).then_some(CropF { x, y, w, h })
+            }),
+            rot90: compose_px::norm_rot(fin(self.rot90, 0.0)),
+            flip_h: self.flip_h,
+            flip_v: self.flip_v,
+            scale: if self.scale.is_finite() && self.scale > 0.0 { self.scale.clamp(0.01, 50.0) } else { 1.0 },
+            cx: fin(self.cx, 0.5),
+            cy: fin(self.cy, 0.5),
+            fill: self.fill,
+        }
+    }
+
+    pub fn active(&self, t: f64) -> bool {
+        t >= self.start && t < self.start + self.duration
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -69,6 +125,29 @@ pub struct Overlay {
     pub opacity: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RegionKind {
+    Pixelate,
+    Blur,
+}
+
+/// A box (fractions of the frame) blurred or pixelated for a while.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Region {
+    pub kind: RegionKind,
+    pub start: f64,
+    pub duration: f64,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    /// Pixelate: block size; blur: radius. Output pixels.
+    #[serde(default = "sixteen")]
+    pub strength: f64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioItem {
@@ -77,16 +156,35 @@ pub struct AudioItem {
     pub duration: f64,
     #[serde(default)]
     pub src_in: f64,
+    /// Linear, up to 4.
     #[serde(default = "one")]
     pub volume: f32,
     #[serde(default)]
     pub fade_in: f64,
     #[serde(default)]
     pub fade_out: f64,
+    /// -1 (left) .. 1 (right).
+    #[serde(default)]
+    pub pan: f32,
+    /// Low shelf 200 Hz, peaking 1 kHz, high shelf 5 kHz, in dB.
+    #[serde(default)]
+    pub eq: [f32; 3],
+    /// Noise gate threshold, dBFS (None = off).
+    #[serde(default)]
+    pub gate: Option<f32>,
 }
 
 fn one() -> f32 {
     1.0
+}
+fn one64() -> f64 {
+    1.0
+}
+fn half() -> f64 {
+    0.5
+}
+fn sixteen() -> f64 {
+    16.0
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -99,6 +197,7 @@ pub struct RenderResult {
     pub height: u32,
     pub fps: u32,
     pub elapsed_ms: f64,
+    pub video_kbps: u32,
 }
 
 /// What a file is, for adding it to the timeline.
@@ -111,22 +210,23 @@ pub struct MediaInfo {
     pub width: u32,
     pub height: u32,
     pub has_audio: bool,
+    /// Frames per second (videos only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fps: Option<f64>,
 }
 
 impl Project {
-    /// Length of the result: the end of the main track (or of anything, when
-    /// the main track is empty).
+    /// Length of the result: the end of the last piece of any kind (gaps
+    /// and a tail without pictures are black).
     pub fn duration(&self) -> f64 {
-        let main = self.video.iter().map(|v| v.start + v.duration).fold(0.0, f64::max);
-        if main > 0.0 {
-            return main;
-        }
+        let v = self.video.iter().map(|v| v.start + v.duration).fold(0.0, f64::max);
         let o = self.overlays.iter().map(|v| v.start + v.duration).fold(0.0, f64::max);
+        let r = self.regions.iter().map(|v| v.start + v.duration).fold(0.0, f64::max);
         let a = self.audio.iter().map(|v| v.start + v.duration).fold(0.0, f64::max);
-        o.max(a)
+        v.max(o).max(r).max(a)
     }
 
-    /// Checks sizes and lengths, and puts the main track in time order.
+    /// Checks sizes and lengths, and drops empty pieces.
     pub fn validate(&mut self) -> RResult<()> {
         let bad = |m: &str| Err(RecorderError::Other(m.to_string()));
         if self.width < 16 || self.height < 16 || self.width > 7680 || self.height > 4320 {
@@ -135,10 +235,11 @@ impl Project {
         self.width &= !1;
         self.height &= !1;
         self.fps = self.fps.clamp(1, 120);
-        self.video.retain(|v| v.duration > 0.01);
-        self.overlays.retain(|v| v.duration > 0.01);
-        self.audio.retain(|v| v.duration > 0.01);
-        self.video.sort_by(|a, b| a.start.total_cmp(&b.start));
+        let ok = |s: f64, d: f64| s.is_finite() && d.is_finite() && d > 0.01;
+        self.video.retain(|v| ok(v.start, v.duration));
+        self.overlays.retain(|v| ok(v.start, v.duration));
+        self.regions.retain(|v| ok(v.start, v.duration) && v.w > 0.0 && v.h > 0.0);
+        self.audio.retain(|v| ok(v.start, v.duration));
         let d = self.duration();
         if d < 0.1 {
             return bad("The timeline is empty.");
@@ -152,6 +253,13 @@ impl Project {
             }
         }
         Ok(())
+    }
+
+    /// Picture pieces in drawing order: bottom track first, then list order.
+    pub fn draw_order(&self) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..self.video.len()).collect();
+        order.sort_by_key(|&i| (self.video[i].z, i));
+        order
     }
 }
 
@@ -171,7 +279,7 @@ pub fn decode_png(data_url: &str) -> RResult<image::RgbaImage> {
 
 /// BT.709, limited range (what H.264 game footage uses).
 #[inline]
-fn yuv(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+pub(crate) fn yuv(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
     (
         16.0 + 0.1826 * r + 0.6142 * g + 0.0620 * b,
         128.0 - 0.1006 * r - 0.3386 * g + 0.4392 * b,
@@ -411,7 +519,7 @@ pub fn render(project: &Project, dest: &Path, progress: &mut dyn FnMut(f32)) -> 
     let mut p = project.clone();
     p.validate()?;
     let t0 = std::time::Instant::now();
-    imp::render(&p, dest, progress)?;
+    let video_bps = imp::render(&p, dest, progress)?;
     progress(1.0);
     Ok(RenderResult {
         path: dest.to_string_lossy().to_string(),
@@ -421,11 +529,77 @@ pub fn render(project: &Project, dest: &Path, progress: &mut dyn FnMut(f32)) -> 
         height: p.height,
         fps: p.fps,
         elapsed_ms: t0.elapsed().as_secs_f64() * 1000.0,
+        video_kbps: video_bps / 1000,
     })
 }
 
 pub fn media_info(path: &Path) -> RResult<MediaInfo> {
     imp::media_info(path)
+}
+
+/// Waveform of a file's sound: `(buckets per second, peak 0-255 each)`.
+/// Empty for files without sound.
+pub fn audio_peaks(path: &Path) -> RResult<(f64, Vec<u8>)> {
+    imp::audio_peaks(path)
+}
+
+/// PNG data URLs of the frames at `times` (source seconds), `height` px
+/// tall; "" where a frame could not be read.
+pub fn video_thumbs(path: &Path, times: &[f64], height: u32) -> RResult<Vec<String>> {
+    imp::video_thumbs(path, times, height)
+}
+
+/// Sound export formats this PC can write.
+pub fn audio_formats() -> Vec<String> {
+    let mut v = vec!["wav".to_string(), "m4a".to_string()];
+    if imp::mp3_available() {
+        v.push("mp3".into());
+    }
+    v
+}
+
+/// Mixes `items` (with pan, EQ, gate, fades, volume) over `duration`
+/// seconds and writes `dest`: `.wav` (16-bit 48 kHz stereo), `.m4a` (AAC),
+/// or `.mp3` when Windows has an MP3 encoder.
+pub fn export_audio(items: &[AudioItem], duration: f64, dest: &Path, progress: &mut dyn FnMut(f32)) -> RResult<()> {
+    let bad = |m: String| Err(RecorderError::Other(m));
+    if !duration.is_finite() || duration < 0.05 {
+        return bad("There is no sound to export.".into());
+    }
+    if duration > MAX_SECONDS {
+        return bad("The sound is longer than 3 hours.".into());
+    }
+    let ext = dest.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    if !matches!(ext.as_str(), "wav" | "m4a" | "mp3") {
+        return bad(format!("Lastshot cannot write .{ext} sound files (use wav, m4a or mp3)."));
+    }
+    let items: Vec<AudioItem> =
+        items.iter().filter(|a| a.duration.is_finite() && a.start.is_finite() && a.duration > 0.01).cloned().collect();
+    imp::export_audio(&items, duration, dest, &ext, progress)
+}
+
+/// Writes the mix as a 16-bit PCM WAV file.
+pub fn write_wav(mix: &Mix, dest: &Path) -> RResult<()> {
+    use std::io::Write;
+    let io = |e: std::io::Error| RecorderError::Io(e.to_string());
+    let frames = mix.frames();
+    if frames as u64 * 4 + 36 > u32::MAX as u64 {
+        return Err(RecorderError::Other("The sound is too long for a WAV file.".into()));
+    }
+    let mut f = std::io::BufWriter::new(std::fs::File::create(dest).map_err(io)?);
+    f.write_all(&compose_fx::wav_header(frames as u32, MIX_RATE, 2)).map_err(io)?;
+    let step = MIX_RATE as usize;
+    let mut at = 0;
+    while at < frames {
+        f.write_all(&mix.pcm16(at, at + step)).map_err(io)?;
+        at += step;
+    }
+    f.flush().map_err(io)
+}
+
+/// Threads for drawing frames: leave one core for the encoder and the app.
+fn draw_threads() -> usize {
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).saturating_sub(1).clamp(1, 8)
 }
 
 // ===========================================================================
@@ -434,10 +608,12 @@ pub fn media_info(path: &Path) -> RResult<MediaInfo> {
 
 #[cfg(all(windows, not(feature = "headless-sim")))]
 mod imp {
+    use super::compose_px::{composite, decode_size, placement, region_box, Draw, Placement, Planes, Src};
     use super::*;
+    use super::compose_fx::Fx;
     use windows::core::PCWSTR;
     use windows::Win32::Media::MediaFoundation::*;
-    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
+    use windows::Win32::System::Com::{CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED};
 
     struct Mf;
     impl Mf {
@@ -506,6 +682,31 @@ mod imp {
         Ok(())
     }
 
+    /// Seeks to `hns` (also back to 0).
+    unsafe fn seek_hns(r: &IMFSourceReader, hns: i64) -> RResult<()> {
+        let var = windows::core::PROPVARIANT::from(hns.max(0));
+        r.SetCurrentPosition(&windows::core::GUID::zeroed(), &var).map_err(err)
+    }
+
+    unsafe fn duration_of(r: &IMFSourceReader) -> f64 {
+        r.GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE.0 as u32, &MF_PD_DURATION)
+            .ok()
+            .and_then(|v| windows::Win32::System::Com::StructuredStorage::PropVariantToInt64(&v).ok())
+            .unwrap_or(0) as f64
+            / HNS_PER_SECOND as f64
+    }
+
+    /// Copies a sample's bytes out.
+    unsafe fn sample_bytes(sample: &IMFSample) -> RResult<Vec<u8>> {
+        let buf = sample.ConvertToContiguousBuffer().map_err(err)?;
+        let mut ptr: *mut u8 = std::ptr::null_mut();
+        let mut len = 0u32;
+        buf.Lock(&mut ptr, None, Some(&mut len)).map_err(err)?;
+        let bytes = std::slice::from_raw_parts(ptr, len as usize).to_vec();
+        let _ = buf.Unlock();
+        Ok(bytes)
+    }
+
     pub(super) fn media_info(path: &Path) -> RResult<MediaInfo> {
         let _mf = Mf::enter()?;
         unsafe {
@@ -515,18 +716,19 @@ mod imp {
             if video.is_none() && audio.is_none() {
                 return Err(RecorderError::Other("This file has no picture or sound Lastshot can read.".into()));
             }
-            let dur = r
-                .GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE.0 as u32, &MF_PD_DURATION)
-                .ok()
-                .and_then(|v| windows::Win32::System::Com::StructuredStorage::PropVariantToInt64(&v).ok())
-                .unwrap_or(0) as f64
-                / HNS_PER_SECOND as f64;
-            let (mut w, mut h) = (0, 0);
+            let dur = duration_of(&r);
+            let (mut w, mut h, mut fps) = (0, 0, None);
             if let Some(v) = video {
                 if let Ok(t) = r.GetNativeMediaType(v, 0) {
                     if let Ok(s) = t.GetUINT64(&MF_MT_FRAME_SIZE) {
                         w = (s >> 32) as u32;
                         h = (s & 0xffff_ffff) as u32;
+                    }
+                    if let Ok(f) = t.GetUINT64(&MF_MT_FRAME_RATE) {
+                        let (num, den) = ((f >> 32) as u32, (f & 0xffff_ffff) as u32);
+                        if num > 0 && den > 0 {
+                            fps = Some(num as f64 / den as f64);
+                        }
                     }
                 }
             }
@@ -536,14 +738,16 @@ mod imp {
                 width: w,
                 height: h,
                 has_audio: audio.is_some(),
+                fps,
             })
         }
     }
 
-    /// Decodes one audio piece into the mix.
-    unsafe fn mix_in(mix: &mut Mix, item: &AudioItem) -> RResult<()> {
-        let r = reader(&item.path, false)?;
-        let Some(idx) = stream_of(&r, MFMediaType_Audio) else { return Ok(()) };
+    /// A reader giving 16-bit PCM of the first sound stream:
+    /// `(reader, stream, rate, channels)`. None without sound.
+    unsafe fn pcm_reader(path: &Path) -> RResult<Option<(IMFSourceReader, u32, u32, usize)>> {
+        let r = reader(path, false)?;
+        let Some(idx) = stream_of(&r, MFMediaType_Audio) else { return Ok(None) };
         r.SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS.0 as u32, false).map_err(err)?;
         r.SetStreamSelection(idx, true).map_err(err)?;
         let t = MFCreateMediaType().map_err(err)?;
@@ -554,10 +758,17 @@ mod imp {
         let cur = r.GetCurrentMediaType(idx).map_err(err)?;
         let rate = cur.GetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND).unwrap_or(48_000);
         let ch = cur.GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS).unwrap_or(2) as usize;
+        Ok(Some((r, idx, rate, ch)))
+    }
+
+    /// Decodes one audio piece into the mix.
+    unsafe fn mix_in(mix: &mut Mix, item: &AudioItem) -> RResult<()> {
+        let Some((r, idx, rate, ch)) = pcm_reader(&item.path)? else { return Ok(()) };
         seek(&r, item.src_in)?;
         let start_hns = (item.src_in * HNS_PER_SECOND as f64) as i64;
         let end_hns = ((item.src_in + item.duration) * HNS_PER_SECOND as f64) as i64;
         let mut rs = Resampler::new(rate);
+        let mut fx = Fx::new(item.pan, item.eq, item.gate, MIX_RATE as f64);
         let mut written = 0usize; // output frames added so far
         let mut started = false;
         loop {
@@ -573,12 +784,7 @@ mod imp {
             if ts >= end_hns {
                 break;
             }
-            let buf = sample.ConvertToContiguousBuffer().map_err(err)?;
-            let mut ptr: *mut u8 = std::ptr::null_mut();
-            let mut len = 0u32;
-            buf.Lock(&mut ptr, None, Some(&mut len)).map_err(err)?;
-            let mut bytes = std::slice::from_raw_parts(ptr, len as usize).to_vec();
-            let _ = buf.Unlock();
+            let mut bytes = sample_bytes(&sample)?;
             // Drop what lies before the in-point (seeking lands on a packet edge).
             if !started {
                 started = true;
@@ -587,11 +793,12 @@ mod imp {
                     bytes.drain(..skip.min(bytes.len()));
                 }
             }
-            let out = rs.push(&to_stereo(&bytes, ch));
+            let mut out = rs.push(&to_stereo(&bytes, ch));
             let at = written as f64 / MIX_RATE as f64;
             let keep = ((item.duration - at) * MIX_RATE as f64).max(0.0) as usize;
-            let out = &out[..out.len().min(keep)];
-            mix.add(item.start, item, at, out);
+            out.truncate(keep);
+            fx.process(&mut out);
+            mix.add(item.start, item, at, &out);
             written += out.len();
             if written as f64 >= item.duration * MIX_RATE as f64 {
                 break;
@@ -600,7 +807,360 @@ mod imp {
         Ok(())
     }
 
-    /// The decoder of the main-track clip being drawn.
+    /// Every piece mixed into one `duration`-second track.
+    fn build_mix(items: &[AudioItem], duration: f64, progress: &mut dyn FnMut(f32)) -> RResult<Mix> {
+        let mut m = Mix::new(duration);
+        for (i, a) in items.iter().enumerate() {
+            unsafe { mix_in(&mut m, a) }
+                .map_err(|e| RecorderError::Other(format!("Sound of {}: {e}", a.path.display())))?;
+            progress((i + 1) as f32 / items.len() as f32);
+        }
+        Ok(m)
+    }
+
+    // -------------------------------------------------------------- peaks
+
+    pub(super) fn audio_peaks(path: &Path) -> RResult<(f64, Vec<u8>)> {
+        let _mf = Mf::enter()?;
+        unsafe {
+            let Some((r, idx, rate, ch)) = pcm_reader(path)? else { return Ok((100.0, Vec::new())) };
+            let rate_b = compose_fx::peaks_rate(duration_of(&r));
+            let mut pb = compose_fx::PeakBucketer::new(rate, rate_b);
+            let mut first = true;
+            loop {
+                let mut flags = 0u32;
+                let mut ts = 0i64;
+                let mut sample: Option<IMFSample> = None;
+                r.ReadSample(idx, 0, None, Some(&mut flags), Some(&mut ts), Some(&mut sample))
+                    .map_err(err)?;
+                if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
+                    break;
+                }
+                let Some(sample) = sample else { continue };
+                if first {
+                    first = false;
+                    if ts > 0 {
+                        pb.offset((ts as f64 / HNS_PER_SECOND as f64 * rate as f64) as u64);
+                    }
+                }
+                let buf = sample.ConvertToContiguousBuffer().map_err(err)?;
+                let mut ptr: *mut u8 = std::ptr::null_mut();
+                let mut len = 0u32;
+                buf.Lock(&mut ptr, None, Some(&mut len)).map_err(err)?;
+                pb.push_pcm16(std::slice::from_raw_parts(ptr, len as usize), ch);
+                let _ = buf.Unlock();
+            }
+            Ok((rate_b, pb.finish()))
+        }
+    }
+
+    // -------------------------------------------------------------- thumbs
+
+    /// One decoded RGB32 frame (top-down BGRA, tight rows).
+    type Frame = (i64, Vec<u8>);
+
+    pub(super) fn video_thumbs(path: &Path, times: &[f64], height: u32) -> RResult<Vec<String>> {
+        let _mf = Mf::enter()?;
+        unsafe {
+            let r = reader(path, true)?;
+            let stream = stream_of(&r, MFMediaType_Video)
+                .ok_or_else(|| RecorderError::Other(format!("{} has no picture", path.display())))?;
+            let native = r.GetNativeMediaType(stream, 0).map_err(err)?;
+            let size = native.GetUINT64(&MF_MT_FRAME_SIZE).map_err(err)?;
+            let (nw, nh) = (((size >> 32) as u32).max(2), ((size & 0xffff_ffff) as u32).max(2));
+            let th = (height.clamp(8, 1080) & !1).min(nh & !1).max(2);
+            let tw = (((nw as f64 * th as f64 / nh as f64).round() as u32) & !1).clamp(2, 4096);
+            // Decode at twice the size when the source allows, then average
+            // 2x2: sharper than one big scale step.
+            let two = nh >= th * 2 && nw >= tw * 2;
+            let (dw, dh) = if two { (tw * 2, th * 2) } else { (tw, th) };
+            r.SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS.0 as u32, false).map_err(err)?;
+            r.SetStreamSelection(stream, true).map_err(err)?;
+            let t = MFCreateMediaType().map_err(err)?;
+            t.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video).map_err(err)?;
+            t.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32).map_err(err)?;
+            t.SetUINT64(&MF_MT_FRAME_SIZE, pack(dw, dh)).map_err(err)?;
+            r.SetCurrentMediaType(stream, None, &t).map_err(err)?;
+            let stride = r
+                .GetCurrentMediaType(stream)
+                .ok()
+                .and_then(|c| c.GetUINT32(&MF_MT_DEFAULT_STRIDE).ok())
+                .map(|s| s as i32)
+                .unwrap_or((dw * 4) as i32);
+            let (dw, dh) = (dw as usize, dh as usize);
+
+            let read = |r: &IMFSourceReader| -> RResult<Option<Frame>> {
+                loop {
+                    let mut flags = 0u32;
+                    let mut ts = 0i64;
+                    let mut sample: Option<IMFSample> = None;
+                    r.ReadSample(stream, 0, None, Some(&mut flags), Some(&mut ts), Some(&mut sample))
+                        .map_err(err)?;
+                    if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
+                        return Ok(None);
+                    }
+                    let Some(s) = sample else { continue };
+                    let raw = sample_bytes(&s)?;
+                    let row = stride.unsigned_abs() as usize;
+                    if row < dw * 4 || raw.len() < row * (dh - 1) + dw * 4 {
+                        return Err(RecorderError::Other("unexpected frame buffer".into()));
+                    }
+                    let mut px = vec![0u8; dw * dh * 4];
+                    for y in 0..dh {
+                        let sy = if stride < 0 { dh - 1 - y } else { y };
+                        px[y * dw * 4..(y + 1) * dw * 4].copy_from_slice(&raw[sy * row..sy * row + dw * 4]);
+                    }
+                    return Ok(Some((ts, px)));
+                }
+            };
+
+            let eps = HNS_PER_SECOND / 1000;
+            let jump = 2 * HNS_PER_SECOND;
+            let mut last: Option<Frame> = None;
+            let mut pending: Option<Frame> = None;
+            let mut eos = false;
+            let mut out = Vec::with_capacity(times.len());
+            for &t in times {
+                if !t.is_finite() || t < 0.0 {
+                    out.push(String::new());
+                    continue;
+                }
+                let want = (t * HNS_PER_SECOND as f64) as i64;
+                let anchor = last.as_ref().or(pending.as_ref()).map(|f| f.0);
+                let need_seek = match anchor {
+                    None => true,
+                    Some(a) => want < a || want > a + jump,
+                };
+                if need_seek {
+                    if seek_hns(&r, want).is_err() {
+                        out.push(String::new());
+                        continue;
+                    }
+                    last = None;
+                    pending = None;
+                    eos = false;
+                }
+                let mut failed = false;
+                loop {
+                    if let Some(p) = &pending {
+                        if p.0 <= want + eps {
+                            last = pending.take();
+                        } else {
+                            break;
+                        }
+                    }
+                    if eos {
+                        break;
+                    }
+                    match read(&r) {
+                        Ok(Some(f)) => pending = Some(f),
+                        Ok(None) => eos = true,
+                        Err(_) => {
+                            failed = true;
+                            break;
+                        }
+                    }
+                }
+                if failed {
+                    last = None;
+                    pending = None;
+                    out.push(String::new());
+                    continue;
+                }
+                let pick = last.as_ref().or(pending.as_ref());
+                out.push(pick.map(|f| thumb_png(&f.1, dw, dh, two).unwrap_or_default()).unwrap_or_default());
+            }
+            Ok(out)
+        }
+    }
+
+    /// BGRA (optionally halved with a 2x2 average) to a PNG data URL.
+    fn thumb_png(bgra: &[u8], w: usize, h: usize, halve: bool) -> Option<String> {
+        let (ow, oh) = if halve { (w / 2, h / 2) } else { (w, h) };
+        let mut rgb = vec![0u8; ow * oh * 3];
+        for y in 0..oh {
+            for x in 0..ow {
+                let d = (y * ow + x) * 3;
+                if halve {
+                    for c in 0..3 {
+                        let at = |yy: usize, xx: usize| bgra[(yy * w + xx) * 4 + c] as u32;
+                        let s = at(y * 2, x * 2) + at(y * 2, x * 2 + 1) + at(y * 2 + 1, x * 2) + at(y * 2 + 1, x * 2 + 1);
+                        rgb[d + 2 - c] = ((s + 2) / 4) as u8;
+                    }
+                } else {
+                    let i = (y * w + x) * 4;
+                    rgb[d] = bgra[i + 2];
+                    rgb[d + 1] = bgra[i + 1];
+                    rgb[d + 2] = bgra[i];
+                }
+            }
+        }
+        let mut png = Vec::new();
+        let enc = image::codecs::png::PngEncoder::new_with_quality(
+            &mut png,
+            image::codecs::png::CompressionType::Fast,
+            image::codecs::png::FilterType::Adaptive,
+        );
+        image::ImageEncoder::write_image(enc, &rgb, ow as u32, oh as u32, image::ExtendedColorType::Rgb8).ok()?;
+        use base64::Engine;
+        Some(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(&png)))
+    }
+
+    // -------------------------------------------------------------- sound files
+
+    unsafe fn pcm_type() -> RResult<IMFMediaType> {
+        let pcm = MFCreateMediaType().map_err(err)?;
+        pcm.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio).map_err(err)?;
+        pcm.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM).map_err(err)?;
+        pcm.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16).map_err(err)?;
+        pcm.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, MIX_RATE).map_err(err)?;
+        pcm.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, 2).map_err(err)?;
+        pcm.SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, 4).map_err(err)?;
+        pcm.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, MIX_RATE * 4).map_err(err)?;
+        Ok(pcm)
+    }
+
+    unsafe fn aac_type(bps: u32) -> RResult<IMFMediaType> {
+        let aac = MFCreateMediaType().map_err(err)?;
+        aac.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio).map_err(err)?;
+        aac.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_AAC).map_err(err)?;
+        aac.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16).map_err(err)?;
+        aac.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, MIX_RATE).map_err(err)?;
+        aac.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, 2).map_err(err)?;
+        aac.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, bps / 8).map_err(err)?;
+        Ok(aac)
+    }
+
+    /// Registered MP3 encoders (Windows ships one on most editions).
+    unsafe fn mp3_encoders() -> Vec<IMFActivate> {
+        let info = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Audio, guidSubtype: MFAudioFormat_MP3 };
+        let flags = MFT_ENUM_FLAG(
+            MFT_ENUM_FLAG_SYNCMFT.0
+                | MFT_ENUM_FLAG_ASYNCMFT.0
+                | MFT_ENUM_FLAG_LOCALMFT.0
+                | MFT_ENUM_FLAG_TRANSCODE_ONLY.0
+                | MFT_ENUM_FLAG_SORTANDFILTER.0,
+        );
+        let mut arr: *mut Option<IMFActivate> = std::ptr::null_mut();
+        let mut n = 0u32;
+        if MFTEnumEx(MFT_CATEGORY_AUDIO_ENCODER, flags, None, Some(&info), &mut arr, &mut n).is_err() || arr.is_null() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for i in 0..n as usize {
+            if let Some(a) = (*arr.add(i)).take() {
+                out.push(a);
+            }
+        }
+        CoTaskMemFree(Some(arr as *const _));
+        out
+    }
+
+    pub(super) fn mp3_available() -> bool {
+        let Ok(_mf) = Mf::enter() else { return false };
+        unsafe { !mp3_encoders().is_empty() }
+    }
+
+    /// An MP3 output type the encoder offers for 48 kHz stereo, about
+    /// 192 kbps (or the best it has below 320).
+    unsafe fn mp3_type() -> RResult<IMFMediaType> {
+        let none = || RecorderError::Other("MP3 is not available on this PC (Windows has no MP3 encoder here).".into());
+        let encoders = mp3_encoders();
+        if encoders.is_empty() {
+            return Err(none());
+        }
+        let pcm = pcm_type()?;
+        for act in &encoders {
+            let Ok(mft) = act.ActivateObject::<IMFTransform>() else { continue };
+            let _ = mft.SetInputType(0, &pcm, 0);
+            let mut best: Option<(u32, IMFMediaType)> = None;
+            for i in 0..256 {
+                let Ok(t) = mft.GetOutputAvailableType(0, i) else { break };
+                let rate = t.GetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND).unwrap_or(0);
+                let ch = t.GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS).unwrap_or(0);
+                let bytes = t.GetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND).unwrap_or(0);
+                if rate != MIX_RATE || ch != 2 || bytes == 0 || bytes > 40_000 {
+                    continue;
+                }
+                // Closest to 24000 bytes/s (192 kbps), preferring above.
+                let score = if bytes >= 24_000 { bytes - 24_000 } else { (24_000 - bytes) * 2 };
+                if best.as_ref().map_or(true, |b| score < b.0) {
+                    best = Some((score, t));
+                }
+            }
+            let _ = act.ShutdownObject();
+            if let Some((_, t)) = best {
+                return Ok(t);
+            }
+        }
+        // The encoder lists no types: describe one by hand.
+        let t = MFCreateMediaType().map_err(err)?;
+        t.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio).map_err(err)?;
+        t.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_MP3).map_err(err)?;
+        t.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, MIX_RATE).map_err(err)?;
+        t.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, 2).map_err(err)?;
+        t.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 24_000).map_err(err)?;
+        t.SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, 1).map_err(err)?;
+        Ok(t)
+    }
+
+    pub(super) fn export_audio(
+        items: &[AudioItem],
+        duration: f64,
+        dest: &Path,
+        ext: &str,
+        progress: &mut dyn FnMut(f32),
+    ) -> RResult<()> {
+        let _mf = Mf::enter()?;
+        // Check the encoder before the (slow) mix.
+        let mp3 = if ext == "mp3" { Some(unsafe { mp3_type() }?) } else { None };
+        let mix = build_mix(items, duration, &mut |x| progress(x * 0.8))?;
+        let r = match ext {
+            "wav" => write_wav(&mix, dest),
+            _ => unsafe {
+                let (container, out) = match mp3 {
+                    Some(t) => (MFTranscodeContainerType_MP3, t),
+                    None => (MFTranscodeContainerType_MPEG4, aac_type(192_000)?),
+                };
+                write_sound(&mix, dest, &container, &out, &mut |x| progress(0.8 + x * 0.2))
+            },
+        };
+        if r.is_err() {
+            let _ = std::fs::remove_file(dest);
+        }
+        progress(1.0);
+        r
+    }
+
+    unsafe fn write_sound(
+        mix: &Mix,
+        dest: &Path,
+        container: &windows::core::GUID,
+        out_type: &IMFMediaType,
+        progress: &mut dyn FnMut(f32),
+    ) -> RResult<()> {
+        let wa = attrs(2)?;
+        wa.SetGUID(&MF_TRANSCODE_CONTAINERTYPE, container).map_err(err)?;
+        let _ = wa.SetUINT32(&MF_SINK_WRITER_DISABLE_THROTTLING, 1);
+        let out = wide(dest);
+        let writer = MFCreateSinkWriterFromURL(PCWSTR(out.as_ptr()), None, &wa).map_err(err)?;
+        let s = writer.AddStream(out_type).map_err(err)?;
+        writer.SetInputMediaType(s, &pcm_type()?, None).map_err(err)?;
+        writer.BeginWriting().map_err(err)?;
+        let chunk = (MIX_RATE / 2) as usize;
+        let mut at = 0;
+        while at < mix.frames() {
+            let to = (at + chunk).min(mix.frames());
+            write_audio(&writer, s, mix, at, to)?;
+            at = to;
+            progress(at as f32 / mix.frames().max(1) as f32);
+        }
+        writer.Finalize().map_err(err)
+    }
+
+    // -------------------------------------------------------------- pictures
+
+    /// The decoder of a picture clip being drawn.
     struct Clip {
         reader: IMFSourceReader,
         stream: u32,
@@ -613,9 +1173,8 @@ mod imp {
         ended: bool,
     }
 
+    /// Opens `path` decoding NV12 at `w x h` (MF scales), from `src_in`.
     unsafe fn open_clip(path: &Path, src_in: f64, w: u32, h: u32) -> RResult<Clip> {
-        let info = super::super::library::probe(path)?;
-        let (fw, fh) = fit(info.width, info.height, w, h);
         let r = reader(path, true)?;
         let stream = stream_of(&r, MFMediaType_Video)
             .ok_or_else(|| RecorderError::Other(format!("{} has no picture", path.display())))?;
@@ -624,10 +1183,10 @@ mod imp {
         let nv12 = MFCreateMediaType().map_err(err)?;
         nv12.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video).map_err(err)?;
         nv12.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12).map_err(err)?;
-        nv12.SetUINT64(&MF_MT_FRAME_SIZE, pack(fw, fh)).map_err(err)?;
+        nv12.SetUINT64(&MF_MT_FRAME_SIZE, pack(w, h)).map_err(err)?;
         r.SetCurrentMediaType(stream, None, &nv12).map_err(err)?;
         seek(&r, src_in)?;
-        Ok(Clip { reader: r, stream, fw: fw as usize, fh: fh as usize, next: None, current: None, ended: false })
+        Ok(Clip { reader: r, stream, fw: w as usize, fh: h as usize, next: None, current: None, ended: false })
     }
 
     /// Copies a decoded NV12 sample (stride = width) into a tight buffer.
@@ -651,8 +1210,8 @@ mod imp {
     }
 
     impl Clip {
-        /// The frame to show at source time `src_hns`.
-        unsafe fn frame_at(&mut self, src_hns: i64) -> RResult<Option<&Vec<u8>>> {
+        /// Decodes up to the frame shown at source time `src_hns`.
+        unsafe fn advance(&mut self, src_hns: i64) -> RResult<()> {
             loop {
                 if let Some((ts, _)) = &self.next {
                     if *ts <= src_hns {
@@ -678,8 +1237,53 @@ mod imp {
                     self.next = Some((ts, sample_nv12(&s, self.fw, self.fh)?));
                 }
             }
-            Ok(self.current.as_ref())
+            Ok(())
         }
+
+        /// The frame on screen (or the first one, if the source starts a
+        /// little after the in-point).
+        fn picture(&self) -> Option<&Vec<u8>> {
+            self.current.as_ref().or(self.next.as_ref().map(|n| &n.1))
+        }
+
+        fn src<'a>(&self, pic: &'a [u8]) -> Src<'a> {
+            let n = self.fw * self.fh;
+            Src { w: self.fw, h: self.fh, y: &pic[..n], uv: &pic[n..], a: None, ca: None }
+        }
+    }
+
+    /// A picture piece being drawn.
+    enum Source {
+        /// `plain`: whole, centred, fitted; decoded at the fitted size.
+        Video { clip: Clip, pl: Placement, plain: bool },
+        Still { planes: Planes, pl: Placement },
+        Nothing,
+    }
+
+    unsafe fn open_source(item: &VideoItem, w: u32, h: u32) -> RResult<Source> {
+        let pose = item.pose();
+        if let Some(path) = &item.path {
+            let info = super::super::library::probe(path)?;
+            let (nw, nh) = (info.width.max(2), info.height.max(2));
+            let pl = placement(&pose, nw as f64, nh as f64, w as f64, h as f64);
+            let plain = pose.is_plain();
+            let (dw, dh) = if plain { fit(nw, nh, w, h) } else { decode_size(&pl, nw, nh) };
+            let clip = open_clip(path, item.src_in, dw, dh)?;
+            let pl = pl.rescaled_source(dw as f64 / nw as f64, dh as f64 / nh as f64);
+            return Ok(Source::Video { clip, pl, plain });
+        }
+        let Some(png) = &item.png else { return Ok(Source::Nothing) };
+        let mut img = decode_png(png)?;
+        let (nw, nh) = (img.width().max(1), img.height().max(1));
+        let pl = placement(&pose, nw as f64, nh as f64, w as f64, h as f64);
+        // Big pictures are scaled down once, with a good filter.
+        let (dw, dh) = decode_size(&pl, nw, nh);
+        if dw < nw & !1 || dh < nh & !1 {
+            img = image::imageops::resize(&img, dw, dh, image::imageops::FilterType::Triangle);
+        }
+        let Some(planes) = Planes::from_rgba(&img) else { return Ok(Source::Nothing) };
+        let pl = pl.rescaled_source(img.width() as f64 / nw as f64, img.height() as f64 / nh as f64);
+        Ok(Source::Still { planes, pl })
     }
 
     /// Puts a `fw x fh` NV12 picture in the middle of a `w x h` frame.
@@ -697,25 +1301,20 @@ mod imp {
         }
     }
 
-    pub(super) fn render(p: &Project, dest: &Path, progress: &mut dyn FnMut(f32)) -> RResult<()> {
+    /// Renders; returns the video bitrate used.
+    pub(super) fn render(p: &Project, dest: &Path, progress: &mut dyn FnMut(f32)) -> RResult<u32> {
         let _mf = Mf::enter()?;
         // Sound first: every piece mixed into one track.
         let duration = p.duration();
-        let mut mix = None;
-        if !p.audio.is_empty() {
-            let mut m = Mix::new(duration);
-            for (i, a) in p.audio.iter().enumerate() {
-                unsafe { mix_in(&mut m, a) }.map_err(|e| {
-                    RecorderError::Other(format!("Sound of {}: {e}", a.path.display()))
-                })?;
-                progress(0.1 * (i + 1) as f32 / p.audio.len() as f32);
-            }
-            mix = Some(m);
-        }
+        let mix = if p.audio.is_empty() {
+            None
+        } else {
+            Some(build_mix(&p.audio, duration, &mut |x| progress(0.1 * x))?)
+        };
         let mut sub = |x: f32| progress(0.1 + x * 0.9);
         let r = unsafe { encode(p, dest, mix.as_ref(), true, &mut sub) };
         match r {
-            Ok(()) => Ok(()),
+            Ok(bps) => Ok(bps),
             Err(e) => {
                 log::warn!("[lastshot] hardware render failed ({e}); retrying in software");
                 let _ = std::fs::remove_file(dest);
@@ -730,7 +1329,7 @@ mod imp {
         mix: Option<&Mix>,
         hardware: bool,
         progress: &mut dyn FnMut(f32),
-    ) -> RResult<()> {
+    ) -> RResult<u32> {
         let (w, h) = (p.width as usize, p.height as usize);
         let duration = p.duration();
         let has_audio = mix.is_some();
@@ -779,23 +1378,8 @@ mod imp {
         writer.SetInputMediaType(v_out, &vin, None).map_err(err)?;
 
         let a_out = if has_audio {
-            let aac = MFCreateMediaType().map_err(err)?;
-            aac.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio).map_err(err)?;
-            aac.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_AAC).map_err(err)?;
-            aac.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16).map_err(err)?;
-            aac.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, MIX_RATE).map_err(err)?;
-            aac.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, 2).map_err(err)?;
-            aac.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, audio_bps / 8).map_err(err)?;
-            let s = writer.AddStream(&aac).map_err(err)?;
-            let pcm = MFCreateMediaType().map_err(err)?;
-            pcm.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio).map_err(err)?;
-            pcm.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM).map_err(err)?;
-            pcm.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16).map_err(err)?;
-            pcm.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, MIX_RATE).map_err(err)?;
-            pcm.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, 2).map_err(err)?;
-            pcm.SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, 4).map_err(err)?;
-            pcm.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, MIX_RATE * 4).map_err(err)?;
-            writer.SetInputMediaType(s, &pcm, None).map_err(err)?;
+            let s = writer.AddStream(&aac_type(audio_bps)?).map_err(err)?;
+            writer.SetInputMediaType(s, &pcm_type()?, None).map_err(err)?;
             Some(s)
         } else {
             None
@@ -815,44 +1399,65 @@ mod imp {
 
         let frame_hns = HNS_PER_SECOND / p.fps as i64;
         let total_frames = (duration * p.fps as f64).round().max(1.0) as i64;
-        let mut item_idx = 0usize;
-        let mut clip: Option<(usize, Clip)> = None;
-        let mut still: Option<(usize, Vec<u8>)> = None;
+        let order = p.draw_order();
+        let threads = draw_threads();
+        let mut sources: Vec<Option<Source>> = p.video.iter().map(|_| None).collect();
+        let mut frame = black_frame(w, h);
+        let mut scratch: Vec<f32> = Vec::new();
         let mut audio_sent = 0usize;
         let chunk = (MIX_RATE / 2) as usize;
         let mut last_pct = -1i64;
 
         for k in 0..total_frames {
             let t = k as f64 / p.fps as f64;
-            let mut frame = black_frame(w, h);
-            while item_idx < p.video.len() && t >= p.video[item_idx].start + p.video[item_idx].duration {
-                item_idx += 1;
+            // Decoders exist only while their piece is on screen.
+            for (i, v) in p.video.iter().enumerate() {
+                if !v.active(t) {
+                    sources[i] = None;
+                } else if sources[i].is_none() {
+                    sources[i] = Some(open_source(v, p.width, p.height)?);
+                }
             }
-            if let Some(item) = p.video.get(item_idx).filter(|v| t >= v.start) {
-                if let Some(path) = &item.path {
-                    if clip.as_ref().map(|c| c.0) != Some(item_idx) {
-                        clip = Some((item_idx, open_clip(path, item.src_in, p.width, p.height)?));
+            let active: Vec<usize> = order.iter().copied().filter(|&i| sources[i].is_some()).collect();
+            for &i in &active {
+                if let Some(Source::Video { clip, .. }) = &mut sources[i] {
+                    let v = &p.video[i];
+                    clip.advance(((v.src_in + (t - v.start)) * HNS_PER_SECOND as f64) as i64)?;
+                }
+            }
+
+            frame[..w * h].fill(16);
+            frame[w * h..].fill(128);
+            // Fast path: a bottom clip shown whole is decoded at its fitted
+            // size and copied in; only what lies above it is sampled.
+            let mut above = &active[..];
+            if let Some((&i, rest)) = active.split_first() {
+                if let Some(Source::Video { clip, plain: true, .. }) = &sources[i] {
+                    if let Some(pic) = clip.picture() {
+                        place(&mut frame, w, h, pic, clip.fw, clip.fh);
                     }
-                    let (_, c) = clip.as_mut().unwrap();
-                    let src = ((item.src_in + (t - item.start)) * HNS_PER_SECOND as f64) as i64;
-                    let (fw, fh) = (c.fw, c.fh);
-                    if let Some(pic) = c.frame_at(src)? {
-                        place(&mut frame, w, h, pic, fw, fh);
-                    }
-                } else if let Some(png) = &item.png {
-                    if still.as_ref().map(|s| s.0) != Some(item_idx) {
-                        let img = decode_png(png)?;
-                        let (fw, fh) = fit(img.width(), img.height(), p.width, p.height);
-                        let img = if (fw, fh) != (img.width(), img.height()) {
-                            image::imageops::resize(&img, fw, fh, image::imageops::FilterType::Triangle)
-                        } else {
-                            img
-                        };
-                        let mut f = black_frame(w, h);
-                        place(&mut f, w, h, &rgba_to_nv12(&img, fw as usize, fh as usize), fw as usize, fh as usize);
-                        still = Some((item_idx, f));
-                    }
-                    frame.copy_from_slice(&still.as_ref().unwrap().1);
+                    above = rest;
+                }
+            }
+            if !above.is_empty() {
+                let draws: Vec<Draw> = above
+                    .iter()
+                    .filter_map(|&i| match sources[i].as_ref()? {
+                        Source::Video { clip, pl, .. } => Draw::new(clip.src(clip.picture()?), pl, w, h),
+                        Source::Still { planes, pl } => Draw::new(planes.src(), pl, w, h),
+                        Source::Nothing => None,
+                    })
+                    .collect();
+                composite(&mut frame, w, h, &draws, threads);
+            }
+            for r in &p.regions {
+                if t < r.start || t >= r.start + r.duration {
+                    continue;
+                }
+                let Some(bx) = region_box(r.x, r.y, r.w, r.h, w, h) else { continue };
+                match r.kind {
+                    RegionKind::Pixelate => compose_px::pixelate(&mut frame, w, h, bx, r.strength),
+                    RegionKind::Blur => compose_px::blur(&mut frame, w, h, bx, r.strength, &mut scratch),
                 }
             }
             for (s, e, l) in &layers {
@@ -895,9 +1500,9 @@ mod imp {
                 audio_sent = to;
             }
         }
-        drop(clip);
+        drop(sources);
         writer.Finalize().map_err(err)?;
-        Ok(())
+        Ok(video_bps)
     }
 
     unsafe fn write_audio(writer: &IMFSinkWriter, stream: u32, m: &Mix, from: usize, to: usize) -> RResult<()> {
@@ -923,11 +1528,32 @@ mod imp {
 #[cfg(any(not(windows), feature = "headless-sim"))]
 mod imp {
     use super::*;
-    pub(super) fn render(_p: &Project, _dest: &Path, _progress: &mut dyn FnMut(f32)) -> RResult<()> {
-        Err(RecorderError::Other("rendering requires Windows".into()))
+    fn no<T>() -> RResult<T> {
+        Err(RecorderError::Other("requires Windows".into()))
+    }
+    pub(super) fn render(_p: &Project, _dest: &Path, _progress: &mut dyn FnMut(f32)) -> RResult<u32> {
+        no()
     }
     pub(super) fn media_info(_path: &Path) -> RResult<MediaInfo> {
-        Err(RecorderError::Other("requires Windows".into()))
+        no()
+    }
+    pub(super) fn audio_peaks(_path: &Path) -> RResult<(f64, Vec<u8>)> {
+        no()
+    }
+    pub(super) fn video_thumbs(_path: &Path, _times: &[f64], _height: u32) -> RResult<Vec<String>> {
+        no()
+    }
+    pub(super) fn mp3_available() -> bool {
+        false
+    }
+    pub(super) fn export_audio(
+        _items: &[AudioItem],
+        _duration: f64,
+        _dest: &Path,
+        _ext: &str,
+        _progress: &mut dyn FnMut(f32),
+    ) -> RResult<()> {
+        no()
     }
 }
 
@@ -936,7 +1562,18 @@ mod tests {
     use super::*;
 
     fn item(volume: f32, duration: f64, fade_in: f64, fade_out: f64) -> AudioItem {
-        AudioItem { path: PathBuf::new(), start: 0.0, duration, src_in: 0.0, volume, fade_in, fade_out }
+        AudioItem {
+            path: PathBuf::new(),
+            start: 0.0,
+            duration,
+            src_in: 0.0,
+            volume,
+            fade_in,
+            fade_out,
+            pan: 0.0,
+            eq: [0.0; 3],
+            gate: None,
+        }
     }
 
     #[test]
@@ -1016,19 +1653,80 @@ mod tests {
 
     #[test]
     fn project_duration_and_checks() {
-        let mut p = Project {
-            width: 1281,
-            height: 720,
-            fps: 500,
-            video: vec![VideoItem { path: Some(PathBuf::from("a.mp4")), png: None, start: 2.0, duration: 3.0, src_in: 0.0 }],
-            overlays: vec![],
-            audio: vec![item(1.0, 9.0, 0.0, 0.0)],
-            target_mb: None,
-        };
+        let mut p: Project = serde_json::from_str(
+            r#"{"width":1281,"height":720,"fps":500,
+                "video":[{"path":"a.mp4","start":2,"duration":3,"srcIn":0,"z":0}],
+                "overlays":[],"regions":[],
+                "audio":[{"path":"a.mp4","start":0,"duration":9,"srcIn":0,"volume":1,"fadeIn":0,"fadeOut":0,"pan":0,"eq":[0,0,0],"gate":null}],
+                "targetMb":null}"#,
+        )
+        .unwrap();
         p.validate().unwrap();
         assert_eq!((p.width, p.fps), (1280, 120));
+        // The sound runs past the picture: the tail is black.
+        assert_eq!(p.duration(), 9.0);
+        p.audio.clear();
         assert_eq!(p.duration(), 5.0);
         p.video.clear();
-        assert_eq!(p.duration(), 9.0);
+        assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn render_job_json_uses_camel_case() {
+        let p: Project = serde_json::from_str(
+            r#"{"width":1920,"height":1080,"fps":60,
+                "video":[
+                  {"path":"a.mp4","start":0,"duration":5,"srcIn":1.5,"z":1,"crop":{"x":0.1,"y":0,"w":0.5,"h":1},
+                   "flipH":true,"flipV":false,"rot90":270,"scale":0.5,"cx":0.25,"cy":0.75,"fill":true},
+                  {"png":"data:image/png;base64,AAAA","start":0,"duration":5,"srcIn":0,"z":0,"scale":1,"cx":0.5,"cy":0.5},
+                  {"path":"b.mp4","start":5,"duration":1,"srcIn":0,"z":0,"crop":null}],
+                "overlays":[{"png":"data:,","start":0,"duration":1,"x":0.1,"y":0.2,"opacity":0.5}],
+                "regions":[{"kind":"blur","start":0,"duration":2,"x":0.1,"y":0.1,"w":0.2,"h":0.2,"strength":12},
+                           {"kind":"pixelate","start":1,"duration":2,"x":0,"y":0,"w":1,"h":1,"strength":16}],
+                "audio":[{"path":"m.mp3","start":0,"duration":5,"srcIn":0,"volume":2,"fadeIn":1,"fadeOut":1,
+                          "pan":-0.5,"eq":[3,-2,1],"gate":-45}],
+                "targetMb":9.5}"#,
+        )
+        .unwrap();
+        let v = &p.video[0];
+        assert_eq!((v.z, v.src_in, v.flip_h, v.fill), (1, 1.5, true, true));
+        let pose = v.pose();
+        assert_eq!(pose.rot90, 270);
+        assert_eq!(pose.crop.unwrap().w, 0.5);
+        assert_eq!((pose.scale, pose.cx, pose.cy), (0.5, 0.25, 0.75));
+        let still = p.video[1].pose();
+        assert!(still.is_plain());
+        assert!(p.video[2].pose().is_plain());
+        assert_eq!(p.draw_order(), vec![1, 2, 0]);
+        assert_eq!(p.regions[0].kind, RegionKind::Blur);
+        assert_eq!(p.regions[1].kind, RegionKind::Pixelate);
+        let a = &p.audio[0];
+        assert_eq!((a.pan, a.eq, a.gate), (-0.5, [3.0, -2.0, 1.0], Some(-45.0)));
+        assert_eq!(p.target_mb, Some(9.5));
+        // Old jobs (no new keys) still parse with defaults.
+        let old: Project = serde_json::from_str(
+            r#"{"width":1280,"height":720,"fps":30,"video":[{"path":"a.mp4","start":0,"duration":2}],
+                "audio":[{"path":"a.mp4","start":0,"duration":2}]}"#,
+        )
+        .unwrap();
+        assert!(old.video[0].pose().is_plain());
+        assert!(old.regions.is_empty());
+        assert_eq!((old.audio[0].volume, old.audio[0].pan, old.audio[0].gate), (1.0, 0.0, None));
+    }
+
+    #[test]
+    fn wav_file_round_trip() {
+        let mut m = Mix::new(0.5);
+        m.samples[0] = 0.5;
+        m.samples[1] = -0.5;
+        let dir = std::env::temp_dir().join(format!("lastshot-wav-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("t.wav");
+        write_wav(&m, &f).unwrap();
+        let bytes = std::fs::read(&f).unwrap();
+        assert_eq!(bytes.len(), 44 + 24_000 * 4);
+        assert_eq!(i16::from_le_bytes([bytes[44], bytes[45]]), 16383);
+        assert_eq!(i16::from_le_bytes([bytes[46], bytes[47]]), -16383);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

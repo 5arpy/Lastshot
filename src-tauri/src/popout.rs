@@ -117,6 +117,7 @@ pub async fn popout_open(
     if view == "studio" {
         crate::studio::allow_camera(&win);
     }
+    crate::editor_media::install_drop_bridge(&win);
     show(&win, focus);
     announce(&app, None);
     Ok(())

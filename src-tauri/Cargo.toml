@@ -119,6 +119,9 @@ tauri-winrt-notification = "0.7.3"
 # Same version Tauri's WebView2 layer uses (no extra download): lets the
 # Studio layer window use the webcam without a permission prompt.
 webview2-com = "0.38"
+# The interface casts webview2-com's types need (its own windows-core; already
+# in the build through webview2-com, nothing new is downloaded).
+windows-core-61 = { package = "windows-core", version = "0.61" }
 
 [features]
 # Allows `cargo run --features headless-sim` on non-Windows dev machines: the

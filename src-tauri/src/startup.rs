@@ -76,6 +76,8 @@ pub fn ensure_main(app: &AppHandle, visible: bool) -> Option<tauri::WebviewWindo
         }
     }
     crate::studio::allow_camera(&w);
+    // File paths for drops on the page (the Editor's media bin and timeline).
+    crate::editor_media::install_drop_bridge(&w);
     if let Some(state) = app.try_state::<crate::commands::AppState>() {
         if state.settings.read().always_on_top {
             let _ = w.set_always_on_top(true);

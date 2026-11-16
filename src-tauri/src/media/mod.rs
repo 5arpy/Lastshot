@@ -2,6 +2,8 @@
 
 pub mod audio;
 pub mod compose;
+pub mod compose_fx;
+pub mod compose_px;
 pub mod compositor;
 pub mod cursor;
 pub mod layers;

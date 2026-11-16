@@ -42,6 +42,8 @@ pub fn run() {
     if startup::run_watchdog_if_asked() {
         return;
     }
+    // Portable mode keeps the window's browser data next to the exe too.
+    paths::apply_portable_env();
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info,lastshot=debug"),
     )

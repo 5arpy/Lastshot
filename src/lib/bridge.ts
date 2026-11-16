@@ -519,6 +519,18 @@ export const lastshot = {
     return paths.length;
   },
   /** Files or folders changed under the save folder (debounced). */
+  /** Whether each global shortcut is ours (test copies register none). */
+  async getHotkeyStatus(): Promise<HotkeyStatus> {
+    if (isTauri()) return invoke<HotkeyStatus>("get_hotkey_status");
+    return { skipped: false, keys: [] };
+  },
+  async retryHotkeys(): Promise<HotkeyStatus> {
+    if (isTauri()) return invoke<HotkeyStatus>("retry_hotkeys");
+    return { skipped: false, keys: [] };
+  },
+  onHotkeyStatus(handler: (s: HotkeyStatus) => void): Promise<() => void> {
+    return listen<HotkeyStatus>("lastshot://hotkeys-status", handler);
+  },
   onLibraryChanged(handler: () => void): Promise<() => void> {
     return listen<null>(CHANNELS.libraryChanged, () => handler());
   },
@@ -1209,3 +1221,8 @@ export const lastshot = {
 };
 
 export type LastshotApi = typeof lastshot;
+
+export interface HotkeyStatus {
+  skipped: boolean;
+  keys: { action: "save" | "toggle" | "snip" | "record"; accel: string; ok: boolean; error: string | null }[];
+}

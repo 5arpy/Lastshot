@@ -11,6 +11,7 @@ pub mod files;
 pub mod commands;
 pub mod editor;
 pub mod foreground;
+pub mod hotkey_guard;
 pub mod hotkeys;
 pub mod library_ops;
 pub mod media;
@@ -158,17 +159,13 @@ pub fn run() {
             appname::start_tracker();
             library_ops::start_watch(&handle);
 
-            if let Err(e) =
-                hotkeys::register_all(&handle, &save_key, &toggle_key, &snip_key, &record_key)
-            {
-                log::warn!("[lastshot] hotkey registration: {e}");
-                let h = handle.clone();
-                let msg = e.clone();
-                tauri::async_runtime::spawn(async move {
-                    // Give the webview a beat to attach its listeners.
-                    tokio::time::sleep(Duration::from_millis(900)).await;
-                    let _ = h.emit(commands::EVT_ERROR, msg);
-                });
+            if std::env::var("LASTSHOT_TEST_INSTANCE").as_deref() == Ok("1") {
+                /* no global shortcuts in test instances */
+                hotkey_guard::skip();
+            } else {
+                // Each on its own, retried and checked in the background;
+                // failures show in Settings and as one notification.
+                hotkeys::register_all(&handle, &save_key, &toggle_key, &snip_key, &record_key);
             }
             startup::mark("hotkeys");
 
@@ -380,6 +377,8 @@ pub fn run() {
             library_ops::rename_library_item,
             library_ops::recycle_items,
             media::voice::get_audio_levels,
+            hotkey_guard::get_hotkey_status,
+            hotkey_guard::retry_hotkeys,
             startup::crash_for_test,
             scenes::get_scenes,
             scenes::save_scenes,

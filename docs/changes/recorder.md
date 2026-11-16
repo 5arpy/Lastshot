@@ -27,6 +27,7 @@ Lines for the next release notes, written by the recorder work. Merge them into
 
 ### Fixed
 
+- **Shortcuts like Alt+C could stop working for good** when one of them was briefly taken by another app at start-up: then none of them were set up and nothing said so. Each shortcut is now set up on its own and retried every 3 seconds, Lastshot checks every 10 seconds (and after sleep, unlocking the PC or an Explorer restart) that they still work and takes them back if not. If one stays taken for 15 seconds, a Windows notification says so, and Settings shows *Not working* with *Try again* next to it.
 - The microphone volume slider in Studio set the volume to almost nothing when moved.
 - Quitting Lastshot left its tray icon behind until the mouse passed over it.
 - Replays and recordings could drop frames or play unevenly at 60 fps when the graphics driver asked for frames in bursts. Every frame now goes to the encoder, and frames are placed on an even 60 fps grid, so players show a steady picture.

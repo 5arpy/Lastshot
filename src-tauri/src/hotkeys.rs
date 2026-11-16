@@ -39,37 +39,13 @@ pub fn validate(accelerator: &str) -> Result<Shortcut, String> {
     Ok(sc)
 }
 
-/// Registers the save, arm/disarm and snip shortcuts. Called once from `setup`.
-pub fn register_all(
-    app: &AppHandle,
-    save: &str,
-    toggle: &str,
-    snip: &str,
-    record: &str,
-) -> Result<(), String> {
-    let gs = app.global_shortcut();
-    let save_sc = validate(save)?;
-    let toggle_sc = validate(toggle)?;
-
-    if !gs.is_registered(save_sc) {
-        gs.register(save_sc)
-            .map_err(|e| format!("could not register {save}: {e} (another app may own it)"))?;
-    }
-    if !gs.is_registered(toggle_sc) {
-        gs.register(toggle_sc)
-            .map_err(|e| format!("could not register {toggle}: {e}"))?;
-    }
-    let snip_sc = validate(snip)?;
-    if !gs.is_registered(snip_sc) {
-        gs.register(snip_sc)
-            .map_err(|e| format!("could not register {snip}: {e} (another app may own it)"))?;
-    }
-    let record_sc = validate(record)?;
-    if !gs.is_registered(record_sc) {
-        gs.register(record_sc)
-            .map_err(|e| format!("could not register {record}: {e} (another app may own it)"))?;
-    }
-    Ok(())
+/// Registers the shortcuts, each on its own (one taken combo never blocks
+/// the others), and keeps them working; see `hotkey_guard`.
+pub fn register_all(app: &AppHandle, save: &str, toggle: &str, snip: &str, record: &str) {
+    crate::hotkey_guard::start(
+        app,
+        &[("save", save.to_string()), ("toggle", toggle.to_string()), ("snip", snip.to_string()), ("record", record.to_string())],
+    );
 }
 
 /// Registers the new combo (if different) and then drops the old one. Order
@@ -82,6 +58,9 @@ pub fn rebind(app: &AppHandle, previous: &str, next: &str) -> Result<(), String>
     if prev_sc.as_ref() == Some(&sc) {
         return Ok(()); // nothing to do — same combo
     }
+    if std::env::var("LASTSHOT_TEST_INSTANCE").as_deref() == Ok("1") {
+        return Ok(()); // no global shortcuts in test instances
+    }
     gs.register(sc)
         .map_err(|e| format!("could not register {next}: {e}"))?;
     if let Some(prev) = prev_sc {
@@ -89,6 +68,7 @@ pub fn rebind(app: &AppHandle, previous: &str, next: &str) -> Result<(), String>
             let _ = gs.unregister(prev);
         }
     }
+    crate::hotkey_guard::rebound(previous, next);
     Ok(())
 }
 

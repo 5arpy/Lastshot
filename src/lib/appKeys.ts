@@ -26,8 +26,8 @@ export const APP_KEYS: { id: string; keys: string; label: string; group: string 
   })),
   { id: "next-tab", keys: "Ctrl+Tab | Ctrl+PageDown", label: "Next tab", group: "Tabs" },
   { id: "prev-tab", keys: "Ctrl+Shift+Tab | Ctrl+PageUp", label: "Previous tab", group: "Tabs" },
-  { id: "tab-new-window", keys: "Ctrl+Shift+U", label: "Move this tab to a new window (undock)", group: "Tabs" },
-  { id: "tab-dock", keys: "Ctrl+Shift+D", label: "Move this tab to the main window (dock)", group: "Tabs" },
+  // One key both ways: in the main window it undocks the tab, elsewhere it docks it back.
+  { id: "tab-new-window", keys: "Ctrl+Shift+U", label: "Move this tab to its own window, or back to the main window", group: "Tabs" },
   { id: "close-window", keys: "", label: "Close this window (its tabs go back to the main window)", group: "Tabs" },
   ...TAB_IDS.map((t) => ({ id: `go-${t}`, keys: "", label: `Go to ${TAB_NAMES[t]}`, group: "Tabs" })),
   { id: "cheat-sheet", keys: "F1 | ?", label: "Keyboard shortcuts", group: "Help" },

@@ -127,7 +127,7 @@ tauri-winrt-notification = "0.7.3"
 # Studio layer window use the webcam without a permission prompt.
 webview2-com = "0.38"
 # The windows-core that webview2-com uses (already in the build), for casting
-# its interfaces (the Clips explorer reads the paths of dropped files).
+# its interfaces (the Clips explorer and the Editor read the paths of dropped files).
 windows-core-061 = { package = "windows-core", version = "0.61" }
 
 [features]

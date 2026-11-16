@@ -5,7 +5,16 @@ import { cn } from "../utils/cn";
 import Viewer from "../viewer/Viewer";
 import { Btn, Icon } from "../viewer/ui";
 import { popOutCanvas } from "../popout/frames";
-import { sameView, viewForRect, type Pt } from "../viewer/math";
+import { sameView, viewForRect, type View } from "../viewer/math";
+import AnnotationLayer, { type LayerView } from "../annotate/AnnotationLayer";
+import { drawShape } from "../annotate/draw";
+import StyleControls, { TOOLS } from "../annotate/StyleControls";
+import { type Shape, type Style, type Tool, DEFAULT_STYLE, PALETTE, align, flip, moveBy, reorder, rotateBy, shapeId } from "../annotate/shapes";
+import { History } from "../timeline/history";
+import { postToEditor } from "../editor/inbox";
+import { SNIP_TOOL_KEYS, snipKeymap } from "../editor/keys";
+import { SNIP_KEYS, keyOfLabel, matchKey, toRegistry } from "../editor/keyTables";
+import { setShortcutOverrides } from "../lib/shortcuts";
 
 /**
  * Full-screen snipping overlay. It runs in its own borderless window that
@@ -13,8 +22,10 @@ import { sameView, viewForRect, type Pt } from "../viewer/math";
  * switches between Screenshot and Record.
  *
  * 1. Pick: drag a box, click a window, or press F for the whole screen.
- * 2. Screenshot: mark up (box, arrow, pen, blur; Ctrl+Z undoes), then
- *    Enter / Ctrl+C copies, Ctrl+S saves (and copies).
+ * 2. Screenshot: mark up with the shared annotation objects (text, boxes,
+ *    arrows, pen, highlighter, steps, blur, pixelate, black box). Every
+ *    object can be selected, moved, sized, turned and restyled; Ctrl+Z /
+ *    Ctrl+Y. Enter / Ctrl+C copies, Ctrl+S saves (and copies).
  *    Record: Enter / Start recording records that area until stopped.
  * Esc cancels.
  *
@@ -22,20 +33,24 @@ import { sameView, viewForRect, type Pt } from "../viewer/math";
  * scales them to CSS pixels only for display.
  */
 
-type Tool = "box" | "arrow" | "pen" | "blur";
 type Mode = "shot" | "rec";
 type Rect = { x: number; y: number; w: number; h: number };
-type Shape =
-  | { kind: "box" | "arrow" | "blur"; x1: number; y1: number; x2: number; y2: number; color: string; width: number }
-  | { kind: "pen"; points: [number, number][]; color: string; width: number };
 
-const COLORS = ["#ff4d4f", "#ffc53d", "#52c41a", "#4096ff", "#ffffff", "#111111"];
-const TOOLS: { id: Tool; label: string; key: string; icon: string }[] = [
-  { id: "box", label: "Box", key: "R", icon: "M3 4h10v8H3z" },
-  { id: "arrow", label: "Arrow", key: "A", icon: "M3 13L13 3M7 3h6v6" },
-  { id: "pen", label: "Pen", key: "P", icon: "M3 13c2-1 3-5 5-6s3 2 5 0" },
-  { id: "blur", label: "Blur", key: "B", icon: "M3 3h3v3H3zM8 3h3v3H8zM5.5 7.5h3v3h-3zM3 10h3v3H3zM10 10h3v3h-3z" },
-];
+const STYLE_KEY = "lastshot.snip.style";
+function loadStyle(): Style {
+  try {
+    const v = localStorage.getItem(STYLE_KEY);
+    return v ? { ...DEFAULT_STYLE, ...(JSON.parse(v) as Partial<Style>) } : DEFAULT_STYLE;
+  } catch {
+    return DEFAULT_STYLE;
+  }
+}
+
+/** Snip keys for the drawing tools, as the user set them (B stays blur here; Shift+B pixelates). */
+function keyOf(t: Tool): string | undefined {
+  const label = SNIP_TOOL_KEYS.find((x) => x.tool === t)?.label;
+  return (label && keyOfLabel("snip", SNIP_KEYS, label)) || undefined;
+}
 
 function normalize(x1: number, y1: number, x2: number, y2: number): Rect {
   return { x: Math.min(x1, x2), y: Math.min(y1, y2), w: Math.abs(x2 - x1), h: Math.abs(y2 - y1) };
@@ -71,69 +86,24 @@ function demoCapture(): SnipCapture {
   };
 }
 
-function drawArrow(g: CanvasRenderingContext2D, x1: number, y1: number, x2: number, y2: number, width: number) {
-  const angle = Math.atan2(y2 - y1, x2 - x1);
-  const head = Math.max(10, width * 4);
-  g.beginPath();
-  g.moveTo(x1, y1);
-  g.lineTo(x2 - Math.cos(angle) * head * 0.6, y2 - Math.sin(angle) * head * 0.6);
-  g.stroke();
-  g.beginPath();
-  g.moveTo(x2, y2);
-  g.lineTo(x2 - head * Math.cos(angle - Math.PI / 7), y2 - head * Math.sin(angle - Math.PI / 7));
-  g.lineTo(x2 - head * Math.cos(angle + Math.PI / 7), y2 - head * Math.sin(angle + Math.PI / 7));
-  g.closePath();
-  g.fill();
-}
-
-/** Draws the selected part of the screen plus all markup at full resolution. */
-function render(
-  g: CanvasRenderingContext2D,
-  img: HTMLImageElement,
-  sel: Rect,
-  shapes: Shape[],
-  blockPx: number,
-) {
+/** The selected part of the screen plus all objects, at full resolution. */
+function render(g: CanvasRenderingContext2D, img: HTMLImageElement, sel: Rect, shapes: Shape[], skip: string | null) {
+  g.setTransform(1, 0, 0, 1, 0, 0);
   g.imageSmoothingEnabled = true;
   g.clearRect(0, 0, sel.w, sel.h);
   g.drawImage(img, sel.x, sel.y, sel.w, sel.h, 0, 0, sel.w, sel.h);
-  for (const s of shapes) {
-    g.lineCap = "round";
-    g.lineJoin = "round";
-    g.strokeStyle = s.color;
-    g.fillStyle = s.color;
-    g.lineWidth = s.width;
-    if (s.kind === "pen") {
-      if (s.points.length < 2) continue;
-      g.beginPath();
-      g.moveTo(s.points[0][0], s.points[0][1]);
-      for (const [x, y] of s.points.slice(1)) g.lineTo(x, y);
-      g.stroke();
-    } else if (s.kind === "box") {
-      const r = normalize(s.x1, s.y1, s.x2, s.y2);
-      g.strokeRect(r.x, r.y, r.w, r.h);
-    } else if (s.kind === "arrow") {
-      drawArrow(g, s.x1, s.y1, s.x2, s.y2, s.width);
-    } else {
-      // Pixelate from the original picture, so it cannot be undone by
-      // un-blurring and markup underneath does not leak through.
-      const r = normalize(s.x1, s.y1, s.x2, s.y2);
-      if (r.w < 2 || r.h < 2) continue;
-      const tw = Math.max(1, Math.ceil(r.w / blockPx));
-      const th = Math.max(1, Math.ceil(r.h / blockPx));
-      const tmp = document.createElement("canvas");
-      tmp.width = tw;
-      tmp.height = th;
-      const tg = tmp.getContext("2d")!;
-      tg.drawImage(img, sel.x + r.x, sel.y + r.y, r.w, r.h, 0, 0, tw, th);
-      g.imageSmoothingEnabled = false;
-      g.drawImage(tmp, 0, 0, tw, th, r.x, r.y, r.w, r.h);
-      g.imageSmoothingEnabled = true;
-    }
-  }
+  for (const s of shapes) if (s.id !== skip && !s.hidden) drawShape(g, s);
 }
 
 export default function SnipOverlay() {
+  // The user's keys (Settings → Shortcuts → Snip).
+  useEffect(() => {
+    if (lastshot.isTauri())
+      void lastshot
+        .getSettings()
+        .then((s) => setShortcutOverrides(s.shortcuts))
+        .catch(() => undefined);
+  }, []);
   const [capture, setCapture] = useState<SnipCapture | null>(null);
   const [img, setImg] = useState<HTMLImageElement | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -143,10 +113,25 @@ export default function SnipOverlay() {
   const [drag, setDrag] = useState<{ x1: number; y1: number; x2: number; y2: number } | null>(null);
   // Editing phase.
   const [sel, setSel] = useState<Rect | null>(null);
-  const [tool, setTool] = useState<Tool>("box");
-  const [color, setColor] = useState(COLORS[0]);
-  const [shapes, setShapes] = useState<Shape[]>([]);
-  const [draft, setDraft] = useState<Shape | null>(null);
+  const [tool, setTool] = useState<Tool>("rect");
+  const [style, setStyleState] = useState<Style>(loadStyle);
+  const [shapes, setShapesState] = useState<Shape[]>([]);
+  const shapesRef = useRef<Shape[]>([]);
+  shapesRef.current = shapes;
+  const [picked, setPicked] = useState<string[]>([]);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [showStyle, setShowStyle] = useState(() => {
+    try {
+      return localStorage.getItem("lastshot.snip.styleOpen") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const [space, setSpace] = useState(false);
+  const [vv, setVv] = useState<View | null>(null);
+  const hist = useRef(new History<Shape[]>());
+  const gesture = useRef<Shape[] | null>(null);
+  const [, setHv] = useState(0);
   const [busy, setBusy] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>("shot");
 
@@ -160,8 +145,65 @@ export default function SnipOverlay() {
 
   // Physical pixels per CSS pixel.
   const scale = capture ? capture.width / view.w : window.devicePixelRatio || 1;
-  const strokeWidth = Math.max(2, Math.round(3 * scale));
-  const blockPx = Math.max(6, Math.round(10 * scale));
+
+  const setStyle = (p: Partial<Style>) =>
+    setStyleState((st) => {
+      const next = { ...st, ...p };
+      try {
+        localStorage.setItem(STYLE_KEY, JSON.stringify(next));
+      } catch {
+        /* private mode */
+      }
+      return next;
+    });
+
+  /** Object edits: one undo step per click or per drag. */
+  const commitShapes = useCallback((next: Shape[], phase: "live" | "end" | "once", label: string) => {
+    const cur = shapesRef.current;
+    if (phase === "live") {
+      if (!gesture.current) gesture.current = cur;
+    } else if (phase === "end") {
+      const before = gesture.current ?? cur;
+      gesture.current = null;
+      if (before !== next) hist.current.push(before, label);
+    } else {
+      hist.current.push(cur, label);
+    }
+    shapesRef.current = next;
+    setShapesState(next);
+    setHv((x) => x + 1);
+  }, []);
+  const undo = useCallback(() => {
+    const prev = hist.current.undo(shapesRef.current);
+    if (!prev) return;
+    shapesRef.current = prev;
+    setShapesState(prev);
+    setEditing(null);
+    setHv((x) => x + 1);
+  }, []);
+  const redo = useCallback(() => {
+    const next = hist.current.redo(shapesRef.current);
+    if (!next) return;
+    shapesRef.current = next;
+    setShapesState(next);
+    setHv((x) => x + 1);
+  }, []);
+  const editPicked = useCallback(
+    (fn: (s: Shape) => Shape, label: string) => {
+      if (!picked.length) return false;
+      const ids = new Set(picked);
+      commitShapes(shapesRef.current.map((s) => (ids.has(s.id) && !s.locked ? fn(s) : s)), "once", label);
+      return true;
+    },
+    [picked, commitShapes],
+  );
+  const duplicatePicked = useCallback(() => {
+    const ids = new Set(picked);
+    const copies = shapesRef.current.filter((x) => ids.has(x.id)).map((x) => ({ ...moveBy(x, 16 * scale, 16 * scale), id: shapeId(), locked: false }));
+    if (!copies.length) return;
+    commitShapes([...shapesRef.current, ...copies], "once", "Duplicate");
+    setPicked(copies.map((c) => c.id));
+  }, [picked, scale, commitShapes]);
 
   // ------------------------------------------------------------ load
   useEffect(() => {
@@ -216,9 +258,9 @@ export default function SnipOverlay() {
       c.width = sel.w;
       c.height = sel.h;
     }
-    render(c.getContext("2d")!, img, sel, draft ? [...shapes, draft] : shapes, blockPx);
+    render(c.getContext("2d")!, img, sel, shapes, editing);
     setCanvasVersion((v) => v + 1);
-  }, [img, sel, shapes, draft, blockPx]);
+  }, [img, sel, shapes, editing]);
 
   const toImage = (e: React.PointerEvent | PointerEvent): [number, number] => {
     const x = Math.round(e.clientX * scale);
@@ -234,8 +276,11 @@ export default function SnipOverlay() {
 
   const select = useCallback((r: Rect) => {
     setSel({ x: r.x, y: r.y, w: Math.max(1, r.w), h: Math.max(1, r.h) });
-    setShapes([]);
-    setDraft(null);
+    shapesRef.current = [];
+    setShapesState([]);
+    hist.current.clear();
+    setPicked([]);
+    setEditing(null);
     setDrag(null);
     setHover(null);
   }, []);
@@ -273,7 +318,8 @@ export default function SnipOverlay() {
   ) : null;
 
   const finish = useCallback(
-    async (save: boolean) => {
+    /** `toEditor`: saved, then opened in the main window's editor. */
+    async (save: boolean, toEditor = false) => {
       const c = canvasRef.current;
       if (!c || !sel || busy) return;
       setBusy(save ? "Saving…" : "Copying…");
@@ -283,7 +329,12 @@ export default function SnipOverlay() {
           const s = await lastshot.getSettings().catch(() => null);
           const jpg =
             s?.screenshotFormat === "jpg" ? c.toDataURL("image/jpeg", (s.screenshotQuality ?? 90) / 100) : undefined;
-          await lastshot.snipFinish(png, true, save, jpg);
+          const done = await lastshot.snipFinish(png, true, save || toEditor, jpg);
+          if (toEditor && done.path) {
+            // The editor queue waits for the main window if it is not up yet.
+            postToEditor([done.path], { mode: "open" });
+            await window.__TAURI__?.core.invoke("shell_open_tab", { tab: "editor", payload: null }).catch(() => undefined);
+          }
         } else {
           const a = document.createElement("a");
           a.href = png;
@@ -312,10 +363,24 @@ export default function SnipOverlay() {
   }, [sel, busy]);
 
   // ------------------------------------------------------------ keyboard
+  // Capture phase: the snip's keys win over the viewer's; keys the snip
+  // does not use (0 fit, 1 actual size, ...) still reach the viewer.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
+      if (editing) return; // typing in a text
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return;
+      const done = () => {
         e.preventDefault();
+        e.stopImmediatePropagation();
+      };
+      if (e.key === "Escape") {
+        done();
+        if (sel && mode === "shot" && (picked.length || tool !== "select")) {
+          setPicked([]);
+          setTool("select");
+          return;
+        }
         cancel();
         return;
       }
@@ -326,32 +391,59 @@ export default function SnipOverlay() {
       }
       if (mode === "rec") {
         if (e.key === "Enter") {
-          e.preventDefault();
+          done();
           void startRecording();
         }
         return;
       }
-      const k = e.key.toLowerCase();
-      if (e.ctrlKey && k === "z") {
-        e.preventDefault();
-        setShapes((s) => s.slice(0, -1));
-      } else if ((e.ctrlKey && k === "c") || e.key === "Enter") {
-        e.preventDefault();
-        void finish(false);
-      } else if (e.ctrlKey && k === "s") {
-        e.preventDefault();
-        void finish(true);
-      } else if (e.ctrlKey && k === "p") {
-        e.preventDefault();
-        void popOut();
-      } else if (!e.ctrlKey && !e.altKey) {
-        const t = TOOLS.find((t) => t.key.toLowerCase() === k);
-        if (t) setTool(t.id);
+      if (e.code === "Space") {
+        setSpace(true);
+        return;
       }
+      const one = () => picked.length > 0;
+      const list = snipKeymap({
+        undo,
+        redo,
+        copy: () => void finish(false),
+        save: () => void finish(true),
+        toEditor: () => void finish(true, true),
+        popOut: () => void popOut(),
+        selectAll: () => setPicked(shapesRef.current.map((s) => s.id)),
+        duplicate: duplicatePicked,
+        lock: () => void editPicked((s) => ({ ...s, locked: !s.locked }), "Lock"),
+        order: (dir) => commitShapes(reorder(shapesRef.current, new Set(picked), dir), "once", "Order"),
+        rotate: (deg) => void editPicked((s) => rotateBy(s, deg), "Turn"),
+        flip: (axis) => void editPicked((s) => flip(s, axis), "Flip"),
+        enter: () => {
+          const txt = shapesRef.current.find((s) => picked.includes(s.id) && s.kind === "text");
+          if (txt) setEditing(txt.id);
+          else void finish(false);
+        },
+        del: () => {
+          const ids = new Set(picked);
+          commitShapes(shapesRef.current.filter((s) => !ids.has(s.id) || s.locked), "once", "Delete");
+          setPicked([]);
+        },
+        nudge: (dx, dy) => editPicked((s) => moveBy(s, dx * scale, dy * scale), "Nudge"),
+        opacity: (v) => editPicked((s) => ({ ...s, opacity: v }), "Opacity"),
+        tool: (t) => setTool(t as Tool),
+        picked: one,
+      });
+      const hit = matchKey("snip", toRegistry(list), e);
+      if (!hit) return;
+      done();
+      hit.run();
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [sel, hover, mode, cancel, finish, popOut, startRecording, select, selectAll]);
+    const onUp = (e: KeyboardEvent) => {
+      if (e.code === "Space") setSpace(false);
+    };
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("keyup", onUp, true);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("keyup", onUp, true);
+    };
+  }, [sel, hover, mode, cancel, finish, popOut, startRecording, select, selectAll, editing, picked, tool, undo, redo, commitShapes, editPicked, duplicatePicked, scale]);
 
   // ------------------------------------------------------------ picking pointer
   const onPickDown = (e: React.PointerEvent) => {
@@ -379,43 +471,6 @@ export default function SnipOverlay() {
     }
   };
 
-  // ------------------------------------------------------------ markup pointer
-  // Markup gets points in the selection's own pixels from the viewer, so it
-  // works the same zoomed, panned or turned.
-  const onEditDown = (p: Pt, e: React.PointerEvent) => {
-    if (e.button !== 0 || busy) return;
-    const outside = !sel || p.x < 0 || p.y < 0 || p.x > sel.w || p.y > sel.h;
-    if (outside && !zoomed) {
-      // Clicking outside the selection with no markup starts over.
-      if (shapes.length === 0) {
-        setSel(null);
-        onPickDown(e);
-      }
-      return;
-    }
-    if (mode === "rec") return;
-    const x = Math.round(p.x);
-    const y = Math.round(p.y);
-    if (tool === "pen") setDraft({ kind: "pen", points: [[x, y]], color, width: strokeWidth });
-    else setDraft({ kind: tool, x1: x, y1: y, x2: x, y2: y, color, width: strokeWidth });
-  };
-  const onEditMove = (p: Pt) => {
-    if (!draft) return;
-    const x = Math.round(p.x);
-    const y = Math.round(p.y);
-    if (draft.kind === "pen") setDraft({ ...draft, points: [...draft.points, [x, y]] });
-    else setDraft({ ...draft, x2: x, y2: y });
-  };
-  const onEditUp = () => {
-    if (!draft) return;
-    const tiny =
-      draft.kind === "pen"
-        ? draft.points.length < 2
-        : Math.abs(draft.x2 - draft.x1) < 3 && Math.abs(draft.y2 - draft.y1) < 3;
-    if (!tiny) setShapes((s) => [...s, draft]);
-    setDraft(null);
-  };
-
   // ------------------------------------------------------------ layout
   const css = (r: Rect) => ({ left: r.x / scale, top: r.y / scale, width: r.w / scale, height: r.h / scale });
   const cssRect = (r: Rect) => ({ x: r.x / scale, y: r.y / scale, w: r.w / scale, h: r.h / scale });
@@ -426,13 +481,33 @@ export default function SnipOverlay() {
       : hover;
   const liveCss = live ? css(live) : null;
 
+  // ------------------------------------------------------------ objects layer
+  /** Where the selection's pixels are on screen (follows the viewer's zoom). */
+  const layerView: LayerView | null = !sel
+    ? null
+    : !zoomed || !vv
+      ? { scale: 1 / scale, ox: sel.x / scale, oy: sel.y / scale }
+      : vv.rot === 0 && !vv.flipH && !vv.flipV
+        ? { scale: vv.scale, ox: vv.x - (sel.w / 2) * vv.scale, oy: vv.y - (sel.h / 2) * vv.scale }
+        : null; // turned or mirrored: inspect only
+  /** Clicking outside the selection with nothing drawn starts over. */
+  const onLayerDownCapture = (e: React.PointerEvent) => {
+    if (!sel || zoomed || e.button !== 0 || shapesRef.current.length || busy) return;
+    const r = css(sel);
+    if (e.clientX >= r.left && e.clientY >= r.top && e.clientX <= r.left + r.width && e.clientY <= r.top + r.height) return;
+    e.stopPropagation();
+    e.preventDefault();
+    setSel(null);
+    onPickDown(e);
+  };
+
   const toolbarStyle = useMemo(() => {
     if (!sel) return undefined;
     const r = css(sel);
     const barH = 44;
     const below = r.top + r.height + 10;
     const top = below + barH < view.h ? below : r.top - barH - 10 > 0 ? r.top - barH - 10 : r.top + r.height - barH - 10;
-    const left = Math.max(8, Math.min(r.left, view.w - 560));
+    const left = Math.max(8, Math.min(r.left, view.w - 960));
     return { top, left };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sel, scale, view]);
@@ -585,11 +660,63 @@ export default function SnipOverlay() {
             barLayout="overlay"
             exportKeys={false}
             homeView={(c) => viewForRect(c, cssRect(sel))}
-            onViewChange={(v, _st, c) => setZoomed(!sameView(v, viewForRect(c, cssRect(sel))))}
-            pointer={{ down: onEditDown, move: onEditMove, up: onEditUp }}
+            onViewChange={(v, _st, c) => {
+              setVv(v);
+              setZoomed(!sameView(v, viewForRect(c, cssRect(sel))));
+            }}
             onDoubleClick={() => void finish(false)}
             extra={snipExtra}
           />
+          {mode === "shot" && layerView && (
+            <div
+              className="absolute inset-0 bottom-12"
+              style={{ pointerEvents: space ? "none" : "auto" }}
+              onPointerDownCapture={onLayerDownCapture}
+              onWheel={(e) => {
+                // The wheel zooms the viewer underneath.
+                const el = e.currentTarget.previousElementSibling as HTMLElement | null;
+                el?.dispatchEvent(
+                  new WheelEvent("wheel", { deltaX: e.deltaX, deltaY: e.deltaY, deltaMode: e.deltaMode, clientX: e.clientX, clientY: e.clientY, ctrlKey: e.ctrlKey, shiftKey: e.shiftKey, altKey: e.altKey, bubbles: true, cancelable: true }),
+                );
+              }}
+              onDoubleClick={() => {
+                if (tool === "select" && !picked.length && !editing) void finish(false);
+              }}
+            >
+              <AnnotationLayer
+                className="absolute inset-0"
+                shapes={shapes}
+                content={{ w: sel.w, h: sel.h }}
+                view={layerView}
+                tool={tool}
+                style={style}
+                selected={picked}
+                onSelect={setPicked}
+                onChange={(changed, commit) => {
+                  const by = new Map(changed.map((x) => [x.id, x]));
+                  commitShapes(
+                    shapesRef.current.map((x) => by.get(x.id) ?? x),
+                    commit ? (gesture.current ? "end" : "once") : "live",
+                    "Edit",
+                  );
+                }}
+                onCreate={(x) => {
+                  commitShapes([...shapesRef.current, x], "once", "Add");
+                  setPicked([x.id]);
+                }}
+                onDelete={(ids) => {
+                  const set = new Set(ids);
+                  commitShapes(shapesRef.current.filter((x) => !set.has(x.id)), "once", "Delete");
+                  setPicked([]);
+                }}
+                editing={editing}
+                setEditing={setEditing}
+                nextStep={shapes.filter((x) => x.kind === "step").reduce((m, x) => Math.max(m, x.n ?? 0), 0) + 1}
+                penTarget={(tool === "pen" || tool === "highlight") && picked.length === 1 && shapes.find((x) => x.id === picked[0])?.kind === tool ? picked[0] : null}
+                onToolDone={() => setTool("select")}
+              />
+            </div>
+          )}
           {mode === "rec" ? (
             <div
               className="absolute z-10 flex items-center gap-1.5 rounded-xl border border-white/10 bg-[#1c1e25]/95 p-1.5 text-white shadow-2xl"
@@ -620,7 +747,7 @@ export default function SnipOverlay() {
             </div>
           ) : (
           <div
-            className="absolute z-10 flex items-center gap-1 rounded-xl border border-white/10 bg-[#1c1e25]/95 p-1.5 text-white shadow-2xl"
+            className="absolute z-10 flex max-w-[calc(100vw-16px)] flex-wrap items-center gap-1 rounded-xl border border-white/10 bg-[#1c1e25]/95 p-1.5 text-white shadow-2xl"
             style={toolbarStyle}
             onPointerDown={(e) => e.stopPropagation()}
           >
@@ -628,41 +755,68 @@ export default function SnipOverlay() {
               <button
                 key={t.id}
                 type="button"
-                title={`${t.label} (${t.key})`}
+                title={`${t.label}${keyOf(t.id) ? ` (${keyOf(t.id)})` : ""}`}
                 onClick={() => setTool(t.id)}
                 className={cn(
                   "grid h-8 w-8 place-items-center rounded-lg transition-colors",
                   tool === t.id ? "bg-[#5d72db] text-white" : "text-white/75 hover:bg-white/10",
                 )}
               >
-                <svg viewBox="0 0 16 16" className="h-4 w-4 fill-none stroke-current" strokeWidth="1.6">
+                <svg viewBox="0 0 16 16" className="h-4 w-4 fill-none stroke-current" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
                   <path d={t.icon} />
                 </svg>
               </button>
             ))}
             <div className="mx-1 h-6 w-px bg-white/15" />
-            {COLORS.map((c) => (
+            {PALETTE.slice(0, 6).map((c) => (
               <button
                 key={c}
                 type="button"
-                title="Colour"
-                onClick={() => setColor(c)}
+                title="Colour (also changes the selected objects)"
+                onClick={() => {
+                  setStyle({ color: c });
+                  editPicked((x) => ({ ...x, color: c }), "Colour");
+                }}
                 className={cn(
                   "h-5 w-5 rounded-full border-2 transition-transform",
-                  color === c ? "scale-110 border-white" : "border-white/20 hover:scale-105",
+                  style.color === c ? "scale-110 border-white" : "border-white/20 hover:scale-105",
                 )}
                 style={{ background: c }}
               />
             ))}
+            <button
+              type="button"
+              title="More: width, fill, text size, outline, opacity, turn, flip, order, lock"
+              onClick={() => {
+                setShowStyle(!showStyle);
+                try {
+                  localStorage.setItem("lastshot.snip.styleOpen", showStyle ? "0" : "1");
+                } catch {
+                  /* private mode */
+                }
+              }}
+              className={cn("rounded-lg px-2 py-1.5 text-[12px]", showStyle ? "bg-white/15 text-white" : "text-white/80 hover:bg-white/10")}
+            >
+              Style ▾
+            </button>
             <div className="mx-1 h-6 w-px bg-white/15" />
             <button
               type="button"
               title="Undo (Ctrl+Z)"
-              disabled={shapes.length === 0}
-              onClick={() => setShapes((s) => s.slice(0, -1))}
+              disabled={!hist.current.undoLabel}
+              onClick={undo}
               className="rounded-lg px-2 py-1.5 text-[12px] text-white/80 hover:bg-white/10 disabled:opacity-30"
             >
               Undo
+            </button>
+            <button
+              type="button"
+              title="Redo (Ctrl+Y)"
+              disabled={!hist.current.redoLabel}
+              onClick={redo}
+              className="rounded-lg px-2 py-1.5 text-[12px] text-white/80 hover:bg-white/10 disabled:opacity-30"
+            >
+              Redo
             </button>
             <button
               type="button"
@@ -683,6 +837,15 @@ export default function SnipOverlay() {
             </button>
             <button
               type="button"
+              title="Save and open in the Lastshot editor (Ctrl+E)"
+              disabled={!!busy}
+              onClick={() => void finish(true, true)}
+              className="rounded-lg border border-white/15 px-2.5 py-1.5 text-[12px] font-medium hover:bg-white/10 disabled:opacity-50"
+            >
+              Editor
+            </button>
+            <button
+              type="button"
               title="Copy to the clipboard (Enter)"
               disabled={!!busy}
               onClick={() => void finish(false)}
@@ -691,6 +854,42 @@ export default function SnipOverlay() {
               {busy ?? "Copy"}
             </button>
           </div>
+          )}
+          {mode === "shot" && showStyle && (
+            <div
+              className="absolute z-10 max-h-[60vh] w-[270px] overflow-y-auto rounded-xl border border-white/10 bg-[#1c1e25]/95 p-3 text-white shadow-2xl"
+              style={{ top: (toolbarStyle?.top ?? 60) + 52, left: toolbarStyle?.left ?? 8 }}
+              onPointerDown={(e) => e.stopPropagation()}
+            >
+              <StyleControls
+                selected={shapes.filter((x) => picked.includes(x.id))}
+                style={style}
+                onStyle={setStyle}
+                tool={tool}
+                onPatch={(fn, commit) => {
+                  const ids = new Set(picked);
+                  commitShapes(shapesRef.current.map((x) => (ids.has(x.id) ? { ...x, ...fn(x) } : x)), commit ? (gesture.current ? "end" : "once") : "live", "Style");
+                }}
+                arrange={{
+                  flip: (axis) => void editPicked((x) => flip(x, axis), "Flip"),
+                  rotate: (deg) => void editPicked((x) => rotateBy(x, deg), "Turn"),
+                  duplicate: duplicatePicked,
+                  remove: () => {
+                    const ids = new Set(picked);
+                    commitShapes(shapesRef.current.filter((x) => !ids.has(x.id)), "once", "Delete");
+                    setPicked([]);
+                  },
+                  order: (dir) => commitShapes(reorder(shapesRef.current, new Set(picked), dir), "once", "Order"),
+                  lock: () => void editPicked((x) => ({ ...x, locked: !x.locked }), "Lock"),
+                  align: (how) => {
+                    const ids = new Set(picked);
+                    const moved = align(shapesRef.current.filter((x) => ids.has(x.id)), how, { w: sel.w, h: sel.h });
+                    const by = new Map(moved.map((x) => [x.id, x]));
+                    commitShapes(shapesRef.current.map((x) => by.get(x.id) ?? x), "once", "Align");
+                  },
+                }}
+              />
+            </div>
           )}
         </>
       )}

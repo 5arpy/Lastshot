@@ -1,0 +1,1848 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { ImageCache, rasterize } from "../annotate/draw";
+import { type Shape, type Style, type Tool, DEFAULT_STYLE, align as alignShapes, flip as flipShape, moveBy, reorder, rotateBy } from "../annotate/shapes";
+import { TOOLS } from "../annotate/StyleControls";
+import { isTauri, lastshot } from "../lib/bridge";
+import { formatBytes } from "../lib/format";
+import type { ClipMetadata, ShrinkResult } from "../lib/types";
+import { popOutCanvas, popOutClip } from "../popout/frames";
+import { type Marker, type Track, editPoints, end, newId, withLinked } from "../timeline/model";
+import {
+  addMarker,
+  addTrack,
+  closeAllGaps,
+  closeGap,
+  extractRange,
+  itemsFrom,
+  nextPoint,
+  pasteItems,
+  patchItems as patchTl,
+  patchMarker,
+  patchTrack,
+  place,
+  removeItems,
+  removeMarker,
+  removeTrack,
+  rippleTrimToPlayhead,
+  shiftItems,
+  splitAt,
+  trimItem,
+} from "../timeline/ops";
+import { History } from "../timeline/history";
+import TimelineView, { type EditPhase, type TimelineApi } from "../timeline/TimelineView";
+import { type TlView, clampZoom, fitView, parseTime, reveal, timecode, zoomAt } from "../timeline/view";
+import { cn } from "../utils/cn";
+import { editorApi } from "./api";
+import { drawFrame } from "./compose";
+import Inspector, { type ClipActions } from "./Inspector";
+import { ItemContent, TrackHeader, itemTone, type FxEdit } from "./ItemContent";
+import { editorKeymap, type EditorActions } from "./keys";
+import { keyOfDefault, keyTip, toRegistry } from "./keyTables";
+import { onShortcutsChange } from "../lib/shortcuts";
+import { useShortcuts } from "../lib/useShortcuts";
+import MediaBin, { DRAG_TYPE } from "./MediaBin";
+import { media } from "./media";
+import { type EditorRequest, onEditorRequest, takeEditorRequests } from "./inbox";
+import { Player } from "./player";
+import Preview, { type SafeZone } from "./Preview";
+import {
+  type EdItem,
+  type EdProject,
+  type Picture,
+  type TrackKind,
+  DEFAULT_FX,
+  accepts,
+  audioJob,
+  exportRange,
+  exportRoute,
+  exportStem,
+  dropTrack,
+  freeTrack as findFreeTrack,
+  homeKind,
+  kindOf,
+  mainTrack,
+  newProject,
+  outputFps,
+  outputSize,
+  pictureTracks,
+  projectLength,
+  renderJob,
+  track as makeTrack,
+  trackLimit,
+  tracksOf,
+} from "./project";
+import pro from "lastshot-pro";
+import { baseName, isEmpty, itemFromPath, lastOpen, loadProjects, saveProjects, stillPng, urlOf, MEDIA_RE, AUDIO_RE, IMAGE_RE } from "./store";
+import { Btn, Ico, I, Menu, type MenuItem, Sep, usePersist } from "./ui";
+
+/**
+ * The editor: one window-sized place for everything that used to be split
+ * between the quick trimmer and the old editor. Preview on top (with drawing
+ * and picture handles), the timeline below, media on the left, settings on
+ * the right. Panels open and close and remember it; every action has a key.
+ */
+
+type Tone = "ok" | "warn" | "err" | "info";
+
+export interface EditorProps {
+  clips: ClipMetadata[];
+  onToast: (tone: Tone, title: string, body?: string) => void;
+  onRendered: (c: ClipMetadata) => void;
+  /** Files in the library changed (saved, renamed, deleted). */
+  onClipsChanged?: () => void;
+  shareLimitMb?: number;
+  /** Keys work only while the editor is showing. */
+  active?: boolean;
+}
+
+const TRACK_H: Record<string, number> = { video: 62, overlay: 30, audio: 50, spare: 50 };
+/** Tracks per kind: one in the free app (plus the spare lane); a Pro build may allow more. */
+const PER_KIND = pro.editorTracksPerKind;
+const limitHint = (kind: TrackKind) =>
+  kind === "spare" ? "There is one spare track" : PER_KIND === undefined ? "One per kind in the free app, plus the spare track" : `Up to ${trackLimit(kind, PER_KIND)}`;
+const STILL = 5;
+const SHAPE_SECONDS = 4;
+
+type Ask = { title: string; body?: string; ok: string; danger?: boolean; field?: string; run: (v: string) => void };
+
+/**
+ * The open project and its undo history, kept while the editor is not on
+ * screen (switching tabs unmounts it) so coming back finds both as they were.
+ */
+const session: { p: EdProject | null; hist: History<EdProject>; savedAt: number } = { p: null, hist: new History<EdProject>(), savedAt: 0 };
+
+/** Discarding `path` keeps the project: it holds other media or objects. */
+const discardKeeps = (p: EdProject, path: string) => p.tl.items.some((i) => i.path !== path);
+
+/** The kept project, unless another window saved a newer version of it meanwhile. */
+function resume(): EdProject {
+  const list = loadProjects();
+  const kept = session.p;
+  const stored = kept ? list.find((x) => x.id === kept.id) : undefined;
+  if (kept && ((stored && stored.updated <= session.savedAt) || (!stored && isEmpty(kept)))) return kept;
+  session.hist.clear();
+  return lastOpen(list);
+}
+
+/** Saves the open project first in the list; false when storage is full. */
+function saveOpen(cur: EdProject, rest = loadProjects().filter((x) => x.id !== cur.id)): boolean {
+  const stamp = Date.now();
+  session.savedAt = stamp;
+  return saveProjects([{ ...cur, updated: stamp }, ...rest]);
+}
+
+export default function EditorView(props: EditorProps) {
+  const { onToast } = props;
+  const shareMb = props.shareLimitMb ?? 10;
+  // ------------------------------------------------------------ project + history
+  const [p, setP] = useState<EdProject>(resume);
+  const pRef = useRef(p);
+  pRef.current = p;
+  session.p = p;
+  const hist = useRef(session.hist);
+  const [, setHv] = useState(0);
+  const gesture = useRef<{ before: EdProject; label: string } | null>(null);
+
+  /** Every change goes through here: one undo step per click or per drag. */
+  const apply = useCallback((next: EdProject, phase: EditPhase, label: string) => {
+    const cur = pRef.current;
+    switch (phase) {
+      case "start":
+        gesture.current = { before: cur, label };
+        break;
+      case "live":
+        if (!gesture.current) gesture.current = { before: cur, label };
+        break;
+      case "end": {
+        const g = gesture.current;
+        gesture.current = null;
+        if (g && g.before !== next) {
+          hist.current.push(g.before, g.label || label);
+          setHv((x) => x + 1);
+        }
+        break;
+      }
+      case "once":
+        if (next === cur) return;
+        hist.current.push(cur, label);
+        setHv((x) => x + 1);
+        break;
+      case "cancel": {
+        const g = gesture.current;
+        gesture.current = null;
+        if (g) next = g.before;
+        break;
+      }
+    }
+    pRef.current = next;
+    setP(next);
+  }, []);
+  const setTl = useCallback((tl: EdProject["tl"], phase: EditPhase, label: string) => apply({ ...pRef.current, tl }, phase, label), [apply]);
+
+  // ------------------------------------------------------------ saving
+  const saveTimer = useRef(0);
+  const warnedFull = useRef(false);
+  useEffect(() => {
+    window.clearTimeout(saveTimer.current);
+    saveTimer.current = window.setTimeout(() => {
+      if (saveOpen(pRef.current)) warnedFull.current = false;
+      else if (!warnedFull.current) {
+        // Never lose projects quietly: say so (once) and keep this one in memory.
+        warnedFull.current = true;
+        onToast("err", "Projects could not be saved", "The project list is full. Delete old projects (Projects menu) to save again; this edit stays open.");
+      }
+    }, 500);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [p]);
+  // Save straight away when the editor goes (tab switch, window close).
+  useEffect(() => {
+    const flush = () => void saveOpen(pRef.current);
+    window.addEventListener("beforeunload", flush);
+    return () => {
+      window.removeEventListener("beforeunload", flush);
+      flush();
+    };
+  }, []);
+
+  // ------------------------------------------------------------ player
+  const player = useMemo(() => new Player(urlOf), []);
+  useEffect(() => () => player.dispose(), [player]);
+  useEffect(() => player.setProject(p), [player, p]);
+  const [imgVer, setImgVer] = useState(0);
+  const images = useMemo(() => new ImageCache(() => setImgVer((v) => v + 1)), []);
+  const clock = useMemo(() => ({ get time() { return player.time; }, subscribe: (fn: (t: number, playing: boolean) => void) => player.subscribe(fn), seek: (t: number) => player.seek(t) }), [player]);
+  const [playing, setPlaying] = useState(false);
+  useEffect(() => player.subscribe((_t, pl) => setPlaying((o) => (o === pl ? o : pl))), [player]);
+  const fps = outputFps(p);
+
+  // ------------------------------------------------------------ UI state
+  const [sel, setSel] = useState<Set<string>>(new Set());
+  const selRef = useRef(sel);
+  selRef.current = sel;
+  const [gap, setGap] = useState<{ track: string; t: number; start: number; end: number } | null>(null);
+  const [tool, setToolState] = useState<Tool | "blade" | "slip">("select");
+  const [style, setStyle] = usePersist<Style>("style", DEFAULT_STYLE);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [crop, setCrop] = useState<{ id: string; aspect: import("../lib/edit").CropAspect } | null>(null);
+  const [quality, setQuality] = usePersist<number>("quality", 1);
+  const [safe, setSafe] = usePersist<SafeZone>("safe", "off");
+  const [showBin, setShowBin] = usePersist<boolean>("bin", true);
+  const [showInsp, setShowInsp] = usePersist<boolean>("inspector", true);
+  const [showDraw, setShowDraw] = usePersist<boolean>("drawbar", false);
+  const [tlHeight, setTlHeight] = usePersist<number>("tlh", 300);
+  const [menu, setMenu] = useState<{ at: { x: number; y: number }; items: MenuItem[] } | null>(null);
+  const [ask, setAsk] = useState<Ask | null>(null);
+  const [busy, setBusy] = useState<{ label: string; p: number | null } | null>(null);
+  const [ghost, setGhost] = useState<{ track: string; start: number; duration: number; label: string } | null>(null);
+  const [belowHint, setBelowHint] = useState<string | null>(null);
+  const [view, setViewState] = useState<TlView>(() => p.view ?? { pxPerSec: 40, scroll: 0 });
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  const setView = useCallback((v: TlView) => setViewState({ pxPerSec: clampZoom(v.pxPerSec), scroll: Math.max(0, v.scroll) }), []);
+  const focusArea = useRef<"preview" | "timeline" | "other">("timeline");
+  const tlApi = useRef<TimelineApi | null>(null);
+  const clipboard = useRef<EdItem[]>([]);
+  const dragPaths = useRef<string[] | null>(null);
+  const flushMsRef = useRef<number | undefined>(undefined);
+  const shuttle = useRef(0);
+
+  const setTool = (t: Tool | "blade" | "slip") => {
+    setToolState(t);
+    if (t !== "select" && t !== "blade" && t !== "slip") setShowDraw(true);
+  };
+
+  const selItems = useMemo(() => p.tl.items.filter((i) => sel.has(i.id)), [p.tl.items, sel]);
+  const selShapes = selItems.filter((i) => i.kind === "shape" && i.shape);
+  const objectFocus = () => focusArea.current === "preview" && pRef.current.tl.items.some((i) => selRef.current.has(i.id) && i.kind === "shape");
+
+  const fit = useCallback(() => {
+    const w = tlApi.current?.lanesWidth() ?? 800;
+    setView(fitView(Math.max(5, projectLength(pRef.current)), w));
+  }, [setView]);
+
+  // Keep the playhead in view while playing.
+  useEffect(
+    () =>
+      player.subscribe((t, pl) => {
+        if (!pl) return;
+        const w = tlApi.current?.lanesWidth() ?? 800;
+        const v = viewRef.current;
+        if (t > v.scroll + w / v.pxPerSec || t < v.scroll) setView(reveal(v, t, w, 0.05));
+      }),
+    [player, setView],
+  );
+
+  // ------------------------------------------------------------ library clip of this project
+  const sourceClip = useMemo(() => (p.source ? props.clips.find((c) => c.path === p.source) ?? null : null), [p.source, props.clips]);
+
+  // ------------------------------------------------------------ adding media
+  const firstTrack = (tl: EdProject["tl"], it: EdItem): string | null => {
+    const kind = homeKind(it);
+    if (kind === "video") return mainTrack(tl);
+    return tracksOf(tl, kind).find((t) => !t.locked)?.id ?? null;
+  };
+
+  /** A track of `kind` free over [a, b]: adds one when allowed, else the spare track (see project.ts). */
+  const freeTrack = (tl: EdProject["tl"], kind: TrackKind, a: number, b: number, prefer?: string) => findFreeTrack(tl, kind, a, b, PER_KIND, prefer);
+
+  const clipByPath = (path: string) => props.clips.find((c) => c.path === path);
+
+  const loadItems = async (paths: string[]): Promise<EdItem[]> => {
+    const out: EdItem[] = [];
+    const bad: string[] = [];
+    await editorApi.allowMedia(paths.filter((x) => !x.startsWith("blob:"))).catch(() => undefined);
+    for (const path of paths) {
+      try {
+        const it = await itemFromPath(path, clipByPath(path));
+        if (it && it.duration > 0) out.push(it);
+        else bad.push(baseName(path));
+      } catch {
+        bad.push(baseName(path));
+      }
+    }
+    if (bad.length) onToast("warn", bad.length === 1 ? "Could not add this file" : `Could not add ${bad.length} files`, bad.slice(0, 4).join(", "));
+    return out;
+  };
+
+  /**
+   * Puts files on the timeline. `at`: where they were dropped; without it
+   * they go at the playhead (pictures and clips on the main track, after the
+   * clip under the playhead; sound on a free audio track).
+   */
+  const addPaths = async (paths: string[], at?: { track: string | null; t: number; below: boolean; insert: boolean }) => {
+    const list = paths.filter((x) => MEDIA_RE.test(x) || clipByPath(x) || x.startsWith("blob:"));
+    if (!list.length) {
+      if (paths.length) onToast("warn", "Not a video, picture or sound", "The editor takes MP4, MOV, MKV, WebM, PNG, JPG, GIF, WebP, MP3, WAV, M4A and FLAC.");
+      return;
+    }
+    const items = await loadItems(list);
+    if (!items.length) return;
+    let tl = pRef.current.tl;
+    let t = at?.t ?? player.time;
+    const placed: EdItem[] = [];
+    let mode: "insert" | "overwrite" = at?.insert ? "insert" : "overwrite";
+    let spared = "";
+    for (const it0 of items) {
+      const kind = homeKind(it0);
+      let track: string | null = null;
+      const span: [number, number] = [t, t + it0.duration];
+      if (at?.below) {
+        const r = freeTrack(tl, kind, ...span);
+        tl = r.tl;
+        track = r.track;
+      } else if (at) {
+        // The track under the pointer; when it is busy there, a free one (at the limit: the spare lane).
+        const r = dropTrack(tl, it0, at.track, ...span, { insert: at.insert, perKind: PER_KIND });
+        tl = r.tl;
+        track = r.track;
+        if (at.track && track && track !== at.track && kindOf(tl, track) === "spare") spared = tl.tracks.find((x) => x.id === at.track)?.name ?? "";
+      } else if (kind === "video") {
+        track = mainTrack(tl);
+        // After the clip under the playhead, pushing the rest along.
+        const under = tl.items.find((i) => i.track === track && i.start < t - 1e-6 && end(i) > t + 1e-6);
+        if (under) t = end(under);
+        mode = tl.items.some((i) => i.track === track && i.start >= t - 1e-6) ? "insert" : "overwrite";
+      } else {
+        const r = freeTrack(tl, kind, ...span);
+        tl = r.tl;
+        track = r.track;
+      }
+      if (!track) continue;
+      const it = { ...it0, id: newId("i"), track, start: t };
+      placed.push(it);
+      tl = place(tl, [it], mode, { magnet: pRef.current.magnet ? mainTrack(tl) : null });
+      t += it.duration;
+    }
+    if (!placed.length) return;
+    // Recorded markers of a library clip become timeline markers too.
+    apply({ ...pRef.current, tl }, "once", placed.length === 1 ? `Add ${placed[0].name}` : `Add ${placed.length} files`);
+    setSel(new Set(placed.map((x) => x.id)));
+    if (spared) onToast("info", "Put on the spare track", `${spared} is busy there. Hold Ctrl while dropping to insert instead.`);
+    if (pRef.current.tl.items.length === placed.length) requestAnimationFrame(fit);
+  };
+
+  /** Opens a library clip (or video file) as its own project. */
+  const openClip = async (path: string) => {
+    const cur = pRef.current;
+    const existing = loadProjects().find((x) => x.source === path);
+    if (cur.source === path) return;
+    if (existing) {
+      switchTo(existing);
+      return;
+    }
+    const items = await loadItems([path]);
+    if (!items.length) return;
+    const clip = clipByPath(path);
+    const np = newProject(clip?.title || baseName(path).replace(/\.[^.]+$/, ""));
+    np.source = path;
+    const v = mainTrack(np.tl)!;
+    const it = { ...items[0], track: v, start: 0 };
+    np.tl = {
+      ...np.tl,
+      items: [it],
+      markers: (clip?.markers ?? it.srcMarkers ?? []).map((t) => ({ id: newId("m"), t, label: "", color: "#4fb3ff" })),
+    };
+    switchTo(np);
+  };
+
+  const switchTo = (next: EdProject) => {
+    const cur = pRef.current;
+    const list = loadProjects().filter((x) => x.id !== cur.id && x.id !== next.id);
+    saveProjects([{ ...next, updated: Date.now() }, ...(isEmpty(cur) && !cur.source ? [] : [{ ...cur, updated: cur.updated }]), ...list]);
+    hist.current.clear();
+    gesture.current = null;
+    player.pause();
+    pRef.current = next;
+    setP(next);
+    setSel(new Set());
+    setGap(null);
+    setEditing(null);
+    setCrop(null);
+    player.setProject(next);
+    player.seek(0);
+    if (next.view) setView(next.view);
+    else requestAnimationFrame(fit);
+  };
+
+  // Files sent from the rest of the app (Open in editor, drops on the tab,
+  // snips, frames): an app-wide queue; the editor on screen takes each once.
+  const handleRequest = async (r: EditorRequest) => {
+    flushMsRef.current = r.flushMs;
+    const single = r.paths.length === 1 && !IMAGE_RE.test(r.paths[0]) && !AUDIO_RE.test(r.paths[0]);
+    const mode = r.mode ?? (single ? "open" : "add");
+    if (mode === "open" && single) await openClip(r.paths[0]);
+    else await addPaths(r.paths, { track: null, t: projectLength(pRef.current), below: false, insert: false });
+  };
+  const handleRef = useRef(handleRequest);
+  handleRef.current = handleRequest;
+  useEffect(() => {
+    if (props.active === false) return;
+    let chain = Promise.resolve();
+    const take = () => {
+      for (const r of takeEditorRequests()) chain = chain.then(() => handleRef.current(r)).catch(() => undefined);
+    };
+    take();
+    return onEditorRequest(take);
+  }, [props.active]);
+
+  const importFiles = async () => {
+    if (!isTauri()) return onToast("info", "Add files works in the installed app", "In this preview, drag clips from the Library list.");
+    const picked = await openDialog({
+      multiple: true,
+      title: "Add to the timeline",
+      filters: [
+        { name: "Videos, pictures and sound", extensions: ["mp4", "mov", "m4v", "mkv", "webm", "avi", "wmv", "png", "jpg", "jpeg", "gif", "webp", "bmp", "mp3", "wav", "m4a", "aac", "flac", "ogg", "wma"] },
+      ],
+    }).catch(() => null);
+    if (!picked) return;
+    void addPaths(Array.isArray(picked) ? picked : [picked]);
+  };
+
+  // ------------------------------------------------------------ drops (library list, Explorer, other windows)
+  const dropKind = (e: React.DragEvent): TrackKind | null => {
+    const paths = dragPaths.current;
+    if (paths?.length) return AUDIO_RE.test(paths[0]) ? "audio" : "video";
+    const it = Array.from(e.dataTransfer.items ?? []).find((x) => x.kind === "file");
+    if (it) return it.type.startsWith("audio/") ? "audio" : "video";
+    return e.dataTransfer.types.includes(DRAG_TYPE) ? "video" : null;
+  };
+  const droppable = (e: React.DragEvent) => e.dataTransfer.types.includes("Files") || e.dataTransfer.types.includes(DRAG_TYPE);
+  const hitFor = (e: React.DragEvent) => {
+    const h = tlApi.current?.hit(e.clientX, e.clientY);
+    return h ?? null;
+  };
+  const onTlDragOver = (e: React.DragEvent) => {
+    if (!droppable(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+    const h = hitFor(e);
+    const kind = dropKind(e) ?? "video";
+    if (!h) return;
+    const tl = pRef.current.tl;
+    const clip = dragPaths.current?.[0] ? clipByPath(dragPaths.current[0]) : undefined;
+    const label = dragPaths.current?.length ? baseName(dragPaths.current[0]) : "Drop here";
+    const dur = clip?.duration_seconds ?? STILL;
+    if (h.below) {
+      setGhost(null);
+      const r = freeTrack(tl, kind, h.t, h.t + dur);
+      const name = r.track ? tl.tracks.find((x) => x.id === r.track)?.name : "";
+      setBelowHint(r.tl !== tl ? `Drop for a new ${kind} track` : name ? `Drop on ${name}` : "No free track here");
+      return;
+    }
+    setBelowHint("");
+    // Same choice as the drop: a busy track hands the item to a free one (the spare lane at the limit).
+    const r = dropTrack(tl, { kind: kind === "audio" ? "audio" : "video" }, h.track?.id ?? null, h.t, h.t + dur, { insert: e.ctrlKey, perKind: PER_KIND });
+    const fresh = r.tl !== tl;
+    const track = fresh ? (h.track?.id ?? null) : r.track;
+    const moved = !fresh && !!track && track !== h.track?.id && kindOf(tl, track) === "spare";
+    if (track) setGhost({ track, start: h.t, duration: dur, label: `${label}${e.ctrlKey ? " · insert" : ""}${fresh ? " · new track" : moved ? " · spare track (busy here)" : ""}` });
+  };
+  const clearDrag = () => {
+    setGhost(null);
+    setBelowHint(null);
+  };
+  const pathsOf = async (e: React.DragEvent): Promise<string[]> => {
+    const raw = e.dataTransfer.getData(DRAG_TYPE);
+    if (raw) {
+      try {
+        return JSON.parse(raw) as string[];
+      } catch {
+        return [];
+      }
+    }
+    const files = Array.from(e.dataTransfer.files ?? []);
+    if (!files.length) return [];
+    if (isTauri()) {
+      const got = await editorApi.dropPaths(files);
+      if (!got.length) onToast("warn", "Could not read the dropped files", "Use Add files (Ctrl+I) instead.");
+      return got;
+    }
+    // Browser preview: play the files from memory.
+    return files.map((f) => `${URL.createObjectURL(f)}#${f.name}`);
+  };
+  const onTlDrop = async (e: React.DragEvent) => {
+    if (!droppable(e)) return;
+    e.preventDefault();
+    const h = hitFor(e);
+    const insert = e.ctrlKey;
+    clearDrag();
+    dragPaths.current = null;
+    const paths = await pathsOf(e);
+    if (!paths.length) return;
+    void addPaths(paths, h ? { track: h.track?.id ?? null, t: h.t, below: h.below, insert } : undefined);
+  };
+  const onRootDrop = async (e: React.DragEvent) => {
+    if (!droppable(e) || e.defaultPrevented) return;
+    e.preventDefault();
+    clearDrag();
+    dragPaths.current = null;
+    const paths = await pathsOf(e);
+    if (!paths.length) return;
+    if (isEmpty(pRef.current) && paths.length === 1 && !IMAGE_RE.test(paths[0]) && !AUDIO_RE.test(paths[0]) && clipByPath(paths[0])) void openClip(paths[0]);
+    else void addPaths(paths);
+  };
+
+  // ------------------------------------------------------------ edits
+  const editOpts = useCallback(() => ({ magnet: pRef.current.magnet ? mainTrack(pRef.current.tl) : null }), []);
+  const sounds = (it: EdItem) => it.kind === "audio" || (it.kind === "video" && !!it.hasAudio);
+
+  const patchSel = (fn: (it: EdItem) => Partial<EdItem>, commit: boolean, label: string, ids?: Iterable<string>) => {
+    const set = new Set(ids ?? selRef.current);
+    const tl = patchTl(pRef.current.tl, set, (it) => fn(it));
+    apply({ ...pRef.current, tl }, commit ? (gesture.current ? "end" : "once") : "live", label);
+  };
+
+  const onFx: FxEdit = (it, patch, phase) => {
+    const ids = selRef.current.has(it.id) ? [...selRef.current].filter((id) => pRef.current.tl.items.find((x) => x.id === id && sounds(x))) : [it.id];
+    if (phase === "start") return apply(pRef.current, "start", "Sound");
+    if (phase === "end") return apply(pRef.current, "end", "Sound");
+    const tl = patchTl(pRef.current.tl, ids, (x) => ({ audio: { ...DEFAULT_FX, ...x.audio, ...patch } }));
+    apply({ ...pRef.current, tl }, "live", "Sound");
+  };
+
+  const onPic = (id: string, patch: Partial<Picture>, phase: EditPhase, label: string) => {
+    if (phase === "end") return apply(pRef.current, "end", label);
+    const tl = patchTl(pRef.current.tl, [id], (x) => ({ pic: { ...x.pic, ...patch } }));
+    apply({ ...pRef.current, tl }, phase, label);
+  };
+
+  const onShapes = (changed: Shape[], commit: boolean, label: string) => {
+    const by = new Map(changed.map((s) => [s.id, s]));
+    const tl = patchTl(pRef.current.tl, by.keys(), (it) => ({ shape: by.get(it.id) }));
+    apply({ ...pRef.current, tl }, commit ? (gesture.current ? "end" : "once") : "live", label);
+  };
+
+  const onCreateShape = (s: Shape) => {
+    const cur = pRef.current;
+    const t = player.time;
+    const len = projectLength(cur);
+    let d = SHAPE_SECONDS;
+    if (len > 0 && t < len && len - t < d) d = Math.max(1, len - t);
+    const r = freeTrack(cur.tl, "overlay", t, t + d);
+    if (!r.track) return onToast("warn", "No overlay track", "Add an overlay track or unlock one.");
+    // On a busy track, use the free space up to the next object.
+    const next = r.tl.items.filter((i) => i.track === r.track && i.start >= t).sort((a, b) => a.start - b.start)[0];
+    if (next && next.start < t + d) d = Math.max(0.2, next.start - t);
+    const names: Record<string, string> = { text: "Text", rect: "Rectangle", ellipse: "Ellipse", arrow: "Arrow", line: "Line", pen: "Drawing", highlight: "Highlight", step: "Step", pixelate: "Pixelate", blur: "Blur", redact: "Black box", spotlight: "Spotlight", image: "Picture" };
+    const it: EdItem = { id: s.id, track: r.track, kind: "shape", name: names[s.kind] ?? s.kind, start: t, duration: d, srcIn: 0, shape: s };
+    apply({ ...cur, tl: place(r.tl, [it], "overwrite") }, "once", `Add ${it.name.toLowerCase()}`);
+    setSel(new Set([it.id]));
+  };
+
+  const removeIds = (ids: Iterable<string>, ripple: boolean, label: string) => {
+    const set = new Set(ids);
+    if (!set.size) return;
+    const tl = removeItems(pRef.current.tl, set, ripple, editOpts());
+    apply({ ...pRef.current, tl }, "once", label);
+    setSel(new Set());
+    if (editing && set.has(editing)) setEditing(null);
+  };
+
+  const unlocked = (ids: Iterable<string>) => {
+    const tl = pRef.current.tl;
+    return [...ids].filter((id) => {
+      const it = tl.items.find((i) => i.id === id);
+      return it && !tl.tracks.find((t) => t.id === it.track)?.locked && !it.shape?.locked;
+    });
+  };
+
+  const split = (all: boolean) => {
+    const cur = pRef.current;
+    const t = player.time;
+    const selected = [...selRef.current].filter((id) => {
+      const it = cur.tl.items.find((i) => i.id === id);
+      return it && it.start < t - 1e-3 && end(it) > t + 1e-3;
+    });
+    let ids: string[] | null;
+    if (all) ids = null;
+    else if (selected.length) ids = [...withLinked(cur.tl, selected)];
+    else ids = cur.tl.items.filter((i) => kindOf(cur.tl, i.track) !== "overlay" && i.start < t && end(i) > t).map((i) => i.id);
+    const r = splitAt(cur.tl, t, ids ? unlocked(ids) : unlocked(cur.tl.items.map((i) => i.id)));
+    if (!r.created.length) return onToast("info", "Nothing to split here", "Put the playhead over a clip.");
+    apply({ ...cur, tl: r.tl }, "once", "Split");
+  };
+
+  const del = (ripple: boolean) => {
+    const cur = pRef.current;
+    if (gap && !selRef.current.size) {
+      apply({ ...cur, tl: closeGap(cur.tl, gap.track, gap.t) }, "once", "Close gap");
+      setGap(null);
+      return;
+    }
+    const ids = unlocked(withLinked(cur.tl, selRef.current));
+    removeIds(ids, ripple, ripple ? "Ripple delete" : "Delete");
+  };
+
+  const copySel = () => {
+    const cur = pRef.current;
+    const ids = withLinked(cur.tl, selRef.current);
+    clipboard.current = cur.tl.items.filter((i) => ids.has(i.id)).map((i) => ({ ...i }));
+    return clipboard.current.length;
+  };
+
+  const paste = (at?: number) => {
+    const cur = pRef.current;
+    if (!clipboard.current.length) return;
+    const at0 = at ?? player.time;
+    if (clipboard.current.every((i) => i.kind === "shape")) {
+      // Objects never cut into other objects: each goes on a free overlay track.
+      const a = Math.min(...clipboard.current.map((i) => i.start));
+      let tl = cur.tl;
+      const made: string[] = [];
+      for (const src of clipboard.current) {
+        const start = at0 + src.start - a;
+        const f = freeTrack(tl, "overlay", start, start + src.duration);
+        if (!f.track) break;
+        tl = f.tl;
+        const id = newId("i");
+        const busy = tl.items.some((i) => i.track === f.track && i.start < start + src.duration - 1e-6 && end(i) > start + 1e-6);
+        const placed = { ...src, id, start, link: undefined, track: f.track, shape: { ...src.shape!, id } };
+        tl = busy ? place(tl, [placed], "overwrite", editOpts()) : { ...tl, items: [...tl.items, placed] };
+        made.push(id);
+      }
+      apply({ ...cur, tl }, "once", "Paste");
+      setSel(new Set(made));
+      return;
+    }
+    const fallback = (i: EdItem) => firstTrack(cur.tl, i);
+    const items = clipboard.current.map((i) => (i.shape ? { ...i, shape: { ...i.shape, id: "" } } : i));
+    const r = pasteItems(cur.tl, items, at0, fallback, "overwrite", editOpts());
+    // Shapes keep item id = shape id.
+    const tl = { ...r.tl, items: r.tl.items.map((i) => (r.created.includes(i.id) && i.shape ? { ...i, shape: { ...i.shape, id: i.id } } : i)) };
+    apply({ ...cur, tl }, "once", "Paste");
+    setSel(new Set(r.created));
+  };
+
+  const duplicate = () => {
+    const cur = pRef.current;
+    if (!copySel()) return;
+    const objs = clipboard.current.every((i) => i.kind === "shape");
+    if (objs && focusArea.current === "preview") {
+      // Objects: a copy slightly offset on the picture, at the same time, on
+      // a free overlay track (one is added when needed and allowed).
+      let tl = cur.tl;
+      const copies: EdItem[] = [];
+      for (const src of clipboard.current) {
+        const f = freeTrack(tl, "overlay", src.start, end(src));
+        tl = f.tl;
+        const busy = !f.track || tl.items.some((i) => i.track === f.track && i.start < end(src) - 1e-6 && end(i) > src.start + 1e-6);
+        if (busy) return paste(Math.max(...clipboard.current.map((i) => end(i))));
+        const id = newId("i");
+        const copy: EdItem = { ...src, id, track: f.track!, link: undefined, shape: { ...moveBy(src.shape!, 24, 24), id } };
+        tl = { ...tl, items: [...tl.items, copy] };
+        copies.push(copy);
+      }
+      apply({ ...cur, tl }, "once", "Duplicate");
+      setSel(new Set(copies.map((c) => c.id)));
+      return;
+    }
+    paste(Math.max(...clipboard.current.map((i) => end(i))));
+  };
+
+  const shapeEdit = (fn: (s: Shape) => Shape, label: string) => {
+    const ids = selShapesNow();
+    if (!ids.length) return false;
+    const tl = patchTl(pRef.current.tl, ids, (it) => (it.shape && !it.shape.locked ? { shape: fn(it.shape) } : {}));
+    apply({ ...pRef.current, tl }, "once", label);
+    return true;
+  };
+  const selShapesNow = () => pRef.current.tl.items.filter((i) => selRef.current.has(i.id) && i.shape).map((i) => i.id);
+
+  const picEdit = (fn: (q: Picture) => Partial<Picture>, label: string) => {
+    const ids = pRef.current.tl.items.filter((i) => selRef.current.has(i.id) && (i.kind === "video" || i.kind === "image")).map((i) => i.id);
+    if (!ids.length) return false;
+    const tl = patchTl(pRef.current.tl, ids, (it) => ({ pic: { ...it.pic, ...fn(it.pic ?? {}) } }));
+    apply({ ...pRef.current, tl }, "once", label);
+    return true;
+  };
+
+  const detachAudio = () => {
+    let tl = pRef.current.tl;
+    const vids = tl.items.filter((i) => selRef.current.has(i.id) && i.kind === "video" && i.hasAudio);
+    if (!vids.length) return onToast("info", "Select a clip with sound first");
+    const made: string[] = [];
+    for (const v of vids) {
+      const r = freeTrack(tl, "audio", v.start, end(v));
+      tl = r.tl;
+      if (!r.track) continue;
+      const link = v.link ?? newId("l");
+      const a: EdItem = { id: newId("i"), track: r.track, kind: "audio", name: `${v.name} (sound)`, path: v.path, start: v.start, duration: v.duration, srcIn: v.srcIn, srcDuration: v.srcDuration, hasAudio: true, audio: { ...DEFAULT_FX, ...v.audio }, link };
+      tl = place(tl, [a], "overwrite");
+      tl = patchTl(tl, [v.id], { hasAudio: false, link, audio: { ...DEFAULT_FX } });
+      made.push(a.id);
+    }
+    apply({ ...pRef.current, tl }, "once", "Detach audio");
+    setSel(new Set(made));
+  };
+
+  const setLink = (on: boolean) => {
+    const ids = [...selRef.current];
+    if (on && ids.length < 2) return;
+    const link = on ? newId("l") : undefined;
+    patchSel(() => ({ link }), true, on ? "Link" : "Unlink", on ? ids : withLinked(pRef.current.tl, ids));
+  };
+
+  const moveTo = (id: string, t: number) => {
+    const cur = pRef.current;
+    const it = cur.tl.items.find((i) => i.id === id);
+    if (!it) return;
+    apply({ ...cur, tl: shiftItems(cur.tl, withLinked(cur.tl, [id]), t - it.start, "overwrite", editOpts()) }, "once", "Move");
+  };
+  const setLength = (id: string, d: number) => {
+    const cur = pRef.current;
+    const it = cur.tl.items.find((i) => i.id === id);
+    if (!it) return;
+    // A ripple trim of the end: what follows moves along instead of being
+    // cut, linked sound keeps the same length, and it stops at the source.
+    const tl = trimItem(cur.tl, id, "right", it.start + Math.max(0.05, d), { ripple: true, ...editOpts() });
+    apply({ ...cur, tl }, "once", "Length");
+  };
+
+  const markRange = (a: number | null, b: number | null, label: string) => apply({ ...pRef.current, tl: { ...pRef.current.tl, inPoint: a, outPoint: b } }, "once", label);
+  const lastSeconds = (s: number) => {
+    const len = projectLength(pRef.current);
+    markRange(Math.max(0, len - s), len, `Last ${s} s`);
+  };
+  const cutRange = (keep: boolean) => {
+    const cur = pRef.current;
+    const { inPoint: a, outPoint: b } = cur.tl;
+    if (a === null && b === null) return onToast("info", "Set a range first", "Press I at the start and O at the end.");
+    const r = exportRange(cur);
+    const tl = extractRange(cur.tl, r.start, r.end, keep);
+    apply({ ...cur, tl: { ...tl, inPoint: null, outPoint: null } }, "once", keep ? "Keep only the range" : "Cut out the range");
+    player.seek(keep ? 0 : r.start);
+  };
+
+  // ------------------------------------------------------------ export
+  const preloadImages = async (cur: EdProject) => {
+    const srcs = new Set<string>();
+    for (const i of cur.tl.items) if (i.shape?.kind === "image" && i.shape.src) srcs.add(urlOf(i.shape.src));
+    await Promise.all(
+      [...srcs].map(
+        (u) =>
+          new Promise<void>((res) => {
+            if (images.get(u)) return res();
+            const t0 = Date.now();
+            const poll = () => (images.get(u) || Date.now() - t0 > 4000 ? res() : setTimeout(poll, 50));
+            poll();
+          }),
+      ),
+    );
+  };
+
+  const runExport = async (mode: "save" | "share") => {
+    const cur = pRef.current;
+    if (busy) return;
+    if (!cur.tl.items.some((i) => !i.disabled)) return onToast("info", "Nothing to export yet", "Add a clip to the timeline first.");
+    const r = exportRange(cur);
+    if (r.end - r.start < 0.05) return onToast("warn", "The range is empty", "Clear in and out (Alt+X) or set them again.");
+    const route = exportRoute(cur);
+    player.pause();
+    const key = `editor-${Date.now()}`;
+    setBusy({ label: mode === "save" ? "Exporting…" : `Shrinking under ${shareMb} MB…`, p: null });
+    const offs: (() => void)[] = [];
+    const prog = (x: number) => setBusy((b) => (b ? { ...b, p: x } : b));
+    try {
+      offs.push(await editorApi.onRenderProgress(prog));
+      const sp = await Promise.resolve(lastshot.onShrinkProgress((e) => (e.path === key || (route.kind === "copy" && e.path === route.path) ? prog(e.progress) : undefined)));
+      if (typeof sp === "function") offs.push(sp);
+      let res: ClipMetadata | ShrinkResult | { path: string; file_name: string; size_bytes: number };
+      if (route.kind === "copy") {
+        if (mode === "save") res = await lastshot.trimClip(route.path, route.start, route.end, false);
+        else res = await lastshot.shrinkClip(route.path, { start: route.start, end: route.end, copy: true, keep: false });
+      } else if (route.kind === "segments") {
+        res = await lastshot.exportClip({ segments: route.segments, crop: route.crop, mode, copy: mode === "share", progressKey: key });
+      } else {
+        await preloadImages(cur);
+        // Normalise needs each file's peaks: wait for them (never export at gain 1).
+        await media.whenPeaks(cur.tl.items.filter((i) => i.audio?.normalize));
+        const env = { image: (s: string) => images.get(urlOf(s)), content: outputSize(cur) };
+        const job = await renderJob(cur, {
+          range: r,
+          targetMb: mode === "share" ? shareMb : null,
+          norm: (it) => media.normGain(it),
+          still: (it) => stillPng(it),
+          raster: (s) => rasterize(s, env),
+        });
+        res = await editorApi.render(job, mode, exportStem(cur));
+      }
+      if (mode === "save") {
+        onToast("ok", "Saved as a new clip", `${res.file_name} · ${formatBytes(res.size_bytes)}${route.kind === "copy" ? " · lossless" : ""}`);
+        if ("id" in res && "created_unix_ms" in res) props.onRendered(res as ClipMetadata);
+        props.onClipsChanged?.();
+      } else {
+        onToast("ok", "Copied, ready to paste", `${res.file_name} · ${formatBytes(res.size_bytes)}. Paste it in Discord with Ctrl+V.`);
+      }
+    } catch (e) {
+      onToast("err", mode === "save" ? "Export failed" : "Shrink failed", String(e));
+    } finally {
+      offs.forEach((o) => o());
+      setBusy(null);
+    }
+  };
+
+  const exportAudio = async () => {
+    const cur = pRef.current;
+    if (!isTauri()) return onToast("info", "Audio export works in the installed app");
+    const chosen = cur.tl.items.filter((i) => selRef.current.has(i.id) && sounds(i));
+    const items = chosen.length ? chosen : cur.tl.items;
+    const range = chosen.length ? { start: Math.min(...chosen.map((i) => i.start)), end: Math.max(...chosen.map((i) => end(i))) } : exportRange(cur);
+    await media.whenPeaks(items.filter((i) => i.audio?.normalize));
+    const job = audioJob(cur, items.filter((i) => !i.disabled), (it) => media.normGain(it), range);
+    if (!job.length) return onToast("info", "No sound to export", "The selection has no sound (or it is muted).");
+    const formats = await editorApi.audioFormats().catch(() => ["wav", "m4a"]);
+    const filters = [
+      { name: "WAV (lossless)", extensions: ["wav"] },
+      ...(formats.includes("mp3") ? [{ name: "MP3", extensions: ["mp3"] }] : []),
+      { name: "M4A (AAC)", extensions: ["m4a"] },
+    ];
+    const dest = await saveDialog({ title: "Export audio", defaultPath: `${exportStem(cur)}_audio.wav`, filters }).catch(() => null);
+    if (!dest) return;
+    setBusy({ label: "Exporting audio…", p: null });
+    try {
+      const out = await editorApi.exportAudio(job, range.end - range.start, dest);
+      onToast("ok", "Audio saved", baseName(out));
+    } catch (e) {
+      onToast("err", "Audio export failed", String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /** The frame at the playhead at full size. */
+  const frameCanvas = (): HTMLCanvasElement => {
+    const cur = pRef.current;
+    const { w, h } = outputSize(cur);
+    const c = document.createElement("canvas");
+    c.width = w;
+    c.height = h;
+    drawFrame(c.getContext("2d")!, cur, player.time, w, h, 1, { video: (it) => player.videoOf(it), image: images.get, urlOf });
+    return c;
+  };
+  const snapshot = async (how: "save" | "copy") => {
+    try {
+      const c = frameCanvas();
+      if (how === "copy") {
+        const blob = await new Promise<Blob | null>((r) => c.toBlob(r, "image/png"));
+        if (!blob) throw new Error("No picture");
+        await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+        onToast("ok", "Frame copied", "Paste it with Ctrl+V.");
+      } else {
+        const where = await lastshot.snapshotToOutput(c.toDataURL("image/png"), `${exportStem(pRef.current)}_${timecode(player.time, fps).replace(/[:.]/g, "-")}`);
+        onToast("ok", "Frame saved", baseName(where));
+      }
+    } catch (e) {
+      onToast("err", "Could not take the frame", String(e));
+    }
+  };
+
+  // ------------------------------------------------------------ clip file actions (project opened from a clip)
+  const clipActions: ClipActions | null = sourceClip
+    ? {
+        rename: (name) =>
+          void lastshot
+            .renameClip(sourceClip.path, name)
+            .then((np) => {
+              apply({ ...pRef.current, source: np, name, tl: { ...pRef.current.tl, items: pRef.current.tl.items.map((i) => (i.path === sourceClip.path ? { ...i, path: np } : i)) } }, "once", "Rename");
+              props.onClipsChanged?.();
+            })
+            .catch((e) => onToast("err", "Could not rename", String(e))),
+        favorite: () => void lastshot.setClipFavorite(sourceClip.path, !sourceClip.favorite).then(() => props.onClipsChanged?.()),
+        tags: (tags) => void lastshot.setClipTags(sourceClip.path, tags).then(() => props.onClipsChanged?.()),
+        reveal: () => void lastshot.revealClip(sourceClip.path),
+        openExternal: () => void lastshot.openClip(sourceClip.path),
+        copyFile: () => void lastshot.copyClip(sourceClip.path).then(() => onToast("ok", "File copied", "Paste it in Discord or Explorer.")),
+        moveToLibrary: sourceClip.folder
+          ? () =>
+              void lastshot
+                .moveClipToLibrary(sourceClip.path)
+                .then((np) => {
+                  apply({ ...pRef.current, source: np, tl: { ...pRef.current.tl, items: pRef.current.tl.items.map((i) => (i.path === sourceClip.path ? { ...i, path: np } : i)) } }, "once", "Move file");
+                  props.onClipsChanged?.();
+                })
+                .catch((e) => onToast("err", "Could not move", String(e)))
+          : undefined,
+        splitFile: () => {
+          const it = pRef.current.tl.items.find((i) => i.path === sourceClip.path && player.time >= i.start && player.time < end(i));
+          const at = it ? it.srcIn + (player.time - it.start) : player.time;
+          if (at < 0.2 || at > sourceClip.duration_seconds - 0.2) return onToast("info", "Move the playhead inside the clip first");
+          void lastshot
+            .splitClip(sourceClip.path, at)
+            .then(() => {
+              onToast("ok", "Split into two files", "Both parts are in Clips (lossless).");
+              props.onClipsChanged?.();
+            })
+            .catch((e) => onToast("err", "Could not split", String(e)));
+        },
+        // The edit goes too only when it holds nothing but this clip;
+        // otherwise only the clip's pieces leave it.
+        discardNote: discardKeeps(p, sourceClip.path)
+          ? "Move the file to the Recycle Bin? Its pieces leave this edit; everything else stays."
+          : "Move the file to the Recycle Bin? This edit (only that clip) is removed too.",
+        discard: () =>
+          void lastshot
+            .deleteClip(sourceClip.path)
+            .then(() => {
+              onToast("ok", "Clip discarded", sourceClip.file_name);
+              props.onClipsChanged?.();
+              const cur = pRef.current;
+              if (discardKeeps(cur, sourceClip.path)) {
+                const gone = new Set(cur.tl.items.filter((i) => i.path === sourceClip.path).map((i) => i.id));
+                apply({ ...cur, source: null, tl: removeItems(cur.tl, gone) }, "once", "Discard clip");
+                return;
+              }
+              saveProjects(loadProjects().filter((x) => x.id !== cur.id));
+              switchTo(newProject());
+            })
+            .catch((e) => onToast("err", "Could not discard", String(e))),
+      }
+    : null;
+
+  // ------------------------------------------------------------ keys
+  const actions: EditorActions = {
+    togglePlay: () => {
+      shuttle.current = 0;
+      player.loop = null;
+      player.toggle();
+    },
+    shuttle: (dir) => {
+      if (dir === 0) {
+        shuttle.current = 0;
+        return player.pause();
+      }
+      const s = shuttle.current;
+      const next = Math.sign(s) === dir ? Math.min(8, Math.abs(s) * 2) * dir : dir;
+      shuttle.current = next;
+      player.play(next);
+    },
+    step: (n) => {
+      player.pause();
+      player.seek(player.time + n / fps);
+    },
+    stepSeconds: (s) => player.seek(player.time + s),
+    editPoint: (dir) => {
+      const t = nextPoint(editPoints(pRef.current.tl), player.time, dir);
+      if (t !== null) player.seek(t);
+    },
+    home: () => player.seek(0),
+    end: () => player.seek(projectLength(pRef.current)),
+    loopPlay: () => {
+      const r = exportRange(pRef.current);
+      player.loop = { a: r.start, b: r.end };
+      player.seek(r.start);
+      player.play(1);
+    },
+    markIn: () => markRange(player.time, pRef.current.tl.outPoint !== null && pRef.current.tl.outPoint <= player.time ? null : pRef.current.tl.outPoint, "Mark in"),
+    markOut: () => markRange(pRef.current.tl.inPoint !== null && pRef.current.tl.inPoint >= player.time ? null : pRef.current.tl.inPoint, player.time, "Mark out"),
+    clearInOut: () => markRange(null, null, "Clear in and out"),
+    split: () => split(false),
+    splitAll: () => split(true),
+    blade: () => setTool(tool === "blade" ? "select" : "blade"),
+    slip: () => setTool(tool === "slip" ? "select" : "slip"),
+    select: () => setTool("select"),
+    del: () => del(false),
+    rippleDelete: () => del(true),
+    trimLeft: () => apply({ ...pRef.current, tl: rippleTrimToPlayhead(pRef.current.tl, player.time, "left", selRef.current.size ? selRef.current : null) }, "once", "Trim start"),
+    trimRight: () => apply({ ...pRef.current, tl: rippleTrimToPlayhead(pRef.current.tl, player.time, "right", selRef.current.size ? selRef.current : null) }, "once", "Trim end"),
+    undo: () => {
+      const prev = hist.current.undo(pRef.current);
+      if (!prev) return;
+      pRef.current = prev;
+      setP(prev);
+      setHv((x) => x + 1);
+    },
+    redo: () => {
+      const nx = hist.current.redo(pRef.current);
+      if (!nx) return;
+      pRef.current = nx;
+      setP(nx);
+      setHv((x) => x + 1);
+    },
+    copy: () => void copySel(),
+    cut: () => {
+      if (copySel()) del(false);
+    },
+    paste: () => paste(),
+    duplicate,
+    selectAll: () => setSel(new Set(pRef.current.tl.items.map((i) => i.id))),
+    deselect: () => {
+      if (crop) return setCrop(null);
+      if (tool !== "select") return setTool("select");
+      setSel(new Set());
+      setGap(null);
+    },
+    nudge: (n) => {
+      const ids = unlocked(withLinked(pRef.current.tl, selRef.current));
+      if (ids.length) apply({ ...pRef.current, tl: shiftItems(pRef.current.tl, ids, n / fps, "overwrite", editOpts()) }, "once", "Nudge");
+    },
+    toggleEnable: () => {
+      const any = selItems.some((i) => !i.disabled);
+      patchSel(() => ({ disabled: any || undefined }), true, any ? "Turn off" : "Turn on", withLinked(pRef.current.tl, selRef.current));
+    },
+    toggleSnap: () => setP((x) => (pRef.current = { ...x, snapping: !x.snapping })),
+    toggleMagnet: () => setP((x) => (pRef.current = { ...x, magnet: !x.magnet })),
+    marker: () => {
+      const r = addMarker(pRef.current.tl, player.time);
+      apply({ ...pRef.current, tl: r.tl }, "once", "Add marker");
+    },
+    marker2: (dir) => {
+      const t = nextPoint(pRef.current.tl.markers.map((m) => m.t).sort((a, b) => a - b), player.time, dir);
+      if (t !== null) player.seek(t);
+    },
+    zoom: (f) => {
+      const v = viewRef.current;
+      setView(zoomAt(v, f, Math.max(0, (player.time - v.scroll) * v.pxPerSec)));
+    },
+    fit,
+    tool: (t) => setTool(t as Tool),
+    rotate: (deg) => {
+      if (objectFocus() && shapeEdit((s) => rotateBy(s, deg), "Turn")) return;
+      picEdit((q) => ({ rot90: ((((q.rot90 ?? 0) + deg) % 360) + 360) % 360 as Picture["rot90"] }), "Turn");
+    },
+    flip: (axis) => {
+      if (objectFocus() && shapeEdit((s) => flipShape(s, axis), "Flip")) return;
+      picEdit((q) => (axis === "x" ? { flipH: !q.flipH } : { flipV: !q.flipV }), "Flip");
+    },
+    order: (dir) => {
+      const ids = new Set(selShapesNow());
+      if (!ids.size) return;
+      apply({ ...pRef.current, tl: { ...pRef.current.tl, items: reorder(pRef.current.tl.items, ids, dir) } }, "once", "Order");
+    },
+    lock: () => {
+      const ids = selShapesNow();
+      const any = pRef.current.tl.items.some((i) => ids.includes(i.id) && !i.shape?.locked);
+      const tl = patchTl(pRef.current.tl, ids, (it) => ({ shape: { ...it.shape!, locked: any } }));
+      apply({ ...pRef.current, tl }, "once", any ? "Lock" : "Unlock");
+    },
+    opacity: (v) => void shapeEdit((s) => ({ ...s, opacity: v }), "Opacity"),
+    arrows: (dx, dy) => shapeEdit((s) => moveBy(s, dx, dy), "Nudge"),
+    exportSave: () => void runExport("save"),
+    exportShare: () => void runExport("share"),
+    snapshot: () => void snapshot("save"),
+    importFiles: () => void importFiles(),
+    detachAudio,
+    selectSide: (dir) => setSel(new Set(itemsFrom(pRef.current.tl, player.time, dir))),
+    editText: () => {
+      const it = pRef.current.tl.items.find((i) => selRef.current.has(i.id) && i.shape?.kind === "text");
+      if (!it) return false;
+      setEditing(it.id);
+      return true;
+    },
+    objectFocus,
+    cutRange: (keep) => cutRange(keep),
+    copyFrame: () => void snapshot("copy"),
+  };
+  const actRef = useRef(actions);
+  actRef.current = actions;
+  // The editor's keys, registered as scope "editor" while the tab shows:
+  // rebinding, the cheat sheet (F1) and the command list (Ctrl+Shift+P) see them.
+  const keymap = useMemo(() => {
+    const a = new Proxy({} as EditorActions, { get: (_t, k) => (...args: unknown[]) => (actRef.current[k as keyof EditorActions] as (...x: unknown[]) => unknown)(...args) });
+    return toRegistry(editorKeymap(a));
+  }, []);
+  // Tooltips and menus follow the user's keys.
+  const [, setKeysVer] = useState(0);
+  useEffect(() => onShortcutsChange(() => setKeysVer((n) => n + 1)), []);
+  const k = (label: string, text?: string) => keyTip("editor", keymap, label, text);
+  const mk = (builtIn: string) => keyOfDefault("editor", keymap, builtIn);
+
+  const active = props.active ?? true;
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  /** An app dialog (welcome card, settings sheet…) lies over the editor. */
+  const covered = () => {
+    const el = rootRef.current;
+    if (!el) return false;
+    const r = el.getBoundingClientRect();
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return !!hit && !el.contains(hit);
+  };
+  useShortcuts(
+    "editor",
+    keymap.map((s) => ({ ...s, when: () => !covered() && (s.when ? s.when() : true) })),
+    active && !menu && !ask && !editing,
+  );
+
+  // ------------------------------------------------------------ menus
+  const projectsMenu = (e: React.MouseEvent) => {
+    const list = loadProjects().filter((x) => x.id !== p.id);
+    setMenu({
+      at: { x: e.currentTarget.getBoundingClientRect().left, y: e.currentTarget.getBoundingClientRect().bottom + 4 },
+      items: [
+        { label: "New project", run: () => switchTo(newProject()) },
+        {
+          label: "Open recent",
+          disabled: !list.length,
+          sub: list.slice(0, 16).map((x) => ({ label: `${x.name} · ${new Date(x.updated).toLocaleDateString()}`, run: () => switchTo(x) })),
+        },
+        { sep: true, label: "" },
+        { label: "Rename project…", run: () => setAsk({ title: "Rename project", ok: "Rename", field: p.name, run: (v) => v.trim() && apply({ ...pRef.current, name: v.trim() }, "once", "Rename project") }) },
+        { label: "Duplicate project", run: () => switchTo({ ...structuredClone(pRef.current), id: newId("p"), name: `${pRef.current.name} copy`, source: null, updated: Date.now() }) },
+        {
+          label: "Delete project…",
+          danger: true,
+          run: () =>
+            setAsk({
+              title: `Delete "${p.name}"?`,
+              body: "The edit is removed from the list. Your clips and exported files stay.",
+              ok: "Delete",
+              danger: true,
+              run: () => {
+                saveProjects(loadProjects().filter((x) => x.id !== pRef.current.id));
+                const rest = loadProjects();
+                pRef.current = newProject();
+                switchTo(rest[0] ?? newProject());
+              },
+            }),
+        },
+      ],
+    });
+  };
+
+  const exportMenu = (e: React.MouseEvent) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const route = exportRoute(p);
+    setMenu({
+      at: { x: r.right - 280, y: r.bottom + 4 },
+      items: [
+        { label: route.kind === "copy" ? "Save as a new clip (lossless)" : "Save as a new clip", key: mk("Ctrl+E"), run: () => void runExport("save") },
+        { label: `Shrink under ${shareMb} MB and copy (Discord)`, key: mk("Ctrl+Shift+E"), run: () => void runExport("share") },
+        { sep: true, label: "" },
+        { label: "Export audio as a file…", run: () => void exportAudio(), hint: "WAV, MP3 or M4A" },
+        { label: "Save the frame as a picture", key: mk("Ctrl+Shift+S"), run: () => void snapshot("save") },
+        { label: "Copy the frame", key: mk("Ctrl+Shift+C"), run: () => void snapshot("copy") },
+        ...(sourceClip ? [{ sep: true, label: "" }, { label: "Split the clip file in two at the playhead", run: () => clipActions?.splitFile() }] : []),
+      ],
+      minWidth: 280,
+    } as { at: { x: number; y: number }; items: MenuItem[] });
+  };
+
+  const rangeMenu = (e: React.MouseEvent) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    setMenu({
+      at: { x: r.left, y: r.top - 8 - 260 },
+      items: [
+        { label: "Mark in", key: mk("I"), run: actions.markIn },
+        { label: "Mark out", key: mk("O"), run: actions.markOut },
+        ...[5, 10, 15, 30].map((s) => ({ label: `Last ${s} seconds`, run: () => lastSeconds(s) })),
+        { sep: true, label: "" },
+        { label: "Play the range in a loop", key: mk("Shift+Space"), run: actions.loopPlay },
+        { label: "Cut out the range (close the gap)", key: mk("X"), run: () => cutRange(false) },
+        { label: "Keep only the range", key: mk("Shift+X"), run: () => cutRange(true) },
+        { label: "Clear in and out", key: mk("Alt+X"), run: actions.clearInOut },
+      ],
+    });
+  };
+
+  const trackMenu = (tr: Track, at: { x: number; y: number }) => {
+    const cur = pRef.current;
+    const kind = tr.kind as TrackKind;
+    const count = tracksOf(cur.tl, kind).length;
+    const idx = cur.tl.tracks.findIndex((t) => t.id === tr.id);
+    const add = (where: number) => apply({ ...cur, tl: addTrack(cur.tl, makeTrack(kind, count + 1), where) }, "once", "Add track");
+    setMenu({
+      at,
+      items: [
+        { label: "Rename…", run: () => setAsk({ title: "Rename track", ok: "Rename", field: tr.name, run: (v) => v.trim() && apply({ ...pRef.current, tl: patchTrack(pRef.current.tl, tr.id, { name: v.trim() }) }, "once", "Rename track") }) },
+        ...(kind === "spare"
+          ? []
+          : [
+              { label: `Add a ${kind} track above`, disabled: count >= trackLimit(kind, PER_KIND), run: () => add(idx), hint: count >= trackLimit(kind, PER_KIND) ? limitHint(kind) : undefined },
+              { label: `Add a ${kind} track below`, disabled: count >= trackLimit(kind, PER_KIND), run: () => add(idx + 1) },
+            ]),
+        { label: "Remove this track", danger: true, disabled: count <= 1, run: () => apply({ ...cur, tl: removeTrack(cur.tl, tr.id) }, "once", "Remove track") },
+        { sep: true, label: "" },
+        ...(kind !== "overlay" || true ? [{ label: tr.locked ? "Unlock" : "Lock", run: () => apply({ ...cur, tl: patchTrack(cur.tl, tr.id, { locked: !tr.locked }) }, "once", "Lock track") }] : []),
+        ...(kind !== "audio" ? [{ label: tr.hidden ? "Show" : "Hide", run: () => apply({ ...cur, tl: patchTrack(cur.tl, tr.id, { hidden: !tr.hidden }) }, "once", "Hide track") }] : []),
+        ...(kind !== "overlay"
+          ? [
+              { label: tr.muted ? "Unmute" : "Mute", run: () => apply({ ...cur, tl: patchTrack(cur.tl, tr.id, { muted: !tr.muted }) }, "once", "Mute track") },
+              { label: tr.solo ? "Unsolo" : "Solo", run: () => apply({ ...cur, tl: patchTrack(cur.tl, tr.id, { solo: !tr.solo }) }, "once", "Solo track") },
+            ]
+          : []),
+        { label: "Close all gaps on this track", run: () => apply({ ...cur, tl: closeAllGaps(cur.tl, tr.id) }, "once", "Close gaps") },
+        { label: "Select everything on this track", run: () => setSel(new Set(cur.tl.items.filter((i) => i.track === tr.id).map((i) => i.id))) },
+      ],
+    });
+  };
+
+  const onContext = (e: React.MouseEvent, h: { item?: EdItem; track: Track | null; t: number }) => {
+    const at = { x: e.clientX, y: e.clientY };
+    const cur = pRef.current;
+    if (!h.item) {
+      const g = h.track ? (() => {
+        const items = cur.tl.items.filter((i) => i.track === h.track!.id);
+        const before = items.filter((i) => end(i) <= h.t).reduce((m, i) => Math.max(m, end(i)), 0);
+        const after = items.filter((i) => i.start >= h.t).reduce((m, i) => Math.min(m, i.start), Infinity);
+        return after < Infinity ? { start: before, end: after } : null;
+      })() : null;
+      const near = cur.tl.markers.find((m) => Math.abs(m.t - h.t) * viewRef.current.pxPerSec < 8);
+      setMenu({
+        at,
+        items: [
+          { label: "Paste here", key: mk("Ctrl+V"), disabled: !clipboard.current.length, run: () => paste(h.t) },
+          ...(g && h.track ? [{ label: "Close this gap", run: () => apply({ ...cur, tl: closeGap(cur.tl, h.track!.id, h.t) }, "once", "Close gap") }] : []),
+          { label: "Add a marker here", key: mk("M"), run: () => apply({ ...cur, tl: addMarker(cur.tl, h.t).tl }, "once", "Add marker") },
+          ...(near ? [{ label: "Delete this marker", danger: true, run: () => apply({ ...cur, tl: removeMarker(cur.tl, near.id) }, "once", "Delete marker") }] : []),
+          { sep: true, label: "" },
+          { label: "Add files…", key: mk("Ctrl+I"), run: () => void importFiles() },
+          ...(h.track ? [{ label: "Track", sub: [] as MenuItem[], run: () => trackMenu(h.track!, at) }] : []).map((x) => ({ label: "Track options…", run: x.run })),
+        ],
+      });
+      return;
+    }
+    const it = h.item;
+    const many = selRef.current.size > 1;
+    const linked = !!it.link;
+    setMenu({
+      at,
+      items: [
+        { label: "Split at the playhead", key: mk("S"), run: () => split(false) },
+        { label: "Copy", key: mk("Ctrl+C"), run: () => void copySel() },
+        { label: "Cut", key: mk("Ctrl+X"), run: actions.cut },
+        { label: "Duplicate", key: mk("Ctrl+D"), run: duplicate },
+        { label: it.disabled ? "Turn on" : "Turn off", key: mk("D"), run: actions.toggleEnable },
+        { sep: true, label: "" },
+        ...(it.kind === "video" && it.hasAudio ? [{ label: "Detach audio", key: mk("Ctrl+Shift+D"), run: detachAudio }] : []),
+        ...(linked ? [{ label: "Unlink", run: () => setLink(false) }] : many ? [{ label: "Link (move together)", run: () => setLink(true) }] : []),
+        ...(sounds(it)
+          ? [
+              { label: it.audio?.muted ? "Unmute" : "Mute", run: () => patchSel((x) => ({ audio: { ...DEFAULT_FX, ...x.audio, muted: !it.audio?.muted } }), true, "Mute") },
+              { label: "Normalise loudness", checked: !!it.audio?.normalize, run: () => patchSel((x) => ({ audio: { ...DEFAULT_FX, ...x.audio, normalize: !it.audio?.normalize } }), true, "Normalise") },
+              { label: "Export audio as a file…", run: () => void exportAudio() },
+            ]
+          : []),
+        ...(it.kind === "video" || it.kind === "image"
+          ? [
+              { label: "Crop…", run: () => startCrop(it) },
+              { label: "Turn 90° right", key: mk("Shift+R"), run: () => picEdit((q) => ({ rot90: (((q.rot90 ?? 0) + 90) % 360) as Picture["rot90"] }), "Turn") },
+              { label: "Fill the frame", checked: !!it.pic?.fill, run: () => picEdit((q) => ({ fill: !q.fill }), "Fill") },
+            ]
+          : []),
+        ...(it.kind === "video" && it.path ? [{ label: "Pop out the source clip", run: () => void popOutClip({ path: it.path!, title: it.name, width: it.width, height: it.height }, { t: it.srcIn + Math.max(0, player.time - it.start), playing: false, muted: true }).catch((err) => onToast("err", "Could not pop out", String(err))) }] : []),
+        ...(it.path && !it.path.startsWith("blob:") ? [{ label: "Show the file in its folder", run: () => void lastshot.revealClip(it.path!) }] : []),
+        { sep: true, label: "" },
+        { label: "Delete", key: mk("Del"), danger: true, run: () => del(false) },
+        { label: "Ripple delete (close the gap)", key: mk("Shift+Del"), danger: true, run: () => del(true) },
+      ],
+    });
+  };
+
+  const startCrop = (it: EdItem) => {
+    if (it.kind !== "video" && it.kind !== "image") return;
+    setSel(new Set([it.id]));
+    if (player.time < it.start || player.time >= end(it)) player.seek(it.start + Math.min(0.1, it.duration / 2));
+    setCrop({ id: it.id, aspect: "free" });
+  };
+  const cropTarget = (): EdItem | null => {
+    const cur = pRef.current;
+    const s = cur.tl.items.find((i) => selRef.current.has(i.id) && (i.kind === "video" || i.kind === "image"));
+    if (s) return s;
+    const t = player.time;
+    const vids = pictureTracks(cur.tl);
+    for (const tr of vids) {
+      const it = cur.tl.items.find((i) => i.track === tr.id && (i.kind === "video" || i.kind === "image") && t >= i.start && t < end(i));
+      if (it) return it;
+    }
+    return null;
+  };
+
+  // ------------------------------------------------------------ layout bits
+  const resizeTl = (e: React.PointerEvent) => {
+    e.preventDefault();
+    const y0 = e.clientY;
+    const h0 = tlHeight;
+    const mv = (ev: PointerEvent) => setTlHeight(Math.max(140, Math.min(window.innerHeight - 220, h0 - (ev.clientY - y0))));
+    const up = () => {
+      window.removeEventListener("pointermove", mv);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", mv);
+    window.addEventListener("pointerup", up);
+  };
+
+  const length = projectLength(p);
+  const range = exportRange(p);
+  const hasRange = p.tl.inPoint !== null || p.tl.outPoint !== null;
+  const estimate = useMemo(() => {
+    // Rough size of a save: the clips' own bit rates over the range.
+    let bytes = 0;
+    for (const it of p.tl.items) {
+      if (it.kind !== "video" || it.disabled) continue;
+      const c = props.clips.find((x) => x.path === it.path);
+      if (!c || !c.duration_seconds) continue;
+      const a = Math.max(it.start, range.start);
+      const b = Math.min(end(it), range.end);
+      if (b > a) bytes += (c.size_bytes / c.duration_seconds) * (b - a);
+    }
+    return bytes;
+  }, [p.tl.items, props.clips, range.start, range.end]);
+  const route = useMemo(() => exportRoute(p), [p]);
+  const penTarget = (() => {
+    if (tool !== "pen" && tool !== "highlight") return null;
+    const s = selShapes.length === 1 ? selShapes[0] : null;
+    return s && s.shape!.kind === tool ? s.id : null;
+  })();
+  const undoL = hist.current.undoLabel;
+  const redoL = hist.current.redoLabel;
+  const trackHeight = useCallback((t: Track) => TRACK_H[t.kind] ?? 48, []);
+  const previewTool: Tool = tool === "blade" || tool === "slip" ? "select" : tool;
+
+  const arrange = {
+    flip: (axis: "x" | "y") => void shapeEdit((s) => flipShape(s, axis), "Flip"),
+    rotate: (deg: number) => void shapeEdit((s) => rotateBy(s, deg), "Turn"),
+    duplicate: () => {
+      focusArea.current = "preview";
+      duplicate();
+    },
+    remove: () => removeIds(selShapesNow(), false, "Delete"),
+    order: actions.order,
+    lock: actions.lock,
+    align: (how: "left" | "centre" | "right" | "top" | "middle" | "bottom") => {
+      const ids = selShapesNow();
+      const shapes = pRef.current.tl.items.filter((i) => ids.includes(i.id)).map((i) => i.shape!);
+      const out = alignShapes(shapes, how, outputSize(pRef.current));
+      onShapes(out, true, "Align");
+    },
+  };
+
+  return (
+    <div
+      ref={rootRef}
+      className="flex h-full min-h-0 flex-col bg-app text-ink"
+      onDragOver={(e) => {
+        if (droppable(e)) e.preventDefault();
+      }}
+      onDrop={(e) => void onRootDrop(e)}
+      onDragLeave={(e) => {
+        if (e.currentTarget === e.target) clearDrag();
+      }}
+    >
+      {/* ------------------------------------------------ toolbar */}
+      <div className="flex h-11 shrink-0 items-center gap-0.5 border-b border-line bg-surface px-2">
+        <Btn title={showBin ? "Hide media" : "Show media"} on={showBin} onClick={() => setShowBin(!showBin)}>
+          <Ico d={I.media} />
+        </Btn>
+        <button type="button" onClick={projectsMenu} title={`Projects: new, recent, rename, duplicate · autosaved ${new Date(p.updated).toLocaleTimeString()}`} className="ml-1 flex h-7 max-w-[220px] items-center gap-1 rounded-md px-2 text-[12px] font-semibold text-ink hover:bg-surface-4">
+          <span className="truncate">{p.name}</span>
+          <span className="text-[9px] text-ink-4">▼</span>
+        </button>
+        <Sep />
+        <Btn title={undoL ? k("Undo", `Undo ${undoL.toLowerCase()}`) : "Nothing to undo"} disabled={!undoL} onClick={actions.undo}>
+          <Ico d={I.undo} />
+        </Btn>
+        <Btn title={redoL ? k("Redo", `Redo ${redoL.toLowerCase()}`) : "Nothing to redo"} disabled={!redoL} onClick={actions.redo}>
+          <Ico d={I.redo} />
+        </Btn>
+        <Sep />
+        <Btn title={k("Select / move tool")} on={tool === "select"} onClick={() => setTool("select")}>
+          <Ico d={I.select} />
+        </Btn>
+        <Btn title={k("Blade tool (click a clip to cut it)")} on={tool === "blade"} onClick={actions.blade}>
+          <Ico d={I.blade} />
+        </Btn>
+        <Btn title={k("Slip tool (drag what a clip shows; Alt+drag a cut rolls it)")} on={tool === "slip"} onClick={actions.slip}>
+          <Ico d={I.slip} />
+        </Btn>
+        <Btn title={k("Split at playhead")} onClick={() => split(false)}>
+          <Ico d={I.split} />
+        </Btn>
+        <Btn title={k("Delete (leaves a gap)", "Delete (Shift+Del closes the gap)")} disabled={!sel.size && !gap} onClick={() => del(false)} tone="danger">
+          <Ico d={I.trash} />
+        </Btn>
+        <Sep />
+        <Btn title="Draw and write on the picture: text, boxes, arrows, pen, pixelate" on={showDraw} onClick={() => setShowDraw(!showDraw)} wide>
+          <Ico d={I.annotate} /> Annotate
+        </Btn>
+        <Btn title="Crop the selected clip (16:9, 9:16, 1:1, 4:3, free)" on={!!crop} onClick={() => (crop ? setCrop(null) : (() => { const it = cropTarget(); if (it) startCrop(it); else onToast("info", "Nothing to crop here", "Select a clip or put the playhead over one."); })())}>
+          <Ico d={I.crop} />
+        </Btn>
+        <Btn title={k("Save the frame as a picture", "Snapshot: save the frame as a picture")} onClick={() => void snapshot("save")}>
+          <Ico d={I.camera} />
+        </Btn>
+        <Btn
+          title="Pop out the frame (zoom, inspect, keep on top)"
+          onClick={() => void popOutCanvas(frameCanvas(), `${p.name} · ${timecode(player.time, fps)}`).catch((e) => onToast("err", "Could not pop out", String(e)))}
+        >
+          <Ico d={I.popout} />
+        </Btn>
+        <span className="flex-1" />
+        {busy && (
+          <div className="mr-2 flex items-center gap-2 text-[11px] text-ink-3">
+            <span>{busy.label}</span>
+            <span className="h-1.5 w-24 overflow-hidden rounded-full bg-surface-4">
+              <span className={cn("block h-full bg-accent transition-[width]", busy.p === null && "animate-pulse")} style={{ width: `${Math.round((busy.p ?? 0.3) * 100)}%` }} />
+            </span>
+          </div>
+        )}
+        <span className="mr-2 hidden font-mono text-[10.5px] text-ink-4 xl:inline" title="Export length and rough size">
+          {timecode(range.end - range.start, fps)}
+          {estimate > 0 && ` · ~${formatBytes(route.kind === "render" ? estimate * 1.1 : estimate)}`}
+        </span>
+        <Btn title={`${k("Shrink and copy for Discord")}: makes a copy under ${shareMb} MB and puts it on the clipboard`} onClick={() => void runExport("share")} disabled={!!busy} wide>
+          <Ico d={I.discord} /> {shareMb} MB copy
+        </Btn>
+        <Btn title={`${k("Export (save as a new clip)")} · more in the menu`} tone="accent" onClick={exportMenu} disabled={!!busy} wide className="ml-1">
+          <Ico d={I.exportI} /> Export ▾
+        </Btn>
+        <Sep />
+        <Btn title={showInsp ? "Hide settings" : "Show settings"} on={showInsp} onClick={() => setShowInsp(!showInsp)}>
+          <Ico d={I.panel} />
+        </Btn>
+      </div>
+
+      {/* ------------------------------------------------ media | preview | inspector */}
+      <div className="flex min-h-0 flex-1">
+        {showBin && (
+          <div className="w-[260px] shrink-0 border-r border-line bg-surface" onPointerDownCapture={() => (focusArea.current = "other")}>
+            <MediaBin clips={props.clips} p={p} onAdd={(paths) => void addPaths(paths)} onImport={() => void importFiles()} onDragPaths={(x) => (dragPaths.current = x)} />
+          </div>
+        )}
+        <div className="relative flex min-w-0 flex-1 flex-col">
+          {showDraw && (
+            <div className="flex h-9 shrink-0 items-center gap-0.5 overflow-x-auto border-b border-line bg-surface-2 px-2">
+              {TOOLS.map((t) => (
+                <Btn key={t.id} title={`${t.label}${t.key ? ` (${t.key})` : ""}`} on={tool === t.id} onClick={() => setTool(t.id)}>
+                  <Ico d={t.icon} />
+                </Btn>
+              ))}
+              <Sep />
+              <span className="text-[10.5px] text-ink-4">Objects show for {SHAPE_SECONDS} s from the playhead; drag their ends on the Overlay track.</span>
+              <span className="flex-1" />
+              <Btn title="Close the drawing tools" onClick={() => (setShowDraw(false), setTool("select"))}>
+                <Ico d={I.close} />
+              </Btn>
+            </div>
+          )}
+          <div className="min-h-0 flex-1">
+            <Preview
+              p={p}
+              player={player}
+              images={images}
+              imgVer={imgVer}
+              selection={sel}
+              onSelect={(ids) => {
+                setSel(ids);
+                setGap(null);
+              }}
+              tool={previewTool}
+              style={style}
+              onShapes={onShapes}
+              onCreateShape={onCreateShape}
+              onDeleteItems={(ids) => removeIds(ids, false, "Delete")}
+              editing={editing}
+              setEditing={setEditing}
+              onPic={onPic}
+              crop={crop}
+              setCrop={setCrop}
+              quality={quality}
+              safe={safe}
+              onFocus={() => (focusArea.current = "preview")}
+              onToolDone={() => setTool("select")}
+              penTarget={penTarget}
+              empty={
+                <div className="max-w-sm text-center text-[12px] leading-relaxed text-ink-3">
+                  <div className="mb-2 text-[14px] font-semibold text-ink-2">Drop clips, pictures or music here</div>
+                  From the Library list on the left, your clips, or Explorer. Or{" "}
+                  <button type="button" className="font-semibold text-accent-fg hover:underline" onClick={() => void importFiles()}>
+                    add files
+                  </button>
+                  .
+                </div>
+              }
+            />
+          </div>
+          {/* Transport */}
+          <Transport
+            player={player}
+            playing={playing}
+            fps={fps}
+            length={length}
+            p={p}
+            k={k}
+            actions={actions}
+            hasRange={hasRange}
+            range={range}
+            onRangeMenu={rangeMenu}
+            quality={quality}
+            setQuality={setQuality}
+            safe={safe}
+            setSafe={setSafe}
+          />
+        </div>
+        {showInsp && (
+          <div className="w-[290px] shrink-0 border-l border-line bg-surface" onPointerDownCapture={() => (focusArea.current = "other")}>
+            <Inspector
+              p={p}
+              sel={selItems}
+              patchItems={(fn, commit, label) => patchSel(fn, commit, label)}
+              patchProject={(patch, label) => apply({ ...pRef.current, ...patch }, "once", label)}
+              onMoveTo={moveTo}
+              onLength={setLength}
+              style={style}
+              onStyle={(x) => setStyle((s) => ({ ...s, ...x }))}
+              tool={previewTool}
+              arrange={arrange}
+              onCrop={startCrop}
+              onDetachAudio={detachAudio}
+              onAudioExport={() => void exportAudio()}
+              clip={sourceClip}
+              flushMs={flushMsRef.current}
+              clipActions={clipActions}
+              fps={fps}
+            />
+          </div>
+        )}
+      </div>
+
+      {/* ------------------------------------------------ timeline */}
+      <div className="h-1.5 shrink-0 cursor-ns-resize bg-line/40 hover:bg-accent/50" onPointerDown={resizeTl} title="Drag to resize the timeline" />
+      <div className="flex shrink-0 flex-col border-t border-line bg-surface" style={{ height: tlHeight }}>
+        <div className="flex h-8 shrink-0 items-center gap-0.5 border-b border-line px-2">
+          <Btn title={k("Snapping on / off")} on={p.snapping} onClick={actions.toggleSnap}>
+            <Ico d={I.snap} />
+          </Btn>
+          <Btn title={`${k("Magnetic main track on / off")}: clips on the main video track stay back to back`} on={p.magnet} onClick={actions.toggleMagnet}>
+            <Ico d={I.magnet} />
+          </Btn>
+          <Btn title="Ripple trims: trimming a clip moves everything after it (or hold Ctrl while trimming)" on={p.ripple} onClick={() => apply({ ...pRef.current, ripple: !p.ripple }, "once", "Ripple")}>
+            <Ico d={I.ripple} />
+          </Btn>
+          <Btn title={k("Add a marker")} onClick={actions.marker}>
+            <Ico d={I.marker} />
+          </Btn>
+          <Sep />
+          <AddTrack p={p} onAdd={(kind) => apply({ ...pRef.current, tl: addTrack(pRef.current.tl, makeTrack(kind, tracksOf(pRef.current.tl, kind).length + 1), kind === "audio" ? pRef.current.tl.tracks.length : pRef.current.tl.tracks.findIndex((t) => t.kind === kind)) }, "once", "Add track")} />
+          <span className="flex-1" />
+          <span className="mr-2 text-[10.5px] text-ink-4">{sel.size ? `${sel.size} selected` : gap ? "Gap selected: Del closes it" : ""}</span>
+          <Btn title={k("Zoom out")} onClick={() => actions.zoom(1 / 1.5)}>
+            <Ico d={I.zoomOut} />
+          </Btn>
+          <input
+            type="range"
+            min={0}
+            max={1000}
+            value={Math.round((Math.log(view.pxPerSec / 0.02) / Math.log(2400 / 0.02)) * 1000)}
+            onChange={(e) => {
+              const z = 0.02 * Math.pow(2400 / 0.02, Number(e.target.value) / 1000);
+              actions.zoom(z / view.pxPerSec);
+            }}
+            title="Zoom (Ctrl+wheel on the timeline, + and -)"
+            className="w-28 accent-[var(--color-accent)]"
+          />
+          <Btn title={k("Zoom in")} onClick={() => actions.zoom(1.5)}>
+            <Ico d={I.zoomIn} />
+          </Btn>
+          <Btn title={k("Zoom to fit")} onClick={fit}>
+            <Ico d={I.fit} />
+          </Btn>
+        </div>
+        <div
+          className="min-h-0 flex-1"
+          onPointerDownCapture={() => (focusArea.current = "timeline")}
+          onDragOver={onTlDragOver}
+          onDragLeave={(e) => {
+            if (!e.currentTarget.contains(e.relatedTarget as Node)) clearDrag();
+          }}
+          onDrop={(e) => void onTlDrop(e)}
+        >
+          <TimelineView<EdItem>
+            tl={p.tl}
+            clock={clock}
+            selection={sel}
+            onSelection={(s) => {
+              setSel(s);
+              if (s.size) setGap(null);
+            }}
+            view={view}
+            onView={setView}
+            snapping={p.snapping}
+            tool={tool === "blade" || tool === "slip" ? tool : "select"}
+            ripple={p.ripple}
+            editOpts={editOpts}
+            onEdit={setTl}
+            accepts={(tr, it) => accepts(tr.kind as TrackKind, it)}
+            trackHeight={trackHeight}
+            renderItem={(it, g, s) => <ItemContent it={it} g={g} selected={s} onFx={onFx} />}
+            itemClass={itemTone}
+            renderHeader={(tr) => (
+              <TrackHeader
+                track={tr}
+                canHide={tr.kind !== "audio"}
+                sound={tr.kind !== "overlay"}
+                onPatch={(patch, label) => apply({ ...pRef.current, tl: patchTrack(pRef.current.tl, tr.id, patch) }, "once", label)}
+                onMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  trackMenu(tr, { x: e.clientX, y: e.clientY });
+                }}
+              />
+            )}
+            onContext={onContext}
+            onItemDoubleClick={(it) => {
+              if (it.shape?.kind === "text") {
+                player.seek(Math.max(player.time, it.start));
+                setEditing(it.id);
+              } else if (it.kind === "video" || it.kind === "image") {
+                setShowInsp(true);
+              }
+            }}
+            onGap={(g) => {
+              if (!g) return setGap(null);
+              const items = pRef.current.tl.items.filter((i) => i.track === g.track);
+              const before = items.filter((i) => end(i) <= g.t + 1e-6).reduce((m, i) => Math.max(m, end(i)), 0);
+              const after = items.filter((i) => i.start >= g.t - 1e-6).reduce((m, i) => Math.min(m, i.start), Infinity);
+              setGap(after < Infinity && after - before > 0.01 ? { ...g, start: before, end: after } : null);
+            }}
+            gap={gap}
+            onMarkerEdit={(m: Marker) => setAsk({ title: "Marker name", ok: "Save", field: m.label ?? "", run: (v) => apply({ ...pRef.current, tl: patchMarker(pRef.current.tl, m.id, { label: v.trim() }) }, "once", "Name marker") })}
+            ghost={ghost}
+            belowHint={belowHint === null ? undefined : belowHint}
+            fps={fps}
+            apiRef={tlApi}
+            headerWidth={176}
+          />
+        </div>
+      </div>
+
+      {menu && <Menu at={menu.at} items={menu.items} onClose={() => setMenu(null)} />}
+      {ask && <AskDialog ask={ask} onClose={() => setAsk(null)} />}
+    </div>
+  );
+}
+
+// ------------------------------------------------------------ pieces
+
+function Transport({
+  player,
+  playing,
+  fps,
+  length,
+  p,
+  k,
+  actions,
+  hasRange,
+  range,
+  onRangeMenu,
+  quality,
+  setQuality,
+  safe,
+  setSafe,
+}: {
+  player: Player;
+  playing: boolean;
+  fps: number;
+  length: number;
+  p: EdProject;
+  k: (label: string, text?: string) => string;
+  actions: EditorActions;
+  hasRange: boolean;
+  range: { start: number; end: number };
+  onRangeMenu: (e: React.MouseEvent) => void;
+  quality: number;
+  setQuality: (q: number) => void;
+  safe: SafeZone;
+  setSafe: (s: SafeZone) => void;
+}) {
+  const timeRef = useRef<HTMLInputElement | null>(null);
+  const [typing, setTyping] = useState<string | null>(null);
+  useEffect(
+    () =>
+      player.subscribe((t) => {
+        if (timeRef.current && document.activeElement !== timeRef.current) timeRef.current.value = timecode(t, fps);
+      }),
+    [player, fps],
+  );
+  return (
+    <div className="flex h-10 shrink-0 items-center gap-1 border-t border-line bg-surface px-2">
+      <Btn title={k("Go to start")} onClick={actions.home}>
+        <Ico d="M4 3v10M13 3L6 8l7 5z" />
+      </Btn>
+      <Btn title={k("Back one frame")} onClick={() => actions.step(-1)}>
+        <Ico d="M10 4L6 8l4 4" />
+      </Btn>
+      <Btn title={`${k("Play / pause")} · J K L shuttle`} onClick={actions.togglePlay} tone="accent">
+        <Ico d={playing ? I.pause : I.play} />
+      </Btn>
+      <Btn title={k("Forward one frame")} onClick={() => actions.step(1)}>
+        <Ico d="M6 4l4 4-4 4" />
+      </Btn>
+      <Btn title={k("Go to end")} onClick={actions.end}>
+        <Ico d="M12 3v10M3 3l7 5-7 5z" />
+      </Btn>
+      <input
+        ref={timeRef}
+        defaultValue={timecode(0, fps)}
+        onFocus={(e) => {
+          setTyping(e.target.value);
+          e.target.select();
+        }}
+        onChange={(e) => setTyping(e.target.value)}
+        onBlur={() => {
+          if (typing !== null) {
+            const t = parseTime(typing, player.time);
+            if (t !== null) player.seek(t);
+          }
+          setTyping(null);
+          if (timeRef.current) timeRef.current.value = timecode(player.time, fps);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+          if (e.key === "Escape") {
+            setTyping(null);
+            (e.target as HTMLInputElement).blur();
+          }
+        }}
+        title="Playhead. Type a time (1:05.10) or +2 / -0.5 to jump"
+        className="ml-1 w-[86px] rounded border border-transparent bg-transparent px-1 font-mono text-[12px] text-ink hover:border-line focus:border-accent focus:outline-none"
+      />
+      <span className="font-mono text-[11px] text-ink-4">/ {timecode(length, fps)}</span>
+      <Sep />
+      <Btn title={k("Mark in")} onClick={actions.markIn} wide>
+        I
+      </Btn>
+      <Btn title={k("Mark out")} onClick={actions.markOut} wide>
+        O
+      </Btn>
+      <button
+        type="button"
+        onClick={onRangeMenu}
+        title="Range: what export and loop use. Last 5/10/15/30 s, cut out, keep only"
+        className={cn("h-7 rounded-md px-2 font-mono text-[10.5px]", hasRange ? "bg-accent/15 text-accent-fg" : "text-ink-3 hover:bg-surface-4 hover:text-ink")}
+      >
+        {hasRange ? `${timecode(range.start, fps)} → ${timecode(range.end, fps)}` : "Range ▾"}
+      </button>
+      <Btn title={k("Loop play in → out")} on={!!player.loop && playing} onClick={actions.loopPlay}>
+        <Ico d={I.loop} />
+      </Btn>
+      <span className="flex-1" />
+      <select
+        value={quality}
+        onChange={(e) => setQuality(Number(e.target.value))}
+        title="Preview quality (lower is smoother on slow PCs; export is always full)"
+        className="h-7 rounded-md border border-line bg-surface-2 px-1 text-[11px] text-ink-2"
+      >
+        <option value={1}>Full</option>
+        <option value={0.5}>Half</option>
+        <option value={0.25}>Quarter</option>
+      </select>
+      <select
+        value={safe}
+        onChange={(e) => setSafe(e.target.value as SafeZone)}
+        title="Guides on the picture"
+        className="h-7 rounded-md border border-line bg-surface-2 px-1 text-[11px] text-ink-2"
+      >
+        <option value="off">No guides</option>
+        <option value="title">Safe areas</option>
+        <option value="vertical">Shorts / TikTok UI</option>
+      </select>
+      <span className="ml-1 font-mono text-[10px] text-ink-4">
+        {outputSize(p).w}×{outputSize(p).h}
+      </span>
+    </div>
+  );
+}
+
+function AddTrack({ p, onAdd }: { p: EdProject; onAdd: (k: TrackKind) => void }) {
+  const [m, setM] = useState<{ x: number; y: number } | null>(null);
+  return (
+    <>
+      <Btn
+        title="Add a track"
+        wide
+        onClick={(e) => {
+          const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+          setM({ x: r.left, y: r.top - 110 });
+        }}
+      >
+        <Ico d={I.plus} /> Track
+      </Btn>
+      {m && (
+        <Menu
+          at={m}
+          onClose={() => setM(null)}
+          items={(["video", "overlay", "audio"] as TrackKind[]).map((kind) => ({
+            label: `${kind === "video" ? "Video" : kind === "overlay" ? "Overlay (text, drawings)" : "Audio"} track`,
+            disabled: tracksOf(p.tl, kind).length >= trackLimit(kind, PER_KIND),
+            hint: tracksOf(p.tl, kind).length >= trackLimit(kind, PER_KIND) ? limitHint(kind) : undefined,
+            run: () => onAdd(kind),
+          }))}
+        />
+      )}
+    </>
+  );
+}
+
+function AskDialog({ ask, onClose }: { ask: Ask; onClose: () => void }) {
+  const [v, setV] = useState(ask.field ?? "");
+  const ok = () => {
+    onClose();
+    ask.run(v);
+  };
+  return (
+    <div className="fixed inset-0 z-[90] grid place-items-center bg-black/40" onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="w-[360px] rounded-xl border border-line-2 bg-surface p-4 shadow-2xl" onKeyDown={(e) => e.key === "Escape" && onClose()}>
+        <div className="text-[13px] font-semibold text-ink">{ask.title}</div>
+        {ask.body && <p className="mt-1 text-[12px] text-ink-3">{ask.body}</p>}
+        {ask.field !== undefined && (
+          <input
+            autoFocus
+            value={v}
+            onChange={(e) => setV(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && ok()}
+            className="mt-3 w-full rounded-md border border-line bg-surface-2 px-2 py-1.5 text-[12px] text-ink focus:border-accent focus:outline-none"
+          />
+        )}
+        <div className="mt-4 flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="rounded-md px-3 py-1.5 text-[12px] text-ink-3 hover:text-ink">
+            Cancel
+          </button>
+          <button type="button" autoFocus={ask.field === undefined} onClick={ok} className={cn("rounded-md px-3 py-1.5 text-[12px] font-semibold text-white", ask.danger ? "bg-red-600 hover:bg-red-500" : "bg-accent hover:bg-accent-hover")}>
+            {ask.ok}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+

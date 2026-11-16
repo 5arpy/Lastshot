@@ -39,4 +39,9 @@ export interface ProModule {
   frameCommands?: Partial<Record<string, FrameCmd[]>>;
   /** Extra sections at the end of the Audio tab, in this order. */
   audioSections: ComponentType<AudioSectionProps>[];
+  /**
+   * Editor tracks per kind (video, overlay, audio). Unset: the free app's one
+   * of each, plus the spare track that takes anything.
+   */
+  editorTracksPerKind?: number;
 }

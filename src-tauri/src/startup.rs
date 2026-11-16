@@ -88,6 +88,8 @@ pub fn ensure_main(app: &AppHandle, visible: bool) -> Option<tauri::WebviewWindo
         }
     }
     crate::studio::allow_camera(&w);
+    // File paths for drops on the page (the Editor's media bin and timeline).
+    crate::editor_media::install_drop_bridge(&w);
     if let Some(state) = app.try_state::<crate::commands::AppState>() {
         crate::shell::apply_scale(&w, state.settings.read().ui_scale);
     }

@@ -1,8 +1,7 @@
 /**
- * Built-in keys never fight: no combo twice in one tab, and no tab default
- * on an app-wide key. Every scope's key table is imported here; when a new
- * scope arrives (the editor's "editor" and "snip" keys), import its table
- * too and this test covers it.
+ * Built-in keys never fight: no combo twice in one tab (in one context), and
+ * no tab default on an app-wide key. Every scope's key table is imported here;
+ * a new scope imports its table too and this test covers it.
  */
 import { describe, expect, it } from "vitest";
 import { allShortcuts, findClashes, splitKeys } from "./shortcuts";
@@ -10,13 +9,16 @@ import { APP_KEYS, APP_SCOPE } from "./appKeys";
 import "../components/clipsKeys";
 import "../viewer/keys";
 import "../popout/frameKeys";
+import { EDITOR_KEYS, SNIP_KEYS } from "../editor/keyTables";
 
-const defaults = () => allShortcuts().map((s) => ({ scope: s.scope, id: s.id, label: s.label, keys: s.defaultKeys }));
+const defaults = () => allShortcuts().map((s) => ({ scope: s.scope, id: s.id, label: s.label, keys: s.defaultKeys, context: s.context }));
 
 describe("default shortcuts", () => {
   it("covers every scope's table", () => {
     const scopes = new Set(allShortcuts().map((s) => s.scope));
-    for (const s of [APP_SCOPE, "clips", "viewer", "frame"]) expect(scopes.has(s), s).toBe(true);
+    for (const s of [APP_SCOPE, "clips", "viewer", "frame", "editor", "snip"]) expect(scopes.has(s), s).toBe(true);
+    expect(EDITOR_KEYS.length).toBeGreaterThan(80);
+    expect(SNIP_KEYS.length).toBeGreaterThan(20);
   });
 
   it("have no clashes (same tab, or a tab on an app-wide key)", () => {
@@ -31,6 +33,26 @@ describe("default shortcuts", () => {
         expect(/^Ctrl\+Alt\+[A-Z]$/.test(c), `${k.id}: ${c}`).toBe(false);
         expect(standard.test(c) || /^Ctrl\+Shift\+[A-Z0-9]$/.test(c), `${k.id}: ${c}`).toBe(true);
       }
+  });
+
+  it("reads the editor's and snip's tables in the registry's spelling", () => {
+    const ed = (label: string) => EDITOR_KEYS.find((s) => s.label === label);
+    expect(ed("Split at playhead")?.keys).toBe("S | C | Ctrl+K | Ctrl+B");
+    expect(ed("Bring to front")?.keys).toBe("Ctrl+}");
+    expect(ed("Nudge right ten frames")?.keys).toBe(">");
+    expect(ed("Zoom in")?.keys).toBe("= | +");
+    expect(ed("Nudge left 1 px")).toMatchObject({ keys: "Left", context: "object" });
+    expect(ed("Back one frame")?.context).toBeUndefined();
+    expect(ed("Detach audio")?.keys).toBe("Ctrl+Shift+D");
+    expect(SNIP_KEYS.find((s) => s.label === "Open in the editor")?.keys).toBe("Ctrl+E");
+    for (const list of [EDITOR_KEYS, SNIP_KEYS]) expect(new Set(list.map((s) => s.id)).size).toBe(list.length);
+    // The same key in two contexts of one tab is fine; in one context it is a clash.
+    const c = findClashes([
+      { scope: "editor", id: "a", label: "A", keys: "Left" },
+      { scope: "editor", id: "b", label: "B", keys: "Left", context: "object" },
+      { scope: "editor", id: "c", label: "C", keys: "Left", context: "object" },
+    ]);
+    expect(c.map((x) => [x.a.id, x.b.id])).toEqual([["b", "c"]]);
   });
 
   it("finds clashes when there are some", () => {

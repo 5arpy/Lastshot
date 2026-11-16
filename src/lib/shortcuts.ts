@@ -34,6 +34,12 @@ export interface Shortcut {
   inText?: boolean;
   /** Stable id for rebinding; default: the label. */
   id?: string;
+  /**
+   * Keys that only act in a narrower situation (the editor's "object": a
+   * picture object is selected). The same key in another context of the same
+   * tab is not a clash, because `when` lets only one of them run.
+   */
+  context?: string;
 }
 
 export interface ShortcutInfo {
@@ -41,6 +47,7 @@ export interface ShortcutInfo {
   id: string;
   label: string;
   group?: string;
+  context?: string;
   /** Keys as built in. */
   defaultKeys: string;
   /** Keys in effect (after the user's override). */
@@ -111,6 +118,8 @@ const MOD_ORDER = ["Ctrl", "Alt", "Shift", "Meta"] as const;
 const isSymbol = (k: string) => k.length === 1 && !/[A-Z0-9]/.test(k);
 
 function normKey(raw: string): string {
+  // The space bar's key is " ", which trimming would lose.
+  if (raw === " ") return "Space";
   const t = raw.trim();
   if (!t) return "";
   const named = NAMED[t.toLowerCase()];
@@ -179,12 +188,12 @@ export function effectiveKeys(scope: string, s: Pick<Shortcut, "keys" | "label" 
   return o !== undefined ? o : s.keys;
 }
 
-function remember(scope: string, s: Pick<Shortcut, "keys" | "label" | "id" | "group">) {
+function remember(scope: string, s: Pick<Shortcut, "keys" | "label" | "id" | "group" | "context">) {
   const id = idOf(s);
   const k = keyOf(scope, id);
   const old = known.get(k);
-  if (!old || old.defaultKeys !== s.keys || old.label !== s.label || old.group !== s.group) {
-    known.set(k, { scope, id, label: s.label, group: s.group, defaultKeys: s.keys });
+  if (!old || old.defaultKeys !== s.keys || old.label !== s.label || old.group !== s.group || old.context !== s.context) {
+    known.set(k, { scope, id, label: s.label, group: s.group, context: s.context, defaultKeys: s.keys });
     return true;
   }
   return false;
@@ -207,7 +216,7 @@ export function registerShortcuts(scope: string, list: Shortcut[]): () => void {
 }
 
 /** Makes shortcuts known to Settings and the cheat sheet without running them here. */
-export function declareShortcuts(scope: string, list: Pick<Shortcut, "keys" | "label" | "id" | "group">[]): void {
+export function declareShortcuts(scope: string, list: Pick<Shortcut, "keys" | "label" | "id" | "group" | "context">[]): void {
   let changed = false;
   list.forEach((s) => (changed = remember(scope, s) || changed));
   if (changed) notify();
@@ -268,7 +277,7 @@ export function activeShortcuts(): (ShortcutInfo & { run: () => void })[] {
       const k = keyOf(r.scope, idOf(s));
       if (seen.has(k) || !usable(r, s)) continue;
       seen.add(k);
-      out.push({ scope: r.scope, id: idOf(s), label: s.label, group: s.group, defaultKeys: s.keys, keys: effectiveKeys(r.scope, s), active: true, run: s.run });
+      out.push({ scope: r.scope, id: idOf(s), label: s.label, group: s.group, context: s.context, defaultKeys: s.keys, keys: effectiveKeys(r.scope, s), active: true, run: s.run });
     }
   }
   return out;
@@ -289,10 +298,12 @@ export function withKeys(label: string, scope: string, id: string): string {
 export function conflictsFor(scope: string, id: string, combo: string): ShortcutInfo[] {
   const c = normalizeCombo(combo);
   if (!c) return [];
-  return allShortcuts().filter(
+  const all = allShortcuts();
+  const me = all.find((s) => s.scope === scope && s.id === id);
+  return all.filter(
     (s) =>
       !(s.scope === scope && s.id === id) &&
-      (s.scope === scope || s.scope === "global" || scope === "global") &&
+      ((s.scope === scope && s.context === me?.context) || (s.scope !== scope && (s.scope === "global" || scope === "global"))) &&
       splitKeys(s.keys).includes(c),
   );
 }
@@ -305,8 +316,8 @@ export function usesOf(combo: string): ShortcutInfo[] {
 
 export interface KeyClash {
   combo: string;
-  a: { scope: string; id: string; label: string };
-  b: { scope: string; id: string; label: string };
+  a: { scope: string; id: string; label: string; context?: string };
+  b: { scope: string; id: string; label: string; context?: string };
   /** Two in one scope, or an app-wide key also used by a tab. */
   kind: "same-scope" | "app-wide";
 }
@@ -316,12 +327,12 @@ export interface KeyClash {
  * (`appScope`) combo also used in a tab. The same key in two different tabs
  * is fine. Pass defaults (`keys` = built-in) or what is in effect.
  */
-export function findClashes(list: { scope: string; id: string; label: string; keys: string }[], appScope = "global"): KeyClash[] {
-  const by = new Map<string, { scope: string; id: string; label: string }[]>();
+export function findClashes(list: { scope: string; id: string; label: string; keys: string; context?: string }[], appScope = "global"): KeyClash[] {
+  const by = new Map<string, { scope: string; id: string; label: string; context?: string }[]>();
   for (const s of list)
     for (const c of new Set(splitKeys(s.keys))) {
       const l = by.get(c) ?? [];
-      l.push({ scope: s.scope, id: s.id, label: s.label });
+      l.push({ scope: s.scope, id: s.id, label: s.label, context: s.context });
       by.set(c, l);
     }
   const out: KeyClash[] = [];
@@ -329,7 +340,9 @@ export function findClashes(list: { scope: string; id: string; label: string; ke
     for (let i = 0; i < l.length; i++)
       for (let j = i + 1; j < l.length; j++) {
         const [a, b] = [l[i], l[j]];
-        if (a.scope === b.scope) out.push({ combo, a, b, kind: "same-scope" });
+        if (a.scope === b.scope) {
+          if (a.context === b.context) out.push({ combo, a, b, kind: "same-scope" });
+        }
         else if (a.scope === appScope || b.scope === appScope) out.push({ combo, a, b, kind: "app-wide" });
       }
   return out;

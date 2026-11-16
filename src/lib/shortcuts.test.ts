@@ -63,6 +63,8 @@ describe("combos", () => {
     expect(comboFromEvent({ key: "?", code: "Slash", ctrlKey: false, altKey: false, shiftKey: true, metaKey: false })).toBe("?");
     expect(comboFromEvent({ key: "ArrowUp", code: "ArrowUp", ctrlKey: false, altKey: true, shiftKey: false, metaKey: false })).toBe("Alt+Up");
     expect(comboFromEvent({ key: "Shift", code: "ShiftLeft", ctrlKey: false, altKey: false, shiftKey: true, metaKey: false })).toBe("");
+    expect(comboFromEvent({ key: " ", code: "Space", ctrlKey: false, altKey: false, shiftKey: false, metaKey: false })).toBe("Space");
+    expect(comboFromEvent({ key: " ", code: "Space", ctrlKey: false, altKey: false, shiftKey: true, metaKey: false })).toBe("Shift+Space");
   });
 });
 

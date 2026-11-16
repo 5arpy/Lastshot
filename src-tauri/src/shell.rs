@@ -385,6 +385,8 @@ fn build(app: &AppHandle, label: &str, at: Option<(i32, i32)>, size: (f64, f64),
         }
     }
     crate::studio::allow_camera(&win);
+    // File paths for drops on the page (the Editor's media bin and timeline), in any window that can show the Editor tab.
+    crate::editor_media::install_drop_bridge(&win);
     apply_scale(&win, ui_scale(app));
     if maximized && !test {
         let _ = win.maximize();

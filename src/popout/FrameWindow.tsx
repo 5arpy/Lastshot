@@ -42,6 +42,7 @@ import {
   type Layout,
 } from "./frames";
 import { dragRect, snapRect, snapTargets, type Edge, type R } from "./snap";
+import { postToEditor } from "../editor/inbox";
 
 const SNAP_PX = 10;
 /** How long the strip stays after the mouse left the frame. */
@@ -825,6 +826,11 @@ function FrameChrome({
           >
             <Icon d={FI.more} />
           </Btn>
+          {frame.kind === "video" && winW >= 200 && (
+            <Btn title="Open in the editor (trim, cut, crop, draw, export)" onClick={() => void openInEditor(frame.src)}>
+              <Icon d="M2 14l2.5-.5 8-8-2-2-8 8zM9.5 4.5l2 2" />
+            </Btn>
+          )}
           {winW >= 280 && (
             <Btn title="Hide (bring it back from the Pop-outs panel or the tray)" onClick={() => patch({ hidden: true })}>
               <Icon d={FI.hide} />
@@ -1205,4 +1211,10 @@ function MediaBody({
       />
     </>
   );
+}
+
+/** Hands a clip to the editor (the app-wide queue) and shows the Editor tab in its window. */
+async function openInEditor(path: string) {
+  postToEditor([path], { mode: "open" });
+  await window.__TAURI__?.core.invoke("shell_open_tab", { tab: "editor", payload: null }).catch(() => undefined);
 }

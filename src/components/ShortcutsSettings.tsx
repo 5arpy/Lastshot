@@ -31,6 +31,7 @@ import {
 import "./clipsKeys";
 import "../viewer/keys";
 import "../popout/frameKeys";
+import "../editor/keyTables";
 import { cn } from "../utils/cn";
 import { Keys } from "./ShortcutsOverlay";
 

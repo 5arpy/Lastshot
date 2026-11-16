@@ -42,6 +42,8 @@ interface Props {
   onShare: (clip: ClipMetadata) => void;
   /** Pops the clip out into a see-through frame that keeps playing. */
   onPopOut?: (clip: ClipMetadata) => void;
+  /** Puts clips on the editor's timeline (the open edit). */
+  onAddToEditor?: (paths: string[]) => void;
   onToggleFavorite: (clip: ClipMetadata) => void;
   /** Files changed: read the library again. */
   onChanged: () => void;
@@ -921,7 +923,8 @@ function ClipsExplorer(props: Props) {
     const isRoot = roots.some((r) => X.samePath(r, path));
     const picture = t.kind === "file" && isShowablePicture(t.name);
     return [
-      { label: t.kind === "folder" ? "Open" : clip ? "Open in clip editor" : picture ? "Open in a frame" : "Open", key: "Enter", run: () => openEntry(t), off: many > 1 },
+      { label: t.kind === "folder" ? "Open" : clip ? "Open in editor" : picture ? "Open in a frame" : "Open", key: "Enter", run: () => openEntry(t), off: many > 1 },
+      ...(clip && props.onAddToEditor ? [{ label: many > 1 ? `Add ${selectedClips.length} clips to the edit` : "Add to the edit", run: () => props.onAddToEditor?.(selectedClips.length ? selectedClips.map((c) => c.path) : [clip.path]) }] : []),
       ...(clip
         ? [
             { label: "Play", run: () => props.onPlay(clip), off: many > 1 },
@@ -1066,7 +1069,7 @@ function ClipsExplorer(props: Props) {
           aria-selected={sel}
           style={{ position: "absolute", top: (first * perRow + i) * ROW_H, left: 0, right: 0, height: ROW_H, gridTemplateColumns: GRID_TEMPLATE }}
           className={cn(
-            "grid cursor-default select-none items-center gap-3 rounded px-2 text-[11px]",
+            "group grid cursor-default select-none items-center gap-3 rounded px-2 text-[11px]",
             sel ? "bg-accent/20 text-ink" : "text-ink-2 hover:bg-surface-3",
             focused && "outline outline-1 -outline-offset-1 outline-accent/60",
             dropOn === path && "ring-1 ring-accent",
@@ -1082,6 +1085,7 @@ function ClipsExplorer(props: Props) {
             {nameEl(e, path)}
             {c?.favorite && <span className="text-warn">★</span>}
             {e.kind === "file" && e.readonly && <span className="text-[9px] text-ink-4" title="Read-only">RO</span>}
+            {c && <EditBtn onClick={() => props.onOpen(c)} className="ml-auto opacity-0 group-hover:opacity-100" />}
           </span>
           <span className="truncate text-ink-3">{typeLabel}</span>
           <span className="text-ink-3">{fmtDate(date)}</span>
@@ -1124,6 +1128,7 @@ function ClipsExplorer(props: Props) {
             <>
               <span className="absolute bottom-1 right-1 rounded bg-black/70 px-1 font-mono text-[10px] text-white">{formatDuration(e.clip.duration_seconds)}</span>
               {e.clip.favorite && <span className="absolute left-1.5 top-1 text-warn drop-shadow">★</span>}
+              <EditBtn onClick={() => props.onOpen(e.clip)} className="absolute right-1.5 top-1.5 opacity-0 group-hover:opacity-100 focus:opacity-100" />
               {props.shareProgress?.has(e.clip.path) && (
                 <span className="absolute bottom-1 left-1 rounded bg-black/70 px-1 font-mono text-[10px] text-white">
                   {Math.round((props.shareProgress.get(e.clip.path) ?? 0) * 100)}%
@@ -1751,3 +1756,24 @@ function FolderPicker({ title, saveDir, dirs, onPick, onCancel }: { title: strin
 }
 
 export default memo(ClipsExplorer);
+
+/** "Open in editor" on a clip row / tile (shows on hover). */
+function EditBtn({ onClick, className }: { onClick: () => void; className?: string }) {
+  return (
+    <button
+      type="button"
+      title="Open in editor: trim, cut, crop, draw, export"
+      onClick={(ev) => {
+        ev.stopPropagation();
+        onClick();
+      }}
+      onDoubleClick={(ev) => ev.stopPropagation()}
+      className={cn("inline-flex h-5 shrink-0 items-center gap-1 rounded bg-black/70 px-1.5 text-[10px] font-semibold text-white hover:bg-accent", className)}
+    >
+      <svg viewBox="0 0 16 16" className="h-3 w-3 fill-none stroke-current" strokeWidth="1.6" strokeLinecap="round">
+        <path d="M2 14l2.5-.5 8-8-2-2-8 8zM9.5 4.5l2 2" />
+      </svg>
+      Edit
+    </button>
+  );
+}

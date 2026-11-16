@@ -15,6 +15,7 @@ pub mod clipmeta;
 pub mod files;
 pub mod commands;
 pub mod editor;
+pub mod editor_media;
 pub mod explorer_fs;
 pub mod foreground;
 pub mod frames;
@@ -402,6 +403,10 @@ pub fn run() {
             editor::media_info,
             editor::allow_media,
             editor::render_project,
+            editor_media::audio_peaks,
+            editor_media::video_thumbs,
+            editor_media::export_audio,
+            editor_media::audio_formats,
             commands::list_windows,
             recording::start_recording_source,
             recording::set_capture_source,

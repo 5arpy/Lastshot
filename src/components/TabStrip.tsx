@@ -268,9 +268,11 @@ export default function TabStrip({ tabs, active, label, windows, counts, onSelec
   const menuItems = (tab: TabId): PopMenuItem[] => {
     const items: PopMenuItem[] = [];
     const alone = tabs.length === 1;
+    // Ctrl+Shift+U (or its rebinding) undocks from the main window and docks back from the others.
+    const toggleKey = withKeys("", "global", "tab-new-window").replace(/[()]/g, "").trim() || undefined;
     items.push({
       label: "Move to a new window",
-      key: withKeys("", "global", "tab-new-window").replace(/[()]/g, "").trim() || undefined,
+      key: isMain ? toggleKey : undefined,
       off: alone,
       run: () => void shell.moveTab(tab, "new").catch((e) => onNote("Could not move the tab", String(e))),
     });
@@ -278,6 +280,7 @@ export default function TabStrip({ tabs, active, label, windows, counts, onSelec
     for (const w of elsewhere) {
       items.push({
         label: w.label === MAIN ? "Move to the main window" : `Move to: ${windowName(w)}`,
+        key: w.label === MAIN ? toggleKey : undefined,
         off: isMain && alone,
         run: () => void shell.moveTab(tab, w.label).catch((e) => onNote("Could not move the tab", String(e))),
       });

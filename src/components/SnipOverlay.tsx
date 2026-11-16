@@ -12,6 +12,7 @@ import StyleControls, { TOOLS } from "../annotate/StyleControls";
 import { type Shape, type Style, type Tool, DEFAULT_STYLE, PALETTE, align, flip, moveBy, reorder, rotateBy, shapeId } from "../annotate/shapes";
 import { History } from "../timeline/history";
 import { postToEditor } from "../editor/inbox";
+import { SNIP_TOOL_KEYS, findShortcut, snipKeymap } from "../editor/keys";
 
 /**
  * Full-screen snipping overlay. It runs in its own borderless window that
@@ -44,24 +45,8 @@ function loadStyle(): Style {
 }
 
 /** Snip keys for the drawing tools (B stays blur here; Shift+B pixelates). */
-const SNIP_KEYS: Record<string, Tool> = {
-  v: "select",
-  t: "text",
-  r: "rect",
-  e: "ellipse",
-  a: "arrow",
-  "shift+a": "line",
-  p: "pen",
-  h: "highlight",
-  u: "step",
-  b: "blur",
-  "shift+b": "pixelate",
-  k: "redact",
-  l: "spotlight",
-};
 function keyOf(t: Tool): string | undefined {
-  const k = Object.entries(SNIP_KEYS).find(([, v]) => v === t)?.[0];
-  return k ? (k.startsWith("shift+") ? `Shift+${k.slice(6).toUpperCase()}` : k.toUpperCase()) : undefined;
+  return SNIP_TOOL_KEYS.find((x) => x.tool === t)?.keys;
 }
 
 function normalize(x1: number, y1: number, x2: number, y2: number): Rect {
@@ -404,63 +389,39 @@ export default function SnipOverlay() {
         setSpace(true);
         return;
       }
-      const k = e.key.toLowerCase();
-      const ctrl = e.ctrlKey || e.metaKey;
-      const one = picked.length > 0;
-      if (ctrl && !e.shiftKey && k === "z") return done(), undo();
-      if (ctrl && (k === "y" || (e.shiftKey && k === "z"))) return done(), redo();
-      if (ctrl && !e.shiftKey && k === "c") return done(), void finish(false);
-      if (ctrl && k === "s") return done(), void finish(true);
-      if (ctrl && k === "e") return done(), void finish(true, true);
-      if (ctrl && k === "p") return done(), void popOut();
-      if (ctrl && k === "a") return done(), setPicked(shapesRef.current.map((s) => s.id));
-      if (ctrl && k === "d" && one) return done(), duplicatePicked();
-      if (ctrl && e.shiftKey && k === "l" && one) return done(), void editPicked((s) => ({ ...s, locked: !s.locked }), "Lock");
-      if (ctrl && (e.key === "]" || e.key === "}" || e.key === "[" || e.key === "{") && one) {
-        done();
-        const up = e.key === "]" || e.key === "}";
-        commitShapes(reorder(shapesRef.current, new Set(picked), e.shiftKey ? (up ? Infinity : -Infinity) : up ? 1 : -1), "once", "Order");
-        return;
-      }
-      if (ctrl && e.shiftKey && k === "r" && one) return done(), void editPicked((s) => rotateBy(s, -90), "Turn");
-      if (ctrl) return;
-      if (e.key === "Enter") {
-        const txt = shapesRef.current.find((s) => picked.includes(s.id) && s.kind === "text");
-        done();
-        if (txt) setEditing(txt.id);
-        else void finish(false);
-        return;
-      }
-      if ((e.key === "Delete" || e.key === "Backspace") && one) {
-        done();
-        const ids = new Set(picked);
-        commitShapes(shapesRef.current.filter((s) => !ids.has(s.id) || s.locked), "once", "Delete");
-        setPicked([]);
-        return;
-      }
-      if (e.key.startsWith("Arrow") && one) {
-        done();
-        const d = e.shiftKey ? 10 * scale : scale;
-        const dx = e.key === "ArrowLeft" ? -d : e.key === "ArrowRight" ? d : 0;
-        const dy = e.key === "ArrowUp" ? -d : e.key === "ArrowDown" ? d : 0;
-        editPicked((s) => moveBy(s, dx, dy), "Nudge");
-        return;
-      }
-      if (/^[0-9]$/.test(e.key) && one && !e.altKey) {
-        done();
-        const v = e.key === "0" ? 1 : Number(e.key) / 10;
-        editPicked((s) => ({ ...s, opacity: v }), "Opacity");
-        return;
-      }
-      if (e.shiftKey && k === "r" && one) return done(), void editPicked((s) => rotateBy(s, 90), "Turn");
-      if (e.shiftKey && k === "h" && one) return done(), void editPicked((s) => flip(s, "x"), "Flip");
-      if (e.shiftKey && k === "v" && one) return done(), void editPicked((s) => flip(s, "y"), "Flip");
-      if (e.altKey) return;
-      const tk = SNIP_KEYS[(e.shiftKey ? "shift+" : "") + k];
-      if (tk) {
-        done();
-        setTool(tk);
-      }
+      const one = () => picked.length > 0;
+      const list = snipKeymap({
+        undo,
+        redo,
+        copy: () => void finish(false),
+        save: () => void finish(true),
+        toEditor: () => void finish(true, true),
+        popOut: () => void popOut(),
+        selectAll: () => setPicked(shapesRef.current.map((s) => s.id)),
+        duplicate: duplicatePicked,
+        lock: () => void editPicked((s) => ({ ...s, locked: !s.locked }), "Lock"),
+        order: (dir) => commitShapes(reorder(shapesRef.current, new Set(picked), dir), "once", "Order"),
+        rotate: (deg) => void editPicked((s) => rotateBy(s, deg), "Turn"),
+        flip: (axis) => void editPicked((s) => flip(s, axis), "Flip"),
+        enter: () => {
+          const txt = shapesRef.current.find((s) => picked.includes(s.id) && s.kind === "text");
+          if (txt) setEditing(txt.id);
+          else void finish(false);
+        },
+        del: () => {
+          const ids = new Set(picked);
+          commitShapes(shapesRef.current.filter((s) => !ids.has(s.id) || s.locked), "once", "Delete");
+          setPicked([]);
+        },
+        nudge: (dx, dy) => editPicked((s) => moveBy(s, dx * scale, dy * scale), "Nudge"),
+        opacity: (v) => editPicked((s) => ({ ...s, opacity: v }), "Opacity"),
+        tool: (t) => setTool(t as Tool),
+        picked: one,
+      });
+      const hit = findShortcut(list, e);
+      if (!hit) return;
+      done();
+      hit.run();
     };
     const onUp = (e: KeyboardEvent) => {
       if (e.code === "Space") setSpace(false);

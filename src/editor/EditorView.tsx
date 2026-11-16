@@ -36,7 +36,7 @@ import { editorApi } from "./api";
 import { drawFrame } from "./compose";
 import Inspector, { type ClipActions } from "./Inspector";
 import { ItemContent, TrackHeader, itemTone, type FxEdit } from "./ItemContent";
-import { editorKeymap, runShortcut, tip, type EditorActions, type Shortcut } from "./keys";
+import { editorKeymap, runShortcut, tip, withIds, type EditorActions, type Shortcut } from "./keys";
 import MediaBin, { DRAG_TYPE } from "./MediaBin";
 import { media } from "./media";
 import { type EditorRequest, onEditorRequest, takeEditorRequests } from "./inbox";
@@ -218,7 +218,6 @@ export default function EditorView(props: EditorProps) {
   const [tlHeight, setTlHeight] = usePersist<number>("tlh", 300);
   const [menu, setMenu] = useState<{ at: { x: number; y: number }; items: MenuItem[] } | null>(null);
   const [ask, setAsk] = useState<Ask | null>(null);
-  const [help, setHelp] = useState(false);
   const [busy, setBusy] = useState<{ label: string; p: number | null } | null>(null);
   const [ghost, setGhost] = useState<{ track: string; start: number; duration: number; label: string } | null>(null);
   const [belowHint, setBelowHint] = useState<string | null>(null);
@@ -1048,15 +1047,14 @@ export default function EditorView(props: EditorProps) {
   actRef.current = actions;
   const keymap: Shortcut[] = useMemo(() => {
     const a = new Proxy({} as EditorActions, { get: (_t, k) => (...args: unknown[]) => (actRef.current[k as keyof EditorActions] as (...x: unknown[]) => unknown)(...args) });
-    const extra: Shortcut[] = [
+    const extra: Omit<Shortcut, "id">[] = [
       { keys: "X", label: "Cut out in → out (closes the gap)", group: "Range", run: () => cutRange(false) },
       { keys: "Shift+X", label: "Keep only in → out", group: "Range", run: () => cutRange(true) },
       { keys: "Ctrl+Shift+C", label: "Copy the frame as a picture", group: "File", run: () => void snapshot("copy") },
-      { keys: "?", label: "Show all shortcuts", group: "Help", run: () => setHelp((h) => !h) },
-      { keys: "F1", label: "Show all shortcuts", group: "Help", run: () => setHelp((h) => !h) },
-      { keys: "Ctrl+Shift+P", label: "Find and run any action", group: "Help", run: () => setHelp(true) },
     ];
-    return [...editorKeymap(a), ...extra];
+    // The palette (Ctrl+Shift+P) and cheat sheet (F1, ?) are app-wide; this
+    // list joins them as scope "editor" when the shell's registry lands.
+    return withIds("editor", [...editorKeymap(a), ...extra]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const k = (label: string, text?: string) => tip(keymap, label, text);
@@ -1074,19 +1072,12 @@ export default function EditorView(props: EditorProps) {
   useEffect(() => {
     if (!active) return;
     const onKey = (e: KeyboardEvent) => {
-      if (menu || ask || editing) return;
-      if (help && e.key === "Escape") return setHelp(false);
-      if (!help && covered()) return;
-      // "?" arrives as Shift+/ on most layouts.
-      if (e.key === "?" && !(e.target as HTMLElement)?.closest?.("input,textarea,select")) {
-        e.preventDefault();
-        return setHelp((h) => !h);
-      }
+      if (menu || ask || editing || covered()) return;
       runShortcut(keymap, e);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [active, keymap, menu, ask, editing, help]);
+  }, [active, keymap, menu, ask, editing]);
 
   // ------------------------------------------------------------ menus
   const projectsMenu = (e: React.MouseEvent) => {
@@ -1411,9 +1402,6 @@ export default function EditorView(props: EditorProps) {
           <Ico d={I.exportI} /> Export ▾
         </Btn>
         <Sep />
-        <Btn title="Keyboard shortcuts (?)" onClick={() => setHelp(true)}>
-          <Ico d={I.keyboard} />
-        </Btn>
         <Btn title={showInsp ? "Hide settings" : "Show settings"} on={showInsp} onClick={() => setShowInsp(!showInsp)}>
           <Ico d={I.panel} />
         </Btn>
@@ -1635,7 +1623,6 @@ export default function EditorView(props: EditorProps) {
 
       {menu && <Menu at={menu.at} items={menu.items} onClose={() => setMenu(null)} />}
       {ask && <AskDialog ask={ask} onClose={() => setAsk(null)} />}
-      {help && <KeysHelp list={keymap} onClose={() => setHelp(false)} />}
     </div>
   );
 }
@@ -1829,72 +1816,6 @@ function AskDialog({ ask, onClose }: { ask: Ask; onClose: () => void }) {
           <button type="button" autoFocus={ask.field === undefined} onClick={ok} className={cn("rounded-md px-3 py-1.5 text-[12px] font-semibold text-white", ask.danger ? "bg-red-600 hover:bg-red-500" : "bg-accent hover:bg-accent-hover")}>
             {ask.ok}
           </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function KeysHelp({ list, onClose }: { list: Shortcut[]; onClose: () => void }) {
-  // Also a command palette: type to find an action, Enter or a click runs it.
-  const [q, setQ] = useState("");
-  const words = q.toLowerCase().split(/\s+/).filter(Boolean);
-  const groups = new Map<string, Map<string, { keys: string[]; s: Shortcut }>>();
-  for (const s of list) {
-    const label = /^Opacity/.test(s.label) ? "Opacity (10 % - 100 %)" : s.label;
-    const hay = `${label} ${s.keys} ${s.group ?? ""}`.toLowerCase();
-    if (words.length && !words.every((w) => hay.includes(w))) continue;
-    const g = groups.get(s.group ?? "Other") ?? new Map<string, { keys: string[]; s: Shortcut }>();
-    const row = g.get(label) ?? { keys: [], s };
-    if (!/^[0-9]$/.test(s.keys) || s.keys === "1") row.keys.push(/^[0-9]$/.test(s.keys) ? "0-9" : s.keys.replace("Arrow", ""));
-    g.set(label, row);
-    groups.set(s.group ?? "Other", g);
-  }
-  const rows = [...groups.values()].flatMap((g) => [...g.values()]);
-  const run = (s: Shortcut) => {
-    onClose();
-    if (!s.when || s.when()) window.setTimeout(() => s.run(), 0);
-  };
-  return (
-    <div className="fixed inset-0 z-[90] grid place-items-center bg-black/50" onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="flex max-h-[85vh] w-[min(920px,94vw)] flex-col rounded-xl border border-line-2 bg-surface p-5 shadow-2xl">
-        <div className="mb-3 flex items-center gap-3">
-          <div className="text-[14px] font-semibold text-ink">Editor shortcuts</div>
-          <input
-            autoFocus
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            onKeyDown={(e) => {
-              e.stopPropagation();
-              if (e.key === "Escape") onClose();
-              if (e.key === "Enter" && rows[0]) run(rows[0].s);
-            }}
-            placeholder="Find an action… (Enter runs the first)"
-            title="Search every action; Enter runs the first match"
-            className="h-7 min-w-0 flex-1 rounded-md border border-line bg-surface-2 px-2 text-[12px] text-ink placeholder:text-ink-4 focus:border-accent focus:outline-none"
-          />
-          <button type="button" onClick={onClose} className="text-ink-3 hover:text-ink" title="Close (Esc)">
-            <Ico d={I.close} />
-          </button>
-        </div>
-        <div className="min-h-0 columns-1 gap-6 overflow-y-auto sm:columns-2 lg:columns-3">
-          {!rows.length && <div className="text-[12px] text-ink-3">Nothing matches.</div>}
-          {[...groups].map(([g, items]) => (
-            <div key={g} className="mb-4 break-inside-avoid">
-              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-ink-3">{g}</div>
-              {[...items].map(([label, { keys, s }]) => (
-                <button
-                  type="button"
-                  key={label}
-                  onClick={() => run(s)}
-                  className="flex w-full items-baseline justify-between gap-3 rounded px-1 py-0.5 text-left text-[11.5px] hover:bg-surface-3"
-                >
-                  <span className="text-ink-2">{label}</span>
-                  <span className="shrink-0 text-right font-mono text-[10.5px] text-ink-4">{[...new Set(keys)].join(" · ")}</span>
-                </button>
-              ))}
-            </div>
-          ))}
         </div>
       </div>
     </div>

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { type EdItem, type EdProject, DEFAULT_FX, effectiveAudio, exportRange, exportRoute, mainTrack, newProject, outputSize, tracksOf } from "./project";
-import { editorKeymap, keyName, normKeys, type EditorActions } from "./keys";
+import { RESERVED_KEYS, editorKeymap, keyName, normKeys, runShortcut, snipKeymap, type EditorActions, type Shortcut, type SnipActions } from "./keys";
 import { migrate } from "./store";
 import { placement, placedBox } from "./compose";
 import { flip, moveBy, resize, rotateTo, type Shape } from "../annotate/shapes";
@@ -128,16 +128,51 @@ describe("keys", () => {
     expect(keyName(ev(" "))).toBe("Space");
     expect(normKeys("shift+ctrl+z")).toBe("Ctrl+Shift+Z");
   });
+  const noop = () => undefined;
+  const scopes: [string, Shortcut[]][] = [
+    ["editor", editorKeymap(new Proxy({} as EditorActions, { get: () => noop }))],
+    ["snip", snipKeymap(new Proxy({} as SnipActions, { get: () => noop }))],
+  ];
   it("has no two unconditional bindings on one key", () => {
-    const noop = () => undefined;
-    const a = new Proxy({} as EditorActions, { get: () => noop });
-    const seen = new Map<string, string>();
-    for (const s of editorKeymap(a)) {
-      if (s.when) continue;
-      const k = normKeys(s.keys);
-      if (seen.has(k)) expect(`${k}: ${seen.get(k)}`).toBe(`${k}: ${s.label}`);
-      seen.set(k, s.label);
+    for (const [, list] of scopes) {
+      const seen = new Map<string, string>();
+      for (const s of list) {
+        if (s.when) continue;
+        const k = normKeys(s.keys);
+        if (seen.has(k)) expect(`${k}: ${seen.get(k)}`).toBe(`${k}: ${s.label}`);
+        seen.set(k, s.label);
+      }
     }
+  });
+  it("never binds an app-wide reserved key in a tab scope", () => {
+    const reserved = new Set(RESERVED_KEYS.map(normKeys));
+    for (const [scope, list] of scopes) for (const s of list) expect(reserved.has(normKeys(s.keys)), `${scope}: ${s.keys} (${s.label})`).toBe(false);
+    // The reserved set itself, as key presses arrive.
+    const ev = (key: string, m: Partial<KeyboardEvent> = {}) => ({ key, ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, ...m }) as KeyboardEvent;
+    for (const e of [ev("P", { ctrlKey: true, shiftKey: true }), ev("F1"), ev("?", { shiftKey: true }), ev("Tab", { ctrlKey: true }), ev("PageDown", { ctrlKey: true })]) {
+      expect(reserved.has(keyName(e)), keyName(e)).toBe(true);
+    }
+  });
+  it("is a plain list with stable, unique ids per scope", () => {
+    for (const [scope, list] of scopes) {
+      const ids = list.map((s) => s.id);
+      expect(new Set(ids).size).toBe(ids.length);
+      for (const s of list) {
+        expect(s.id.startsWith(`${scope}.`)).toBe(true);
+        expect(typeof s.run).toBe("function");
+        expect(s.label.length).toBeGreaterThan(0);
+      }
+    }
+    expect(scopes[0][1].find((s) => s.keys === "Ctrl+K")?.label).toBe("Split at playhead");
+  });
+  it("runs \"+\" (zoom in)", () => {
+    let zoomed = 0;
+    const list = editorKeymap(new Proxy({} as EditorActions, { get: (_t, k) => (k === "zoom" ? () => (zoomed += 1) : noop) }));
+    const e = { key: "+", ctrlKey: false, metaKey: false, altKey: false, shiftKey: true, target: null, preventDefault: noop } as unknown as KeyboardEvent;
+    expect(normKeys("+")).toBe("+");
+    expect(normKeys("Ctrl++")).toBe("Ctrl++");
+    expect(runShortcut(list, e)).toBe(true);
+    expect(zoomed).toBe(1);
   });
 });
 

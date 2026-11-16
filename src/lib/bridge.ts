@@ -781,6 +781,19 @@ export const lastshot = {
     if (isTauri()) return invoke<T[] | null>("get_studio_layers");
     return null;
   },
+  async getScenes<T>(): Promise<T> {
+    if (isTauri()) return invoke<T>("get_scenes");
+    return { active: null, scenes: [] } as T;
+  },
+  async saveScenes<T>(scenes: T): Promise<T> {
+    if (isTauri()) return invoke<T>("save_scenes", { scenes });
+    return scenes;
+  },
+  /** Switches scene; resolves to a note when the source could not change. */
+  async switchScene(id: string): Promise<string | null> {
+    if (isTauri()) return invoke<string | null>("switch_scene", { id });
+    return null;
+  },
   async listCameras(): Promise<CameraInfo[]> {
     if (isTauri()) return invoke<CameraInfo[]>("list_cameras");
     return [];

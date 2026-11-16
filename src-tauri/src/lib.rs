@@ -18,6 +18,7 @@ pub mod paths;
 pub mod popout;
 pub mod power;
 pub mod recording;
+pub mod scenes;
 pub mod settings;
 pub mod share;
 pub mod snip;
@@ -379,6 +380,9 @@ pub fn run() {
             library_ops::rename_library_item,
             library_ops::recycle_items,
             startup::crash_for_test,
+            scenes::get_scenes,
+            scenes::save_scenes,
+            scenes::switch_scene,
             snip::snip_cancel,
             snip::open_screenshots_folder,
             audio_routing::vm_status,

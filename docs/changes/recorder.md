@@ -16,6 +16,8 @@ Lines for the next release notes, written by the recorder work. Merge them into
 - **Organise clips.** Select with click, Ctrl+click, Shift+click, Ctrl+A or by dragging a box. *New folder*, *Rename* (F2), *Move to…*, drag clips onto a folder (hold Ctrl to copy), cut / copy / paste (Ctrl+X / Ctrl+C / Ctrl+V), *Show in File Explorer* and *Copy for Discord*, also from the right-click menu. Nothing is ever overwritten: a name that is taken gets "(2)".
 - The library updates by itself when clips are added, removed or renamed in File Explorer.
 - **Always on, in the tray.** With *Launch at startup* on, Lastshot now starts with Windows straight into the tray, with the replay buffer armed and no window (the window is only made when you open it, so it uses less memory). If Lastshot crashes, it starts again by itself (after 2 s, 10 s, then 30 s; it stops trying after three crashes in a row), and Windows starts it again after an update restart. A normal Quit is never undone. Starting it a second time never opens a second copy.
+- **Scenes in Studio.** Save what you record plus its layers as a scene (*+ Scene*), then switch with one click; double-click to rename. Changes you make go into the scene that is on. Switching between scenes of the same source only swaps the layers, instantly and without losing the replay, also while recording. A scene with another source changes what is recorded (the replay starts again; not while recording).
+- **Crop pictures and the webcam** in Studio (left, right, top, bottom).
 
 ### Changed
 

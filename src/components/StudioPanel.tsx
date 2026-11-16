@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { assetUrl, isTauri, lastshot } from "../lib/bridge";
 import type { AppSettings, BarState, CameraInfo, MonitorInfo, ScreenShot, WindowMethod } from "../lib/types";
-import { type Layer, type LayerKind, loadLayers, newLayer, restack, saveLayers } from "../lib/studio";
+import { type Layer, type LayerKind, type Scene, type Scenes, loadLayers, newLayer, nextSceneName, restack, saveLayers, sceneFrom } from "../lib/studio";
 import { LayerView, useRecordingSeconds } from "./StudioLayers";
 import { clockTime } from "./ControlBar";
 import { cn } from "../utils/cn";
@@ -40,6 +40,8 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
   const [live, setLive] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [picking, setPicking] = useState(false);
+  const [scenes, setScenes] = useState<Scenes>({ active: null, scenes: [] });
+  const [renamingScene, setRenamingScene] = useState<string | null>(null);
   const secs = useRecordingSeconds();
   const previewRef = useRef<HTMLDivElement | null>(null);
 
@@ -66,6 +68,49 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
     // First load only.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Scenes: what to record + layers, one click to switch.
+  useEffect(() => {
+    void lastshot
+      .getScenes<Scenes>()
+      .then(setScenes)
+      .catch(() => undefined);
+  }, []);
+  const storeScenes = (next: Scenes) => {
+    setScenes(next);
+    void lastshot
+      .saveScenes(next)
+      .then(setScenes)
+      .catch((e) => onToast("err", "Could not save scenes", String(e)));
+  };
+  const addScene = () => {
+    const sc = sceneFrom(nextSceneName(scenes.scenes), settings.captureSource ?? { kind: "display" }, layers);
+    storeScenes({ active: sc.id, scenes: [...scenes.scenes, sc] });
+  };
+  const switchTo = async (sc: Scene) => {
+    try {
+      const note = await lastshot.switchScene(sc.id);
+      setLayers(sc.layers);
+      saveLayers(sc.layers);
+      setScenes((s) => ({ ...s, active: sc.id }));
+      if (sc.source && !note) onPatch({ captureSource: sc.source });
+      if (note) onToast("warn", `Switched to ${sc.name}, same source`, note);
+    } catch (e) {
+      onToast("err", "Could not switch scene", String(e));
+    }
+  };
+  // Edits go into the active scene too.
+  const activeScene = scenes.scenes.find((s) => s.id === scenes.active) ?? null;
+  useEffect(() => {
+    if (!activeScene) return;
+    const src = settings.captureSource ?? { kind: "display" as const };
+    if (JSON.stringify(activeScene.layers) === JSON.stringify(layers) && JSON.stringify(activeScene.source) === JSON.stringify(src)) return;
+    const t = window.setTimeout(() => {
+      storeScenes({ ...scenes, scenes: scenes.scenes.map((s) => (s.id === activeScene.id ? { ...s, layers, source: src } : s)) });
+    }, 600);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layers, settings.captureSource, activeScene?.id]);
 
   // Live preview from the engine (what is being encoded), ~8 times a second
   // while Studio is on screen. Falls back to a still picture of the screen.
@@ -233,6 +278,60 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
             </button>
           </div>
         )}
+      </div>
+
+      {/* Scenes */}
+      <div className="panel flex flex-wrap items-center gap-1.5 rounded-xl px-3 py-2" data-testid="scenes">
+        <span className="mr-1 text-[12px] font-semibold text-ink" title="A scene is what to record plus its layers. Click one to switch; changes you make go into the scene that is on.">
+          Scenes
+        </span>
+        {scenes.scenes.length === 0 && <span className="text-[11px] text-ink-3">Save what you have now as a scene to switch between setups in one click.</span>}
+        {scenes.scenes.map((sc) =>
+          renamingScene === sc.id ? (
+            <input
+              key={sc.id}
+              autoFocus
+              defaultValue={sc.name}
+              onFocus={(e) => e.currentTarget.select()}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") e.currentTarget.blur();
+                if (e.key === "Escape") setRenamingScene(null);
+              }}
+              onBlur={(e) => {
+                const name = e.currentTarget.value.trim();
+                setRenamingScene(null);
+                if (name && name !== sc.name) storeScenes({ ...scenes, scenes: scenes.scenes.map((s) => (s.id === sc.id ? { ...s, name } : s)) });
+              }}
+              className="w-28 rounded-md border border-accent bg-app px-2 py-1 text-[11px] text-ink outline-none"
+            />
+          ) : (
+            <span key={sc.id} className="group relative">
+              <button
+                type="button"
+                onClick={() => void switchTo(sc)}
+                onDoubleClick={() => setRenamingScene(sc.id)}
+                title={`${sc.name}: ${sourceLabel(sc.source ?? settings.captureSource)}, ${sc.layers.length} layer${sc.layers.length === 1 ? "" : "s"}. Double-click to rename.`}
+                className={cn(
+                  "rounded-md border px-2.5 py-1 text-[11px] font-semibold",
+                  scenes.active === sc.id ? "border-accent bg-accent/15 text-accent-fg" : "border-line bg-surface text-ink-2 hover:border-line-3",
+                )}
+              >
+                {sc.name}
+              </button>
+              <button
+                type="button"
+                title={`Remove ${sc.name}`}
+                onClick={() => storeScenes({ active: scenes.active === sc.id ? null : scenes.active, scenes: scenes.scenes.filter((s) => s.id !== sc.id) })}
+                className="absolute -right-1.5 -top-1.5 hidden h-4 w-4 place-items-center rounded-full bg-surface-4 text-[9px] text-ink-3 hover:text-danger group-hover:grid"
+              >
+                ✕
+              </button>
+            </span>
+          ),
+        )}
+        <button type="button" onClick={addScene} className="rounded-md border border-dashed border-line px-2.5 py-1 text-[11px] text-ink-3 hover:border-accent hover:text-ink">
+          + Scene
+        </button>
       </div>
 
       <div className="grid gap-4 xl:grid-cols-[230px_minmax(0,1fr)_270px]">
@@ -417,6 +516,22 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
                   <label className="flex items-center gap-1.5">
                     <input type="checkbox" checked={!!sel.border} onChange={(e) => patchLayer(sel.id, { border: e.target.checked })} /> Border
                   </label>
+                )}
+                {(sel.kind === "image" || sel.kind === "webcam") && (
+                  <div className="grid grid-cols-2 gap-x-2">
+                    {(["cropLeft", "cropRight", "cropTop", "cropBottom"] as const).map((k) => (
+                      <Slider
+                        key={k}
+                        label={`Crop ${k.slice(4).toLowerCase()}`}
+                        value={(sel[k] ?? 0) * 100}
+                        min={0}
+                        max={45}
+                        step={1}
+                        suffix="%"
+                        onChange={(v) => patchLayer(sel.id, { [k]: v / 100 })}
+                      />
+                    ))}
+                  </div>
                 )}
                 <Slider label="Opacity" value={sel.opacity * 100} min={5} max={100} step={1} suffix="%" onChange={(v) => patchLayer(sel.id, { opacity: v / 100 })} />
               </>

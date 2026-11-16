@@ -39,6 +39,12 @@ pub fn validate(accelerator: &str) -> Result<Shortcut, String> {
     Ok(sc)
 }
 
+/// Test copies (LASTSHOT_TEST_INSTANCE=1) register no global shortcuts, so a
+/// running test never takes Alt+C etc. from the user's own Lastshot.
+fn test_instance() -> bool {
+    std::env::var("LASTSHOT_TEST_INSTANCE").as_deref() == Ok("1")
+}
+
 /// Registers the save, arm/disarm and snip shortcuts. Called once from `setup`.
 pub fn register_all(
     app: &AppHandle,
@@ -47,6 +53,9 @@ pub fn register_all(
     snip: &str,
     record: &str,
 ) -> Result<(), String> {
+    if test_instance() {
+        return Ok(()); // test copies leave the user's shortcuts alone
+    }
     let gs = app.global_shortcut();
     let save_sc = validate(save)?;
     let toggle_sc = validate(toggle)?;
@@ -76,6 +85,9 @@ pub fn register_all(
 /// matters: registering first means a failed rebind (e.g. another app owns the
 /// combo) leaves the previous hotkey intact instead of disabling it.
 pub fn rebind(app: &AppHandle, previous: &str, next: &str) -> Result<(), String> {
+    if test_instance() {
+        return validate(next).map(|_| ()); // test copies register nothing
+    }
     let gs = app.global_shortcut();
     let sc = validate(next)?;
     let prev_sc = parse(previous).ok();

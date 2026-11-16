@@ -8,6 +8,7 @@
  * frame without React re-rendering the editor.
  */
 import { end } from "../timeline/model";
+import { endRoom } from "../timeline/view";
 import { type EdItem, type EdProject, effectiveAudio, kindOf, pictureTracks } from "./project";
 import { media } from "./media";
 
@@ -64,8 +65,9 @@ export class Player {
     return e;
   }
 
+  /** Past the last clip is allowed (the room after the end shows black). */
   seek(t: number) {
-    this.time = Math.max(0, Math.min(this.length(), t));
+    this.time = Math.max(0, Math.min(endRoom(this.length()), t));
     this.sync(true);
     this.emit();
   }

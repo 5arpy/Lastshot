@@ -1,8 +1,8 @@
 import { type ReactNode, type Ref, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { EPS, type Item, type Marker, type Timeline, type Track, end, timelineEnd, withLinked } from "./model";
-import { type EditOpts, type Move, type PlaceMode, itemsInBox, moveItems, patchMarker, rollEdit, slipItem, splitAt, trimItem } from "./ops";
+import { EPS, type Item, type Marker, type Timeline, type Track, end, newId, timelineEnd, withLinked } from "./model";
+import { type EditOpts, type Move, type PlaceMode, itemsInBox, moveItems, patchMarker, place, rollEdit, slipItem, splitAt, trimItem } from "./ops";
 import { nearest, snapPoints, snapSpan } from "./snap";
-import { type TlView, rulerLabel, tickStep, timeToX, xToTime, zoomAt } from "./view";
+import { type TlView, edgeNear, edgePx, endRoom, rulerLabel, tickStep, timeToX, viewOfSpan, xToTime, zoomAt } from "./view";
 
 /**
  * Timeline engine: the view. Generic over the item type, so the audio editor
@@ -13,6 +13,12 @@ import { type TlView, rulerLabel, tickStep, timeToX, xToTime, zoomAt } from "./v
  * Performance: only items in view are rendered (and cut to the view, so a
  * 30-minute clip at frame zoom is still one small element); the playhead and
  * time follow the clock without re-rendering.
+ *
+ * Navigation: an overview strip on top (drag = scroll, box edges or a
+ * vertical / Ctrl drag = zoom), the ruler (drag = scrub, Ctrl+drag = zoom),
+ * wheel = scroll, Ctrl / Alt / Z + wheel = zoom at the pointer, Shift+wheel =
+ * tracks up and down, Ctrl+Shift+wheel = track height, middle drag = pan,
+ * and the view scrolls by itself when a drag reaches its edge.
  */
 
 export type EditPhase = "start" | "live" | "end" | "once" | "cancel";
@@ -47,6 +53,14 @@ export interface TimelineApi {
   lanesWidth: () => number;
 }
 
+/** Where a right-click landed. */
+export interface ContextHit<I> {
+  item?: I;
+  track: Track | null;
+  t: number;
+  area: "lanes" | "ruler" | "header";
+}
+
 export interface TimelineViewProps<I extends Item> {
   tl: Timeline<I>;
   clock: Clock;
@@ -66,7 +80,11 @@ export interface TimelineViewProps<I extends Item> {
   renderItem: (item: I, g: ItemGeom, selected: boolean) => ReactNode;
   itemClass: (item: I, selected: boolean) => string;
   renderHeader: (track: Track) => ReactNode;
-  onContext?: (e: React.MouseEvent, hit: { item?: I; track: Track | null; t: number }) => void;
+  onContext?: (e: React.MouseEvent, hit: ContextHit<I>) => void;
+  /** A copy of `it` under a new id (Alt+drag); default: the item with the id swapped. */
+  cloneItem?: (it: I, id: string) => I;
+  /** A track's row height changed (border drag, Ctrl+Shift+wheel). */
+  onTrackHeight?: (track: Track, h: number) => void;
   onItemDoubleClick?: (item: I) => void;
   onGap?: (gap: { track: string; t: number } | null) => void;
   gap?: { track: string; t: number; start: number; end: number } | null;
@@ -80,17 +98,45 @@ export interface TimelineViewProps<I extends Item> {
   apiRef?: Ref<TimelineApi>;
 }
 
-const EDGE_PX = 7;
 const SNAP_PX = 9;
 const RULER_H = 26;
+const OVERVIEW_H = 14;
+/** Drags this close to the lanes' side scroll the view. */
+const AUTO_PX = 28;
+const MIN_TRACK_H = 24;
+const MAX_TRACK_H = 160;
+
+/** What a pointer move needs (a real event, or the last one again while auto-scrolling). */
+interface Ptr {
+  clientX: number;
+  clientY: number;
+  shiftKey: boolean;
+  ctrlKey: boolean;
+  altKey: boolean;
+  target: EventTarget | null;
+}
 
 type Drag =
-  | { kind: "move"; x0: number; y0: number; t0: number; orig: Timeline<Item>; ids: string[]; anchor: Item; moved: boolean; trackIdx0: number }
+  | {
+      kind: "move";
+      x0: number;
+      y0: number;
+      t0: number;
+      orig: Timeline<Item>;
+      ids: string[];
+      anchor: Item;
+      moved: boolean;
+      trackIdx0: number;
+      /** Alt at the start: copies move, the originals stay. */
+      dup: Map<string, string> | null;
+    }
   | { kind: "trim"; orig: Timeline<Item>; id: string; edge: "left" | "right"; moved: boolean; roll: boolean }
   | { kind: "slip"; orig: Timeline<Item>; id: string; t0: number; moved: boolean }
   | { kind: "marquee"; x0: number; y0: number; add: boolean; before: Set<string>; moved: boolean; t: number; track: Track | null }
   | { kind: "scrub" }
-  | { kind: "marker"; id: string; orig: Timeline<Item>; moved: boolean };
+  | { kind: "marker"; id: string; orig: Timeline<Item>; moved: boolean }
+  | { kind: "pan"; x: number; y: number; scroll: number; top: number }
+  | { kind: "rzoom"; x0: number; y0: number; view: TlView; anchor: number };
 
 export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
   const HEAD = p.headerWidth ?? 148;
@@ -132,7 +178,8 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
   const rowsH = rows.length ? rows[rows.length - 1].y + rows[rows.length - 1].h : 0;
 
   const length = timelineEnd(p.tl);
-  const span = Math.max(length * 1.15 + 5, v.scroll + width / v.pxPerSec);
+  // Everything the view can show: the edit plus room after it.
+  const span = Math.max(endRoom(length), v.scroll + width / v.pxPerSec);
 
   // ------------------------------------------------------------ geometry
   const laneX = (clientX: number) => clientX - (lanesRef.current?.getBoundingClientRect().left ?? 0);
@@ -213,13 +260,42 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
   }, [v, width, p.tl.inPoint, p.tl.outPoint, length, p.fps]);
 
   // ------------------------------------------------------------ wheel: zoom and scroll
+  // Z held (like a zoom tool): the wheel zooms.
+  const zHeld = useRef(false);
+  useEffect(() => {
+    const typing = (t: EventTarget | null) => !!(t as HTMLElement | null)?.closest?.("input,textarea,select,[contenteditable=true]");
+    const down = (e: KeyboardEvent) => {
+      if ((e.key === "z" || e.key === "Z") && !e.ctrlKey && !e.metaKey && !e.altKey && !typing(e.target)) zHeld.current = true;
+    };
+    const up = (e: KeyboardEvent) => {
+      if (e.key === "z" || e.key === "Z") zHeld.current = false;
+    };
+    const blur = () => (zHeld.current = false);
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup", up);
+    window.addEventListener("blur", blur);
+    return () => {
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
+      window.removeEventListener("blur", blur);
+    };
+  }, []);
   useEffect(() => {
     const el = rootRef.current;
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
       const P = pRef.current;
       const overHeaders = e.clientX - el.getBoundingClientRect().left < HEAD;
-      if (e.ctrlKey || e.altKey) {
+      if (e.ctrlKey && e.shiftKey) {
+        // Taller / shorter track under the pointer.
+        const { track } = rowAt(e.clientY);
+        if (!track || !P.onTrackHeight) return;
+        e.preventDefault();
+        const h = P.trackHeight(track);
+        P.onTrackHeight(track, Math.round(Math.min(MAX_TRACK_H, Math.max(MIN_TRACK_H, h * Math.exp(-e.deltaY * 0.002)))));
+        return;
+      }
+      if (e.ctrlKey || e.altKey || zHeld.current) {
         e.preventDefault();
         const f = Math.exp(-e.deltaY * 0.0022);
         P.onView(zoomAt(P.view, f, Math.max(0, laneX(e.clientX))));
@@ -235,7 +311,7 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [HEAD]);
+  }, [HEAD, rows]);
 
   // ------------------------------------------------------------ snapping
   const snapThreshold = () => SNAP_PX / pRef.current.view.pxPerSec;
@@ -248,20 +324,49 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
     return pRef.current.tl.items.find((i) => i.id === el.dataset.item) ?? null;
   };
 
-  const edgeOf = (it: I, clientX: number): "left" | "right" | null => {
-    const x = laneX(clientX);
-    const a = timeToX(v, it.start);
-    const b = timeToX(v, end(it));
-    if (b - a < EDGE_PX * 3) return Math.abs(x - b) < EDGE_PX ? "right" : null;
-    if (Math.abs(x - a) <= EDGE_PX) return "left";
-    if (Math.abs(x - b) <= EDGE_PX) return "right";
-    return null;
+  /** The trim handle under the pointer: an edge of a clip on that row, inside or just outside it. */
+  const edgeAt = (clientX: number, clientY: number): { item: I; edge: "left" | "right"; t: number } | null => {
+    const P = pRef.current;
+    const { track } = rowAt(clientY);
+    if (!track || track.locked) return null;
+    const tol = edgePx(P.view.pxPerSec) / P.view.pxPerSec;
+    return edgeNear(P.tl.items.filter((i) => i.track === track.id), xToTime(P.view, laneX(clientX)), tol);
   };
 
+  // ------------------------------------------------------------ auto-scroll at the sides while dragging
+  const lastPtr = useRef<Ptr | null>(null);
+  const autoRaf = useRef(0);
+  const autoScroll = () => {
+    cancelAnimationFrame(autoRaf.current);
+    const step = () => {
+      const P = pRef.current;
+      const ptr = lastPtr.current;
+      const d = drag.current;
+      const lanes = lanesRef.current;
+      if (!ptr || !d || !lanes || (d.kind !== "move" && d.kind !== "trim" && d.kind !== "marquee" && d.kind !== "scrub")) return;
+      const r = lanes.getBoundingClientRect();
+      const x = ptr.clientX - r.left;
+      const push = x < AUTO_PX ? x - AUTO_PX : x > r.width - AUTO_PX ? x - (r.width - AUTO_PX) : 0;
+      if (!push || (push < 0 && P.view.scroll <= 0)) return;
+      // Faster the further out, up to ~half a screen a second.
+      const px = Math.max(-24, Math.min(24, push * 0.4));
+      P.onView({ ...P.view, scroll: Math.max(0, P.view.scroll + px / P.view.pxPerSec) });
+      requestAnimationFrame(() => {
+        if (d.kind === "scrub") P.clock.seek(timeAt(ptr.clientX));
+        else laneMove(ptr);
+      });
+      autoRaf.current = requestAnimationFrame(step);
+    };
+    autoRaf.current = requestAnimationFrame(step);
+  };
+  useEffect(() => () => cancelAnimationFrame(autoRaf.current), []);
+
   const onLaneDown = (e: React.PointerEvent) => {
+    if (e.button === 1) return startPan(e);
     if (e.button !== 0) return;
     const P = pRef.current;
-    const it = itemOf(e.target);
+    const hitEdge = P.tool === "select" ? edgeAt(e.clientX, e.clientY) : null;
+    const it = hitEdge?.item ?? itemOf(e.target);
     const t = timeAt(e.clientX);
     const { track } = rowAt(e.clientY);
     P.onGap?.(null);
@@ -274,7 +379,7 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
     }
     if (it) {
       const locked = P.tl.tracks.find((x) => x.id === it.track)?.locked;
-      const edge = locked ? null : edgeOf(it, e.clientX);
+      const edge = locked ? null : hitEdge?.item.id === it.id ? hitEdge.edge : null;
       let sel = new Set(P.selection);
       const group = e.altKey ? new Set([it.id]) : withLinked(P.tl, [it.id]);
       if (e.ctrlKey) {
@@ -307,22 +412,32 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
           anchor: it,
           moved: false,
           trackIdx0: P.tl.tracks.findIndex((x) => x.id === it.track),
+          dup: e.altKey ? new Map() : null,
         };
       }
     } else {
       drag.current = { kind: "marquee", x0: e.clientX, y0: e.clientY, add: e.ctrlKey || e.shiftKey, before: new Set(P.selection), moved: false, t, track };
     }
+    lastPtr.current = e;
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
   };
 
   const onLaneMove = (e: React.PointerEvent) => {
-    const P = pRef.current;
     const d = drag.current;
     if (!d) {
-      const it = itemOf(e.target);
-      setHoverEdge(!!it && P.tool === "select" && !!edgeOf(it, e.clientX));
+      setHoverEdge(pRef.current.tool === "select" && !!edgeAt(e.clientX, e.clientY));
       return;
     }
+    if (d.kind === "pan") return panMove(e);
+    lastPtr.current = { clientX: e.clientX, clientY: e.clientY, shiftKey: e.shiftKey, ctrlKey: e.ctrlKey, altKey: e.altKey, target: e.target };
+    laneMove(lastPtr.current);
+    autoScroll();
+  };
+
+  const laneMove = (e: Ptr) => {
+    const P = pRef.current;
+    const d = drag.current;
+    if (!d) return;
     if (d.kind === "move") {
       if (!d.moved && Math.hypot(e.clientX - d.x0, e.clientY - d.y0) < 4) return;
       if (!d.moved) {
@@ -331,11 +446,12 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
       }
       const orig = d.orig as Timeline<I>;
       const items = d.ids.map((id) => orig.items.find((i) => i.id === id)!).filter(Boolean);
-      let dt = timeAt(e.clientX) - d.t0;
+      // Shift: keep the time, change only the track.
+      let dt = e.shiftKey ? 0 : timeAt(e.clientX) - d.t0;
       const minStart = Math.min(...items.map((i) => i.start));
       dt = Math.max(dt, -minStart);
       let at: number | null = null;
-      if (P.snapping !== e.shiftKey) {
+      if (P.snapping && !e.shiftKey) {
         const maxEnd = Math.max(...items.map((i) => end(i)));
         const s = snapSpan(points(new Set(d.ids)), minStart + dt, maxEnd + dt, snapThreshold());
         if (s.at !== null && minStart + dt + s.shift >= -EPS) {
@@ -351,9 +467,27 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
       if (dIdx !== 0 && !items.every((i) => target(i) && !target(i).locked && P.accepts(target(i), i))) dIdx = 0;
       const moves: Move[] = items.map((i) => ({ id: i.id, start: i.start + dt, track: dIdx ? target(i).id : i.track }));
       const mode: PlaceMode = e.ctrlKey ? "insert" : "overwrite";
-      const next = moveItems(orig, moves, mode, P.editOpts());
-      P.onEdit(next, "live", "Move");
-      setTip({ x: e.clientX, y: e.clientY, text: `${fmt(minStart + dt)}${mode === "insert" ? " · Insert" : ""}` });
+      let next: Timeline<I>;
+      if (d.dup) {
+        // Copies (new ids, their own links) go where the drag is; the originals stay.
+        const links = new Map<string, string>();
+        const copies = items.map((i, k) => {
+          if (!d.dup!.has(i.id)) d.dup!.set(i.id, newId());
+          const link = i.link ? (links.get(i.link) ?? (links.set(i.link, newId("l")), links.get(i.link))) : undefined;
+          const id = d.dup!.get(i.id)!;
+          const copy = P.cloneItem ? P.cloneItem(i as I, id) : ({ ...i, id } as I);
+          return { ...copy, start: moves[k].start, track: moves[k].track, link } as I;
+        });
+        next = place(orig, copies, mode, P.editOpts());
+      } else next = moveItems(orig, moves, mode, P.editOpts());
+      P.onEdit(next, "live", d.dup ? "Duplicate" : "Move");
+      const tr = dIdx ? target(d.anchor as I) : null;
+      const sign = dt >= 0 ? "+" : "−";
+      setTip({
+        x: e.clientX,
+        y: e.clientY,
+        text: `${fmt(minStart + dt)} (${sign}${fmt(Math.abs(dt))})${tr ? ` · ${tr.name}` : ""}${mode === "insert" ? " · Insert" : ""}${d.dup ? " · Copy" : ""}`,
+      });
     } else if (d.kind === "trim") {
       if (!d.moved) {
         d.moved = true;
@@ -361,7 +495,8 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
       }
       let t = timeAt(e.clientX);
       let at: number | null = null;
-      if (P.snapping !== e.shiftKey) {
+      // Shift: no snapping while trimming.
+      if (P.snapping && !e.shiftKey) {
         const n = nearest(points(withLinked(d.orig, [d.id])), t, snapThreshold());
         if (n !== null) {
           t = n;
@@ -374,7 +509,16 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
       const next = roll ? rolled! : trimItem(d.orig as Timeline<I>, d.id, d.edge, t, { ripple: P.ripple || e.ctrlKey, ...P.editOpts() });
       const it = next.items.find((i) => i.id === d.id);
       P.onEdit(next, "live", "Trim");
-      if (it) setTip({ x: e.clientX, y: e.clientY, text: roll ? `Roll · cut at ${fmt(d.edge === "right" ? end(it) : it.start)}` : `${fmt(it.duration)} long${P.ripple || e.ctrlKey ? " · Ripple" : ""}` });
+      const was = d.orig.items.find((i) => i.id === d.id);
+      const dd = it && was ? it.duration - was.duration : 0;
+      if (it)
+        setTip({
+          x: e.clientX,
+          y: e.clientY,
+          text: roll
+            ? `Roll · cut at ${fmt(d.edge === "right" ? end(it) : it.start)}`
+            : `${fmt(it.duration)} long (${dd >= 0 ? "+" : "−"}${fmt(Math.abs(dd))})${P.ripple || e.ctrlKey ? " · Ripple" : ""}`,
+        });
     } else if (d.kind === "slip") {
       if (!d.moved) {
         d.moved = true;
@@ -389,13 +533,14 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
       if (!d.moved && Math.hypot(e.clientX - d.x0, e.clientY - d.y0) < 4) return;
       d.moved = true;
       const lr = lanesRef.current!.getBoundingClientRect();
-      setBox({ x0: d.x0 - lr.left, y0: d.y0 - lr.top, x1: e.clientX - lr.left, y1: e.clientY - lr.top });
+      // The start stays at its time while the view scrolls under the drag.
+      setBox({ x0: timeToX(P.view, d.t), y0: d.y0 - lr.top, x1: e.clientX - lr.left, y1: e.clientY - lr.top });
       const ya = Math.min(d.y0, e.clientY);
       const yb = Math.max(d.y0, e.clientY);
       const body = bodyRef.current!;
       const top = body.getBoundingClientRect().top - body.scrollTop;
       const tracks = new Set(rows.filter((r) => top + r.y + r.h > ya && top + r.y < yb).map((r) => r.track.id));
-      const ids = itemsInBox(P.tl, tracks, timeAt(d.x0), timeAt(e.clientX));
+      const ids = itemsInBox(P.tl, tracks, d.t, timeAt(e.clientX));
       P.onSelection(new Set(d.add ? [...d.before, ...ids] : ids));
     }
   };
@@ -404,6 +549,8 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
     const P = pRef.current;
     const d = drag.current;
     drag.current = null;
+    cancelAnimationFrame(autoRaf.current);
+    lastPtr.current = null;
     setSnapAt(null);
     setBox(null);
     setTip(null);
@@ -414,25 +561,37 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
     }
     if (!d) return;
     if (d.kind === "move" || d.kind === "trim" || d.kind === "slip") {
-      if (d.moved) P.onEdit(P.tl, "end", d.kind === "move" ? "Move" : d.kind === "slip" ? "Slip" : "Trim");
+      if (d.moved) P.onEdit(P.tl, "end", d.kind === "move" ? (d.dup ? "Duplicate" : "Move") : d.kind === "slip" ? "Slip" : "Trim");
+      if (d.kind === "move" && d.moved && d.dup?.size) P.onSelection(new Set(d.dup.values()));
     } else if (d.kind === "marquee" && !d.moved) {
       // A click on empty track: playhead there, and the gap (if any) selected.
       if (!d.add) P.onSelection(new Set());
-      P.clock.seek(P.snapping ? nearest(points(new Set()), d.t, snapThreshold()) ?? d.t : d.t);
+      P.clock.seek(scrubTime(e.clientX, e.shiftKey));
       if (d.track) P.onGap?.({ track: d.track.id, t: d.t });
     }
   };
 
   // ------------------------------------------------------------ ruler: scrub and markers
+  /** Scrub target: snaps to cuts, markers and in/out when snapping is on (Shift: free). */
+  const scrubTime = (clientX: number, shift: boolean) => {
+    const P = pRef.current;
+    const t = timeAt(clientX);
+    // Cuts, markers, in / out, but not the playhead itself (it would stick).
+    return P.snapping && !shift ? nearest(snapPoints(P.tl), t, snapThreshold()) ?? t : t;
+  };
   const onRulerDown = (e: React.PointerEvent) => {
+    if (e.button === 1) return startPan(e);
     if (e.button !== 0) return;
     const P = pRef.current;
     const mk = (e.target as HTMLElement).closest?.("[data-marker]") as HTMLElement | null;
     if (mk) {
       drag.current = { kind: "marker", id: mk.dataset.marker!, orig: P.tl as Timeline<Item>, moved: false };
+    } else if (e.ctrlKey) {
+      // Ctrl+drag: zoom around where the drag started (right or down = closer).
+      drag.current = { kind: "rzoom", x0: e.clientX, y0: e.clientY, view: P.view, anchor: laneX(e.clientX) };
     } else {
       drag.current = { kind: "scrub" };
-      P.clock.seek(timeAt(e.clientX));
+      P.clock.seek(scrubTime(e.clientX, e.shiftKey));
     }
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
   };
@@ -440,10 +599,13 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
     const P = pRef.current;
     const d = drag.current;
     if (!d) return;
-    if (d.kind === "scrub") {
-      let t = timeAt(e.clientX);
-      if (e.shiftKey) t = nearest(points(new Set()), t, snapThreshold() * 2) ?? t;
-      P.clock.seek(t);
+    if (d.kind === "pan") return panMove(e);
+    if (d.kind === "rzoom") {
+      P.onView(zoomAt(d.view, Math.exp((e.clientX - d.x0 + e.clientY - d.y0) * 0.008), d.anchor));
+    } else if (d.kind === "scrub") {
+      lastPtr.current = { clientX: e.clientX, clientY: e.clientY, shiftKey: e.shiftKey, ctrlKey: e.ctrlKey, altKey: e.altKey, target: e.target };
+      P.clock.seek(scrubTime(e.clientX, e.shiftKey));
+      autoScroll();
     } else if (d.kind === "marker") {
       if (!d.moved) {
         d.moved = true;
@@ -457,6 +619,8 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
   const onRulerUp = (e: React.PointerEvent) => {
     const d = drag.current;
     drag.current = null;
+    cancelAnimationFrame(autoRaf.current);
+    lastPtr.current = null;
     try {
       (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
     } catch {
@@ -468,20 +632,107 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
     }
   };
 
-  // ------------------------------------------------------------ scrollbar
-  const barRef = useRef<HTMLDivElement | null>(null);
-  const thumbW = Math.max(24, (width / v.pxPerSec / span) * width);
-  const thumbX = (v.scroll / span) * width;
-  const onBarDown = (e: React.PointerEvent) => {
-    const r = barRef.current!.getBoundingClientRect();
-    const onThumb = e.clientX - r.left >= thumbX && e.clientX - r.left <= thumbX + thumbW;
-    const grab = onThumb ? e.clientX - r.left - thumbX : thumbW / 2;
-    const go = (cx: number) => {
-      const x = cx - r.left - grab;
-      pRef.current.onView({ ...pRef.current.view, scroll: Math.max(0, (x / width) * span) });
+  // ------------------------------------------------------------ middle-button pan
+  const startPan = (e: React.PointerEvent) => {
+    e.preventDefault();
+    drag.current = { kind: "pan", x: e.clientX, y: e.clientY, scroll: pRef.current.view.scroll, top: bodyRef.current?.scrollTop ?? 0 };
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  };
+  const panMove = (e: React.PointerEvent) => {
+    const d = drag.current;
+    if (d?.kind !== "pan") return;
+    const P = pRef.current;
+    P.onView({ ...P.view, scroll: Math.max(0, d.scroll - (e.clientX - d.x) / P.view.pxPerSec) });
+    if (bodyRef.current) bodyRef.current.scrollTop = d.top - (e.clientY - d.y);
+  };
+
+  // ------------------------------------------------------------ overview strip
+  const overRef = useRef<HTMLCanvasElement | null>(null);
+  const boxW = Math.max(6, (width / v.pxPerSec / span) * width);
+  const boxX = (v.scroll / span) * width;
+  useEffect(() => {
+    const c = overRef.current;
+    if (!c) return;
+    const dpr = window.devicePixelRatio || 1;
+    c.width = Math.round(width * dpr);
+    c.height = Math.round(OVERVIEW_H * dpr);
+    c.style.width = `${width}px`;
+    const g = c.getContext("2d")!;
+    g.scale(dpr, dpr);
+    g.clearRect(0, 0, width, OVERVIEW_H);
+    const css = getComputedStyle(c);
+    const n = Math.max(1, p.tl.tracks.length);
+    const lane = (OVERVIEW_H - 4) / n;
+    p.tl.tracks.forEach((tr, k) => {
+      g.fillStyle = css.getPropertyValue("--color-ink-4").trim() || "#6b7080";
+      for (const it of p.tl.items) {
+        if (it.track !== tr.id) continue;
+        const a = (it.start / span) * width;
+        g.fillRect(a, 2 + k * lane, Math.max(1, (it.duration / span) * width), Math.max(1, lane - 0.5));
+      }
+    });
+    g.fillStyle = "rgba(245,165,36,0.9)";
+    for (const m of p.tl.markers) g.fillRect((m.t / span) * width, 0, 1, OVERVIEW_H);
+  }, [p.tl.items, p.tl.tracks, p.tl.markers, span, width]);
+  const onOverDown = (e: React.PointerEvent) => {
+    if (e.button === 1) return startPan(e);
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const el = e.currentTarget as HTMLElement;
+    const r = el.getBoundingClientRect();
+    const P0 = pRef.current;
+    const v0 = P0.view;
+    const span0 = span;
+    const x = e.clientX - r.left;
+    const bx = (v0.scroll / span0) * width;
+    const bw = Math.max(6, (width / v0.pxPerSec / span0) * width);
+    const toT = (px: number) => (px / width) * span0;
+    const shown = width / v0.pxPerSec;
+    const mode = Math.abs(x - bx) <= 5 ? "left" : Math.abs(x - (bx + bw)) <= 5 ? "right" : "pan";
+    // Outside the box: jump there first (centred), then drag.
+    const start = mode === "pan" && (x < bx || x > bx + bw) ? Math.max(0, toT(x) - shown / 2) : v0.scroll;
+    if (start !== v0.scroll) P0.onView({ ...v0, scroll: start });
+    const mv = (ev: PointerEvent) => {
+      const P = pRef.current;
+      const dx = ev.clientX - e.clientX;
+      const dy = ev.clientY - e.clientY;
+      if (mode === "left") P.onView(viewOfSpan(toT(Math.min(bx + dx, bx + bw - 6)), v0.scroll + shown, width));
+      else if (mode === "right") P.onView(viewOfSpan(v0.scroll, toT(Math.max(bx + bw + dx, bx + 6)), width));
+      else if (ev.ctrlKey || Math.abs(dy) > 6) {
+        // Ableton style: down = closer, sideways = scroll, around the grabbed time.
+        const base = { pxPerSec: v0.pxPerSec, scroll: start + toT(dx) };
+        const anchor = timeToX(base, toT(x));
+        P.onView(zoomAt(base, Math.exp(dy * 0.012), Math.max(0, Math.min(width, anchor))));
+      } else P.onView({ ...P.view, scroll: Math.max(0, start + toT(dx)) });
     };
-    go(e.clientX);
-    const mv = (ev: PointerEvent) => go(ev.clientX);
+    const up = () => {
+      window.removeEventListener("pointermove", mv);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", mv);
+    window.addEventListener("pointerup", up);
+  };
+
+  // ------------------------------------------------------------ playhead grab
+  // A clip edge (or the blade) under the line wins: trimming a fresh cut still works.
+  const onHeadDown = (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    if (pRef.current.tool !== "select" || edgeAt(e.clientX, e.clientY)) return onLaneDown(e);
+    drag.current = { kind: "scrub" };
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  };
+  const onHeadMove = (e: React.PointerEvent) => (drag.current?.kind === "scrub" ? onRulerMove(e) : onLaneMove(e));
+  const onHeadUp = (e: React.PointerEvent) => (drag.current?.kind === "scrub" ? onRulerUp(e) : onLaneUp(e));
+
+  // ------------------------------------------------------------ track height (header border)
+  const onBorderDown = (e: React.PointerEvent, track: Track) => {
+    if (e.button !== 0 || !p.onTrackHeight) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const y0 = e.clientY;
+    const h0 = p.trackHeight(track);
+    const mv = (ev: PointerEvent) => pRef.current.onTrackHeight?.(track, Math.round(Math.min(MAX_TRACK_H, Math.max(MIN_TRACK_H, h0 + ev.clientY - y0))));
     const up = () => {
       window.removeEventListener("pointermove", mv);
       window.removeEventListener("pointerup", up);
@@ -511,9 +762,11 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
       const P = pRef.current;
       if (!P.onContext) return;
       e.preventDefault();
-      const it = itemOf(e.target) ?? undefined;
+      const el = e.target as HTMLElement;
+      const area = el.closest?.("[data-ruler]") ? "ruler" : e.clientX - (rootRef.current?.getBoundingClientRect().left ?? 0) < HEAD ? "header" : "lanes";
+      const it = area === "lanes" ? (itemOf(e.target) ?? undefined) : undefined;
       if (it && !P.selection.has(it.id)) P.onSelection(withLinked(P.tl, [it.id]));
-      P.onContext(e, { item: it, track: rowAt(e.clientY).track, t: timeAt(e.clientX) });
+      P.onContext(e, { item: it, track: area === "ruler" ? null : rowAt(e.clientY).track, t: timeAt(e.clientX), area });
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [rows],
@@ -521,10 +774,32 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
 
   return (
     <div ref={rootRef} className="relative flex h-full min-h-0 flex-col select-none" onContextMenu={contextAt}>
+      {/* Overview: the whole edit, the shown part as a box */}
+      <div className="flex shrink-0 border-b border-line bg-surface-2" style={{ height: OVERVIEW_H }}>
+        <div className="shrink-0 border-r border-line" style={{ width: HEAD }} />
+        <div
+          className="relative flex-1 cursor-grab overflow-hidden active:cursor-grabbing"
+          onPointerDown={onOverDown}
+          title="Overview: drag to scroll; drag the box edges, drag up or down, or Ctrl+drag to zoom"
+        >
+          <canvas ref={overRef} className="pointer-events-none absolute left-0 top-0" style={{ height: OVERVIEW_H }} />
+          <div className="absolute inset-y-0 rounded-sm border border-accent/80 bg-accent/15" style={{ left: boxX, width: Math.min(width, boxW) }}>
+            <span className="absolute inset-y-0 -left-[3px] w-[6px] cursor-ew-resize" />
+            <span className="absolute inset-y-0 -right-[3px] w-[6px] cursor-ew-resize" />
+          </div>
+        </div>
+      </div>
       {/* Ruler */}
       <div className="flex shrink-0 border-b border-line bg-surface" style={{ height: RULER_H }}>
         <div className="shrink-0 border-r border-line" style={{ width: HEAD }} />
-        <div className="relative flex-1 cursor-text overflow-hidden" onPointerDown={onRulerDown} onPointerMove={onRulerMove} onPointerUp={onRulerUp}>
+        <div
+          data-ruler
+          className="relative flex-1 cursor-text overflow-hidden"
+          onPointerDown={onRulerDown}
+          onPointerMove={onRulerMove}
+          onPointerUp={onRulerUp}
+          title="Drag to move the playhead (snaps to cuts; Shift: free) · Ctrl+drag to zoom · right-click for in, out and markers"
+        >
           <canvas ref={rulerRef} className="absolute left-0 top-0" style={{ height: RULER_H }} />
           {p.tl.markers.map((m) => {
             const x = timeToX(v, m.t);
@@ -551,20 +826,31 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
         <div className="relative flex" style={{ minHeight: "100%" }}>
           <div className="sticky left-0 z-20 shrink-0 border-r border-line bg-surface" style={{ width: HEAD }}>
             {rows.map((r) => (
-              <div key={r.track.id} className="border-b border-line" style={{ height: r.h }}>
+              <div key={r.track.id} className="relative border-b border-line" style={{ height: r.h }}>
                 {p.renderHeader(r.track)}
+                {p.onTrackHeight && (
+                  <div
+                    className="absolute inset-x-0 -bottom-[3px] z-10 h-[6px] cursor-row-resize"
+                    title="Drag to make the track taller or shorter (Ctrl+Shift+wheel too)"
+                    onPointerDown={(e) => onBorderDown(e, r.track)}
+                  />
+                )}
               </div>
             ))}
             {p.belowHint !== undefined && <div className="h-10" />}
           </div>
           <div
             ref={lanesRef}
+            data-lanes
             className={`relative flex-1 overflow-hidden ${p.tool === "blade" ? "cursor-crosshair" : p.tool === "slip" ? "cursor-col-resize" : hoverEdge ? "cursor-ew-resize" : ""}`}
             onPointerDown={onLaneDown}
             onPointerMove={onLaneMove}
             onPointerUp={onLaneUp}
             onPointerCancel={onLaneUp}
             onDoubleClick={(e) => {
+              // On a clip edge: the playhead goes to that cut. On a clip: its settings.
+              const edge = edgeAt(e.clientX, e.clientY);
+              if (edge) return p.clock.seek(edge.t);
               const it = itemOf(e.target);
               if (it) p.onItemDoubleClick?.(it);
             }}
@@ -645,16 +931,16 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
       </div>
 
       {/* Playhead over ruler and tracks */}
-      <div ref={playRef} className="pointer-events-none absolute bottom-[10px] left-0 top-0 z-30 w-px bg-red-500">
+      <div ref={playRef} className="pointer-events-none absolute bottom-0 left-0 z-30 w-px bg-red-500" style={{ top: OVERVIEW_H }}>
         <span className="absolute -left-[5px] top-0 h-0 w-0 border-x-[5.5px] border-t-[8px] border-x-transparent border-t-red-500" />
-      </div>
-
-      {/* Horizontal scrollbar */}
-      <div className="flex h-[10px] shrink-0">
-        <div style={{ width: HEAD }} />
-        <div ref={barRef} className="relative flex-1 cursor-pointer bg-surface-2" onPointerDown={onBarDown} title="Scroll the timeline (wheel; Ctrl+wheel zooms)">
-          <div className="absolute inset-y-[2px] rounded-full bg-line-3 hover:bg-ink-3" style={{ left: thumbX, width: Math.min(width, thumbW) }} />
-        </div>
+        {/* Grab the line anywhere along its height to scrub. */}
+        <span
+          className="pointer-events-auto absolute inset-y-0 -left-[3px] w-[7px] cursor-ew-resize"
+          title="Drag the playhead (snaps to cuts; Shift: free)"
+          onPointerDown={onHeadDown}
+          onPointerMove={onHeadMove}
+          onPointerUp={onHeadUp}
+        />
       </div>
 
       {tip && (

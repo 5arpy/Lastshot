@@ -191,6 +191,7 @@ export async function itemFromPath(path: string, clip?: ClipMetadata): Promise<E
       height: clip.height,
       fps: clip.fps,
       hasAudio: clip.has_audio,
+      srcAudio: clip.has_audio,
       audio: { ...DEFAULT_FX },
       srcMarkers: clip.markers ?? [],
     };
@@ -213,6 +214,7 @@ export async function itemFromPath(path: string, clip?: ClipMetadata): Promise<E
     height: info.height || clip?.height,
     fps: info.fps ?? clip?.fps,
     hasAudio: info.hasAudio,
+    srcAudio: info.hasAudio,
     audio: { ...DEFAULT_FX },
     srcMarkers: clip?.markers ?? [],
   };

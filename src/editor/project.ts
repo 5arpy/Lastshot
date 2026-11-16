@@ -55,7 +55,10 @@ export interface EdItem extends Item {
   width?: number;
   height?: number;
   fps?: number;
+  /** The item plays its file's sound (false after Detach audio). */
   hasAudio?: boolean;
+  /** The file itself has sound (unset in projects made before this was kept). */
+  srcAudio?: boolean;
   audio?: AudioFx;
   pic?: Picture;
   shape?: Shape;
@@ -315,6 +318,8 @@ export function exportRoute(p: EdProject): Route {
   for (const v of vid) {
     if (Math.abs(v.start - t) > 0.02) return { kind: "render" }; // a gap (black)
     if (!v.path || !plainPicture(v) || (v.hasAudio && !plainAudio(v))) return { kind: "render" };
+    // A copy keeps the file's sound: render when it was detached (or may have been).
+    if (!v.hasAudio && v.srcAudio !== false) return { kind: "render" };
     t = end(v);
   }
   const crops = vid.map((v) => JSON.stringify(v.pic?.crop ?? null));

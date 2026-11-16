@@ -53,6 +53,18 @@ describe("export routes", () => {
   });
 });
 
+describe("detached sound", () => {
+  it("a clip whose sound was detached (and deleted) is rendered, not copied with its sound", () => {
+    const p = project([{ srcIn: 5, duration: 10, hasAudio: false, srcAudio: true }]);
+    expect(exportRoute(p).kind).toBe("render");
+    // Unknown (older project): render to be safe; a silent file may still copy.
+    expect(exportRoute(project([{ hasAudio: false }])).kind).toBe("render");
+    expect(exportRoute(project([{ hasAudio: false, srcAudio: false }])).kind).toBe("copy");
+    // Muted copies render too.
+    expect(exportRoute(project([{ srcAudio: true, audio: { ...DEFAULT_FX, muted: true } }])).kind).toBe("render");
+  });
+});
+
 describe("sound", () => {
   it("track volume, solo and mute shape what is heard", () => {
     const p = project([{ audio: { ...DEFAULT_FX, volume: 0.5 } }]);

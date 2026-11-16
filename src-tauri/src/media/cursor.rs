@@ -152,6 +152,12 @@ mod imp {
 
         /// Draws the pointer onto `target` (the frame about to be encoded).
         pub fn draw_on(&mut self, device: &ID3D11Device, context: &ID3D11DeviceContext, target: &ID3D11Texture2D) {
+            self.draw_mapped(device, context, target, (0.0, 0.0), (0.0, 0.0), 1.0);
+        }
+
+        /// Draws the pointer onto a crop of the monitor: monitor position
+        /// `p` lands at `(p - from) * scale + to` on `target`.
+        pub fn draw_mapped(&mut self, device: &ID3D11Device, context: &ID3D11DeviceContext, target: &ID3D11Texture2D, from: (f32, f32), to: (f32, f32), scale: f32) {
             if !self.visible {
                 return;
             }
@@ -162,7 +168,12 @@ mod imp {
             }
             let Some((comp, _)) = self.comp.as_ref() else { return };
             comp.begin_keep();
-            let r = Rect { x: self.x as f32, y: self.y as f32, w: shape.width as f32, h: shape.height as f32 };
+            let r = Rect {
+                x: (self.x as f32 - from.0) * scale + to.0,
+                y: (self.y as f32 - from.1) * scale + to.1,
+                w: shape.width as f32 * scale,
+                h: shape.height as f32 * scale,
+            };
             comp.draw(shape, r, Crop::NONE, 1.0, false);
             comp.end();
         }

@@ -51,6 +51,10 @@ pub struct Settings {
     /// Show the mouse pointer in recordings and replays.
     #[serde(default = "default_true")]
     pub capture_cursor: bool,
+    /// Full-screen capture method (hidden; Automatic is right for nearly
+    /// everyone).
+    #[serde(default)]
+    pub display_method: crate::media::recorder::DisplayMethod,
     pub capture_system_audio: bool,
     pub capture_microphone: bool,
     pub output_dir: String,
@@ -276,6 +280,7 @@ impl Default for Settings {
             capture_source: Default::default(),
             app_audio: Default::default(),
             capture_cursor: true,
+            display_method: Default::default(),
             capture_system_audio: true,
             capture_microphone: false,
             output_dir: default_output_dir().to_string_lossy().to_string(),
@@ -422,6 +427,7 @@ impl Settings {
             source: self.capture_source.clone(),
             app_audio: self.app_audio.clone(),
             capture_cursor: self.capture_cursor,
+            display_method: self.display_method,
         };
         self.apply_performance_caps(&mut cfg);
         cfg

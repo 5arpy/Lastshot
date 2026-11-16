@@ -59,6 +59,10 @@ export interface EngineStats {
   privacy_active: boolean;
   uptime_seconds: number;
   last_error: string | null;
+  /** How the picture is captured right now, in plain words. */
+  capture_method?: string;
+  /** Something to know that is not an error (e.g. a black screen). */
+  notice?: string | null;
 }
 
 export interface ClipMetadata {
@@ -176,7 +180,20 @@ export interface ClipSavedPayload {
 /** What Lastshot records (instant replay and recordings alike). */
 export type CaptureSource =
   | { kind: "display" }
-  | { kind: "window"; hwnd: number; exe: string; title: string };
+  | { kind: "window"; hwnd: number; exe: string; title: string; method?: WindowMethod };
+
+/** How a window is captured: crop it out of the screen while it is visible
+ * (never touches the app), Windows Graphics Capture, or automatic. */
+export type WindowMethod = "auto" | "crop" | "capture";
+
+/** Full-screen capture method (hidden setting). */
+export type DisplayMethod = "auto" | "duplication" | "graphics-capture";
+
+/** A camera for the Studio webcam layer (`id` = Media Foundation link). */
+export interface CameraInfo {
+  id: string;
+  name: string;
+}
 
 /** Whose sound the PC-sound track records. */
 export type AppAudio =
@@ -297,6 +314,8 @@ export interface AppSettings {
   appAudio: AppAudio;
   /** Draw the mouse pointer into recordings and replays. */
   captureCursor: boolean;
+  /** Full-screen capture method; "auto" for nearly everyone. */
+  displayMethod?: DisplayMethod;
   /** "Open with Lastshot" on MP4 files in Explorer. */
   explorerOpenWith: boolean;
   /** Screenshot folder; empty = `<save location>\Screenshots`. */

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { assetUrl, isTauri, lastshot } from "../lib/bridge";
-import type { AppSettings, BarState, MonitorInfo, ScreenShot } from "../lib/types";
+import type { AppSettings, BarState, CameraInfo, MonitorInfo, ScreenShot, WindowMethod } from "../lib/types";
 import { type Layer, type LayerKind, loadLayers, newLayer, restack, saveLayers } from "../lib/studio";
 import { LayerView, useRecordingSeconds } from "./StudioLayers";
 import { clockTime } from "./ControlBar";
@@ -36,7 +36,9 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
   const [layers, setLayers] = useState<Layer[]>(loadLayers);
   const [selected, setSelected] = useState<string | null>(null);
   const [shot, setShot] = useState<ScreenShot | null>(null);
-  const [cams, setCams] = useState<MediaDeviceInfo[]>([]);
+  const [cams, setCams] = useState<CameraInfo[]>([]);
+  const [live, setLive] = useState(false);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [picking, setPicking] = useState(false);
   const secs = useRecordingSeconds();
   const previewRef = useRef<HTMLDivElement | null>(null);
@@ -44,7 +46,62 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
   const update = (next: Layer[]) => {
     setLayers(next);
     saveLayers(next);
+    void lastshot.setStudioLayers(next).catch(() => undefined);
   };
+
+  // The engine draws the layers into the video. Bring over layers kept only
+  // in this window's storage (before the engine had its own copy) once.
+  useEffect(() => {
+    void lastshot
+      .getStudioLayers<Layer>()
+      .then((fromEngine) => {
+        if (fromEngine === null) {
+          if (layers.length) void lastshot.setStudioLayers(layers);
+        } else {
+          setLayers(fromEngine);
+          saveLayers(fromEngine);
+        }
+      })
+      .catch(() => undefined);
+    // First load only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Live preview from the engine (what is being encoded), ~8 times a second
+  // while Studio is on screen. Falls back to a still picture of the screen.
+  useEffect(() => {
+    let alive = true;
+    let lastSeq = -1;
+    let misses = 0;
+    const tick = async () => {
+      if (!alive) return;
+      if (document.visibilityState === "visible") {
+        try {
+          const f = await lastshot.getPreviewFrame();
+          if (f && f.seq !== lastSeq && canvasRef.current) {
+            lastSeq = f.seq;
+            misses = 0;
+            const c = canvasRef.current;
+            if (c.width !== f.width || c.height !== f.height) {
+              c.width = f.width;
+              c.height = f.height;
+            }
+            c.getContext("2d")?.putImageData(new ImageData(f.rgba, f.width, f.height), 0, 0);
+            setLive(true);
+          } else if (!f && ++misses > 10) {
+            setLive(false);
+          }
+        } catch {
+          setLive(false);
+        }
+      }
+      if (alive) window.setTimeout(() => void tick(), 120);
+    };
+    void tick();
+    return () => {
+      alive = false;
+    };
+  }, []);
   const patchLayer = (id: string, p: Partial<Layer>) => update(layers.map((l) => (l.id === id ? { ...l, ...p } : l)));
 
   const refreshShot = async () => {
@@ -68,8 +125,7 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
 
   const loadCams = async () => {
     try {
-      const all = await navigator.mediaDevices.enumerateDevices();
-      setCams(all.filter((d) => d.kind === "videoinput"));
+      setCams(await lastshot.listCameras());
     } catch {
       setCams([]);
     }
@@ -127,6 +183,7 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       saveLayers(latest);
+      void lastshot.setStudioLayers(latest).catch(() => undefined);
     };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
@@ -135,7 +192,11 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
   const sel = layers.find((l) => l.id === selected) ?? null;
   const rec = bar?.recording ?? null;
   const mon = monitors.find((m) => m.index === settings.monitorIndex) ?? monitors[0];
-  const aspect = shot ? `${shot.width} / ${shot.height}` : mon ? `${mon.width} / ${mon.height}` : "16 / 9";
+  const aspect = live && canvasRef.current
+    ? `${canvasRef.current.width} / ${canvasRef.current.height}`
+    : shot ? `${shot.width} / ${shot.height}` : mon ? `${mon.width} / ${mon.height}` : "16 / 9";
+  // The live picture already shows the layers when the engine draws them.
+  const layersInLive = live && (settings.studioLayers === "always" || (settings.studioLayers === "recording" && !!rec));
 
   return (
     <div className="space-y-4">
@@ -236,7 +297,9 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
             className="relative w-full overflow-hidden rounded-lg bg-[#0d0f14]"
             style={{ aspectRatio: aspect, containerType: "size" }}
           >
-            {shot?.image && <img src={shot.image} alt="" className="absolute inset-0 h-full w-full object-cover opacity-80" draggable={false} />}
+            <canvas ref={canvasRef} className={cn("absolute inset-0 h-full w-full", !live && "hidden")} />
+            {!live && shot?.image && <img src={shot.image} alt="" className="absolute inset-0 h-full w-full object-cover opacity-80" draggable={false} />}
+            {live && <span className="absolute right-1.5 top-1.5 z-10 rounded bg-black/60 px-1.5 py-0.5 text-[10px] font-semibold text-white">LIVE</span>}
             {layers.map((l) => (
               <div
                 key={l.id}
@@ -246,10 +309,12 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
                   left: `${l.x * 100}%`,
                   top: `${l.y * 100}%`,
                   width: l.kind === "image" || l.kind === "webcam" ? `${l.w * 100}%` : undefined,
-                  opacity: l.visible ? l.opacity : 0.25,
+                  opacity: layersInLive ? 1 : l.visible ? l.opacity : 0.25,
                 }}
               >
-                <LayerView layer={l} recordingSeconds={secs} />
+                <div style={{ opacity: layersInLive ? 0 : 1 }} className={cn(layersInLive && "outline outline-1 outline-white/40")}>
+                  <LayerView layer={l} recordingSeconds={secs} noCamera />
+                </div>
                 {selected === l.id && (
                   <span onPointerDown={drag(l, "size")} title="Drag to resize" className="absolute -bottom-1.5 -right-1.5 h-3 w-3 cursor-nwse-resize rounded-sm border border-black/40 bg-white" />
                 )}
@@ -270,7 +335,7 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
               </select>
             </label>
             <span className="text-[11px] text-ink-3">
-              Layers are drawn on your screen so they are in the video; you see them too. Clicks go through them.
+              The recorder draws the layers into the video (replays, recordings and window captures). They are not shown on your screen.
             </span>
           </div>
         </div>
@@ -317,8 +382,8 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
                       >
                         <option value="">Default camera</option>
                         {cams.map((c, i) => (
-                          <option key={c.deviceId || i} value={c.deviceId}>
-                            {c.label || `Camera ${i + 1}`}
+                          <option key={c.id || i} value={c.id}>
+                            {c.name || `Camera ${i + 1}`}
                           </option>
                         ))}
                       </select>
@@ -373,6 +438,21 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
                 <span className="text-ink-3">Change</span>
               </button>
             </div>
+            {settings.captureSource?.kind === "window" && (
+              <label className="block space-y-1" title="Crop from screen never touches the app (no added lag), but needs the window visible. Automatic crops while it is visible and switches to Graphics Capture when it is covered.">
+                <span className="text-ink-3">Window capture method</span>
+                <select
+                  value={settings.captureSource.method ?? "auto"}
+                  disabled={!!rec}
+                  onChange={(e) => settings.captureSource?.kind === "window" && onPatch({ captureSource: { ...settings.captureSource, method: e.target.value as WindowMethod } })}
+                  className="w-full rounded-md border border-line bg-surface-2 px-2 py-1 text-ink"
+                >
+                  <option value="auto">Automatic</option>
+                  <option value="crop">Crop from screen</option>
+                  <option value="capture">Graphics Capture (works when covered)</option>
+                </select>
+              </label>
+            )}
             {picking && (
               <SourcePicker
                 current={settings.captureSource ?? { kind: "display" }}

@@ -18,6 +18,7 @@ import type {
   ForegroundGame,
   MonitorInfo,
   CaptureSource,
+  CameraInfo,
   WindowInfo,
   PowerState,
   ProfileMapEntry,
@@ -734,6 +735,32 @@ export const lastshot = {
   },
   async syncLayers(): Promise<void> {
     if (isTauri()) await invoke("sync_layers");
+  },
+  /** Studio layers drawn by the engine into the video. */
+  async setStudioLayers(layers: unknown[]): Promise<void> {
+    if (isTauri()) await invoke("set_studio_layers", { layers });
+  },
+  /** Layers the engine has (null when Studio never saved any). */
+  async getStudioLayers<T>(): Promise<T[] | null> {
+    if (isTauri()) return invoke<T[] | null>("get_studio_layers");
+    return null;
+  },
+  async listCameras(): Promise<CameraInfo[]> {
+    if (isTauri()) return invoke<CameraInfo[]>("list_cameras");
+    return [];
+  },
+  /** Newest live preview frame (RGBA) from the engine, or null. */
+  async getPreviewFrame(): Promise<{ width: number; height: number; seq: number; rgba: Uint8ClampedArray<ArrayBuffer> } | null> {
+    if (!isTauri()) return null;
+    const buf = await invoke<ArrayBuffer | number[]>("get_preview_frame");
+    const bytes = buf instanceof ArrayBuffer ? new Uint8Array(buf) : new Uint8Array(buf);
+    if (bytes.length < 12) return null;
+    const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const width = v.getUint32(0, true);
+    const height = v.getUint32(4, true);
+    const seq = v.getUint32(8, true);
+    if (bytes.length < 12 + width * height * 4) return null;
+    return { width, height, seq, rgba: new Uint8ClampedArray(bytes.slice(12, 12 + width * height * 4).buffer) };
   },
 
   // --------------------------------------------------------------- editor

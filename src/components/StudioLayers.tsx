@@ -11,10 +11,14 @@ export function LayerView({
   layer,
   recordingSeconds,
   imageUrl,
+  noCamera,
 }: {
   layer: Layer;
   recordingSeconds: number | null;
   imageUrl?: string;
+  /** Show a placeholder instead of opening the camera (Studio's editor:
+   * the recorder itself uses the camera). */
+  noCamera?: boolean;
 }) {
   const l = layer;
   const textStyle = {
@@ -47,6 +51,10 @@ export function LayerView({
     overflow: "hidden" as const,
     boxShadow: l.border ? "0 0 0 0.25cqh rgba(255,255,255,0.9), 0 0.5cqh 2cqh rgba(0,0,0,0.5)" : undefined,
   };
+  if (l.kind === "webcam" && noCamera)
+    return (
+      <div style={{ ...frame, background: "#1b1d24", display: "grid", placeItems: "center", color: "#aab", fontSize: "1.6cqh", fontFamily: "sans-serif" }}>Webcam</div>
+    );
   if (l.kind === "webcam") return <Webcam layer={l} style={frame} />;
   return (
     <div style={frame}>

@@ -119,7 +119,9 @@ pub fn run() {
             };
 
             // Keep the Windows Run key in sync with the saved preference.
-            {
+            // Never from a test copy: the Run key is shared with the user's
+            // real install (same name), and a test profile has the option off.
+            if std::env::var_os("LASTSHOT_TEST_INSTANCE").is_none() {
                 use tauri_plugin_autostart::ManagerExt;
                 let want = handle.state::<AppState>().settings.read().launch_at_startup;
                 let autostart = handle.autolaunch();
@@ -132,6 +134,7 @@ pub fn run() {
             }
 
             recording::sync_bar(&handle);
+            studio::init(&handle);
 
             if let Err(e) =
                 hotkeys::register_all(&handle, &save_key, &toggle_key, &snip_key, &record_key)
@@ -342,6 +345,10 @@ pub fn run() {
             recording::set_capture_source,
             studio::screen_snapshot,
             studio::sync_layers,
+            studio::set_studio_layers,
+            studio::get_studio_layers,
+            studio::list_cameras,
+            studio::get_preview_frame,
             snip::snip_cancel,
             snip::open_screenshots_folder,
             audio_routing::vm_status,

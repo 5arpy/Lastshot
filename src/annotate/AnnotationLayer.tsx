@@ -490,10 +490,14 @@ function TextEditor({ s, view, onText, onDone }: { s: Shape; view: LayerView; on
   useLayoutEffect(() => {
     const el = ta.current;
     if (!el) return;
-    el.focus();
+    // No scrolling: the layer sits in an overflow-hidden overlay.
+    el.focus({ preventScroll: true });
     el.select();
   }, []);
-  useEffect(() => () => void (done.current = true), []);
+  useEffect(() => {
+    done.current = false;
+    return () => void (done.current = true);
+  }, []);
   const finish = () => {
     if (done.current) return;
     done.current = true;

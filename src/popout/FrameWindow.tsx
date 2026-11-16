@@ -17,7 +17,7 @@ import { actualView, fitView, flipScreenH, flipScreenV, zoomAt, type View } from
 import { naturalSize } from "../viewer/render";
 import { assetUrl } from "../lib/bridge";
 import { cn } from "../utils/cn";
-import { frames, type Frame, type FrameCmd, type FrameViewState, type Layout } from "./frames";
+import { frames, isPictureType, popOutPicture, type Frame, type FrameCmd, type FrameViewState, type Layout } from "./frames";
 import { dragRect, snapRect, snapTargets, type Edge, type R } from "./snap";
 
 const SNAP_PX = 10;
@@ -49,6 +49,23 @@ export default function FrameWindow({ id }: { id: string }) {
     for (const el of [document.documentElement, document.body, document.getElementById("root")]) {
       if (el) el.style.background = "transparent";
     }
+    // A picture dropped on a frame pops out as a frame of its own (and the
+    // window never navigates to the file).
+    const over = (e: DragEvent) => {
+      if (e.dataTransfer?.types.includes("Files")) e.preventDefault();
+    };
+    const drop = (e: DragEvent) => {
+      const files = Array.from(e.dataTransfer?.files ?? []);
+      if (!files.length) return;
+      e.preventDefault();
+      for (const f of files) if (isPictureType(f.type)) void popOutPicture(f).catch(() => undefined);
+    };
+    window.addEventListener("dragover", over);
+    window.addEventListener("drop", drop);
+    return () => {
+      window.removeEventListener("dragover", over);
+      window.removeEventListener("drop", drop);
+    };
   }, []);
 
   useEffect(() => {

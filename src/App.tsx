@@ -1839,8 +1839,29 @@ export default function App() {
       void popOutPicture(file, "Pasted picture").catch((err) => pushToast("err", "Could not pop out the picture", String(err)));
     };
     window.addEventListener("paste", paste);
+    // Pictures dragged in from Explorer or a browser (the window takes
+    // HTML drops, so files arrive as File objects).
+    const over = (e: DragEvent) => {
+      if (e.dataTransfer?.types.includes("Files")) e.preventDefault();
+    };
+    const drop = (e: DragEvent) => {
+      if (e.defaultPrevented) return; // handled by the part under the mouse
+      const files = Array.from(e.dataTransfer?.files ?? []);
+      if (!files.length) return;
+      e.preventDefault(); // never let the window open the file itself
+      const pics = files.filter((f) => isPictureType(f.type));
+      if (!pics.length) {
+        pushToast("warn", "Not a picture", "Drop PNG, JPG, GIF, WebP or BMP pictures to pop them out. Open videos from Clips or with Open with Lastshot.");
+        return;
+      }
+      for (const f of pics) void popOutPicture(f).catch((err) => pushToast("err", "Could not pop out the picture", String(err)));
+    };
+    window.addEventListener("dragover", over);
+    window.addEventListener("drop", drop);
     return () => {
       alive = false;
+      window.removeEventListener("dragover", over);
+      window.removeEventListener("drop", drop);
       window.removeEventListener("paste", paste);
       offs.forEach((u) => u());
     };

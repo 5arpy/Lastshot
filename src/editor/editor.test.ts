@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { type EdItem, type EdProject, DEFAULT_FX, effectiveAudio, exportRange, exportRoute, mainTrack, newProject, outputSize, tracksOf } from "./project";
-import { RESERVED_KEYS, editorKeymap, keyName, normKeys, runShortcut, snipKeymap, type EditorActions, type Shortcut, type SnipActions } from "./keys";
+import { RESERVED_KEYS, editorKeymap, findShortcut, keyName, normKeys, runShortcut, snipKeymap, type EditorActions, type Shortcut, type SnipActions } from "./keys";
 import { migrate } from "./store";
 import { placement, placedBox } from "./compose";
 import { flip, moveBy, resize, rotateTo, type Shape } from "../annotate/shapes";
@@ -137,7 +137,7 @@ describe("keys", () => {
     for (const [, list] of scopes) {
       const seen = new Map<string, string>();
       for (const s of list) {
-        if (s.when) continue;
+        if (s.when || s.mouse) continue;
         const k = normKeys(s.keys);
         if (seen.has(k)) expect(`${k}: ${seen.get(k)}`).toBe(`${k}: ${s.label}`);
         seen.set(k, s.label);
@@ -164,6 +164,16 @@ describe("keys", () => {
       }
     }
     expect(scopes[0][1].find((s) => s.keys === "Ctrl+K")?.label).toBe("Split at playhead");
+  });
+  it("lists mouse gestures for show only", () => {
+    const list = scopes[0][1];
+    const mouse = list.filter((s) => s.mouse);
+    expect(mouse.length).toBeGreaterThan(10);
+    for (const s of mouse) expect(s.group).toBe("Mouse");
+    // Never matched to a key press, even where the text looks like a key.
+    const e = { key: "Wheel", ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, target: null, preventDefault: noop } as unknown as KeyboardEvent;
+    expect(findShortcut(mouse, e)).toBe(null);
+    for (const k of ["Alt+ArrowUp", "Alt+ArrowDown", "Alt+ArrowLeft", "Ctrl+Shift+A", "Shift+F"]) expect(list.some((s) => s.keys === k && !s.mouse), k).toBe(true);
   });
   it("runs \"+\" (zoom in)", () => {
     let zoomed = 0;

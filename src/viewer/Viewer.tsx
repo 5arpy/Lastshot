@@ -13,6 +13,7 @@
  * nothing is decoded again when zooming.
  */
 import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
+import { createPortal } from "react-dom";
 import {
   DEFAULT_GRID,
   IDENTITY,
@@ -167,6 +168,8 @@ export interface ViewerProps {
    * the snip overlay that lies exactly over the screen).
    */
   barLayout?: "outside" | "overlay";
+  /** Renders the bar (as a row) into this element instead, e.g. a frame's tools strip. */
+  barTarget?: HTMLElement | null;
   /** Space (tapped, not held for panning) plays / pauses the video. */
   spacePlays?: boolean;
   /** Ctrl+Z / Ctrl+Y undo turns, flips, crop and colour (default true). */
@@ -1043,10 +1046,12 @@ export default function Viewer(props: ViewerProps) {
   const s = settings;
   const fmtPct = (v: number) => `${Math.round(v * 100)}%`;
   const total = video && video.duration ? Math.max(1, Math.round(video.duration * fps)) : 0;
-  const outside = barLayout === "outside" && bar !== "none";
+  const portal = !!props.barTarget && bar !== "none";
+  const outside = barLayout === "outside" && bar !== "none" && !portal;
+  const rowBar = outside || portal;
   const swatches =
     picked.length > 0 && inspector ? (
-      <div data-viewer-ui className={cn("z-20 flex gap-1 rounded-lg border border-white/10 bg-[#14161c]/85 p-1", outside ? "w-fit" : "absolute bottom-2 left-2")} onPointerDown={(e) => e.stopPropagation()}>
+      <div data-viewer-ui className={cn("z-20 flex gap-1 rounded-lg border border-white/10 bg-[#14161c]/85 p-1", rowBar ? "w-fit" : "absolute bottom-2 left-2")} onPointerDown={(e) => e.stopPropagation()}>
         {picked.map((h) => (
           <button
             key={h}
@@ -1064,7 +1069,7 @@ export default function Viewer(props: ViewerProps) {
     ) : null;
   const hint =
     cropping && !cropDraft ? (
-      <div className={cn("pointer-events-none z-20 rounded-md bg-black/75 px-2 py-1 text-[11px] text-white", outside ? "w-fit" : "absolute bottom-2 right-2")}>Drag a box over the part to keep · Esc cancels</div>
+      <div className={cn("pointer-events-none z-20 rounded-md bg-black/75 px-2 py-1 text-[11px] text-white", rowBar ? "w-fit" : "absolute bottom-2 right-2")}>Drag a box over the part to keep · Esc cancels</div>
     ) : null;
   const barEl =
     bar !== "none" ? (
@@ -1075,7 +1080,7 @@ export default function Viewer(props: ViewerProps) {
           onPointerDown={(e) => e.stopPropagation()}
           onDoubleClick={(e) => e.stopPropagation()}
           className={cn(
-            outside
+            rowBar
               ? cn("relative z-20 flex shrink-0 flex-col gap-1 bg-[#101217] px-1.5 py-1", barPlace === "top" ? "border-b border-white/10" : "border-t border-white/10")
               : cn("absolute left-2 right-2 z-20 flex flex-col gap-1 transition-opacity duration-150", barPlace === "top" ? "top-2" : "bottom-2"),
             // Menus open upwards from a bar at the bottom.
@@ -1343,8 +1348,8 @@ export default function Viewer(props: ViewerProps) {
               </Btn>
             </div>
           )}
-          {outside && swatches}
-          {outside && hint}
+          {rowBar && swatches}
+          {rowBar && hint}
         </div>
     ) : null;
   const cursor = dragRef.current?.kind === "pan" && dragRef.current.moved ? "grabbing" : measuring || cropping || inspector || props.pointer ? "crosshair" : leftDragPans ? "grab" : "default";
@@ -1388,23 +1393,28 @@ export default function Viewer(props: ViewerProps) {
         />
         <canvas ref={ovlRef} className="absolute inset-0 h-full w-full" />
       </div>
-      {!outside && barEl}
+      {!rowBar && barEl}
 
       {inspector && hover && hover.rgba && (
         <PixelLabel x={hover.p.x + (s.crop?.x ?? 0)} y={hover.p.y + (s.crop?.y ?? 0)} rgba={hover.rgba} at={hover.at} stage={stage} />
       )}
 
-      {!outside && swatches}
+      {!rowBar && swatches}
 
       {status && (
         <div className="pointer-events-none absolute bottom-2 left-1/2 z-30 -translate-x-1/2 rounded-md bg-black/80 px-2.5 py-1 text-[11px] text-white">{status}</div>
       )}
-      {!outside && hint}
+      {!rowBar && hint}
       <EscCancel active={cropping || measuring} onCancel={() => (setCropping(false), setMeasuring(false), setMeasureLine(null), setCropDraft(null))} />
     </div>
   );
-  if (!outside)
-    return stageEl;
+  if (portal) return (
+    <>
+      {stageEl}
+      {createPortal(barEl, props.barTarget!)}
+    </>
+  );
+  if (!outside) return stageEl;
   return (
     <div className={cn("relative flex h-full w-full flex-col overflow-hidden", props.className)} data-viewer-root>
       {barPlace === "top" && barEl}

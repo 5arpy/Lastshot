@@ -35,7 +35,9 @@ pub struct ProfileMapEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+// A missing field takes its default: an older or hand-edited file keeps
+// everything else instead of being thrown away whole.
+#[serde(rename_all = "camelCase", default)]
 pub struct Settings {
     pub buffer_seconds: u32,
     pub target_fps: u32,
@@ -472,7 +474,10 @@ impl Settings {
         let path = Self::config_path();
         match std::fs::read_to_string(&path) {
             Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|e| {
-                log::warn!("[lastshot] settings parse error ({e}); using defaults");
+                // Keep the unreadable file: the defaults are saved over it later.
+                let bad = path.with_extension("json.unreadable");
+                let _ = std::fs::write(&bad, &raw);
+                log::warn!("[lastshot] settings parse error ({e}); using defaults, old file kept as {}", bad.display());
                 Self::default()
             }),
             Err(_) => Self::default(),
@@ -492,6 +497,14 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_partial_file_keeps_what_it_has() {
+        let s: Settings = serde_json::from_str(r#"{"adaptiveEco": true, "shareSizeMb": 33}"#).unwrap();
+        assert!(s.adaptive_eco);
+        assert_eq!(s.share_size_mb, 33.0);
+        assert_eq!(s.buffer_seconds, Settings::default().buffer_seconds);
+    }
 
     #[test]
     fn performance_mode_caps_replay_to_1080p60() {

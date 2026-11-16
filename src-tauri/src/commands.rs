@@ -774,6 +774,13 @@ pub fn update_settings(
                 }
             }
         }
+        // ...nor the mic-mute or frames click-through shortcut.
+        for changed in [&patch.hotkey_save, &patch.hotkey_toggle, &patch.hotkey_snip, &patch.hotkey_record].into_iter().flatten() {
+            let other = crate::hotkeys::used_by(&app, changed, "main").filter(|n| *n == "Mic mute" || *n == "Pop-out frames click-through");
+            if let Some(name) = other {
+                return Err(format!("'{changed}' is already the shortcut for {name}"));
+            }
+        }
     }
     if let Some(v) = patch.hotkey_save.clone() {
         crate::hotkeys::rebind(&app, &s.hotkey_save, &v)?;
@@ -1102,7 +1109,7 @@ pub async fn cleanup_old_clips(state: State<'_, AppState>, days: u32) -> Result<
         clips
             .into_iter()
             .filter(|c| {
-                chrono::DateTime::from_timestamp_millis(c.created_unix_ms as i64)
+                chrono::DateTime::from_timestamp_millis(c.created_unix_ms)
                     .is_some_and(|created| created < cutoff)
                     && !meta.get(&c.path).favorite
             })
@@ -1393,7 +1400,7 @@ mod tests {
     fn passes_through_playheads_inside_the_media() {
         assert_eq!(split_at_seconds(10.0, 5.0).unwrap(), 5.0);
         assert_eq!(split_at_seconds(60.0, 30.0).unwrap(), 30.0);
-        assert_eq!(split_at_seconds(10.0, 3.14159).unwrap(), 3.14159);
+        assert_eq!(split_at_seconds(10.0, 3.25).unwrap(), 3.25);
     }
 
     #[test]

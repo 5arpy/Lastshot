@@ -79,6 +79,29 @@ pub fn rebind(app: &AppHandle, previous: &str, next: &str) -> Result<(), String>
     Ok(())
 }
 
+/// The name of the action that already uses `accel` (other than `me`), so
+/// one combo never drives two things. Covers the four main shortcuts, the
+/// mic-mute shortcut and the frames click-through shortcut.
+pub fn used_by(app: &AppHandle, accel: &str, me: &str) -> Option<&'static str> {
+    let want = parse(accel).ok()?;
+    let st = app.try_state::<AppState>()?;
+    let (save, toggle, snip, record, mic) = {
+        let s = st.settings.read();
+        (s.hotkey_save.clone(), s.hotkey_toggle.clone(), s.hotkey_snip.clone(), s.hotkey_record.clone(), s.audio_guard.mic_mute_hotkey.clone())
+    };
+    let all = [
+        ("save", "Save replay", save),
+        ("toggle", "Instant replay on/off", toggle),
+        ("snip", "Screenshot", snip),
+        ("record", "Screen recording", record),
+        ("mic", "Mic mute", mic),
+        ("frames", "Pop-out frames click-through", crate::frames::frame_get_hotkey()),
+    ];
+    all.into_iter()
+        .find(|(id, _, k)| *id != me && !k.is_empty() && parse(k).map(|s| s == want).unwrap_or(false))
+        .map(|(_, name, _)| name)
+}
+
 /// The single handler wired into the plugin builder.
 pub fn on_shortcut(app: &AppHandle, shortcut: &Shortcut, state: ShortcutState) {
     if state != ShortcutState::Pressed {

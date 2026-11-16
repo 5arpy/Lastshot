@@ -783,6 +783,9 @@ pub fn frame_set_hotkey(app: AppHandle, hotkey: String) -> Result<String, String
     }
     if !hotkey.is_empty() {
         crate::hotkeys::validate(&hotkey)?;
+        if let Some(other) = crate::hotkeys::used_by(&app, &hotkey, "frames") {
+            return Err(format!("'{hotkey}' is already the shortcut for {other}"));
+        }
     }
     // Kept working by the shortcut guard (retries, self-check); never in
     // test copies.

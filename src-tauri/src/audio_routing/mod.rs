@@ -39,7 +39,7 @@ pub fn upsert_rule(rules: &mut Vec<AppOutputRule>, exe: &str, device: Option<(&s
     rules.retain(|r| !r.exe.eq_ignore_ascii_case(exe));
     if let Some((id, name)) = device {
         rules.push(AppOutputRule { exe: exe.to_string(), device_id: id.to_string(), device_name: name.to_string() });
-        rules.sort_by(|a, b| a.exe.to_lowercase().cmp(&b.exe.to_lowercase()));
+        rules.sort_by_cached_key(|a| a.exe.to_lowercase());
     }
     *rules != before
 }

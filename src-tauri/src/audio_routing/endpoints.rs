@@ -169,7 +169,7 @@ mod imp {
                 out.push(Endpoint { id, name, flow: if render { "render" } else { "capture" }, is_default });
             }
         }
-        out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        out.sort_by_cached_key(|a| a.name.to_lowercase());
         out
     }
 

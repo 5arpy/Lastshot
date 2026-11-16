@@ -1015,11 +1015,11 @@ impl CaptureEngine {
             // Volumes are 0-100; the audio thread works in permille so a fresh
             // engine always starts from the saved mix balance.
             self.game_gain.store(
-                (cfg.game_volume.min(100) as u32) * 10,
+                cfg.game_volume.min(100) * 10,
                 Ordering::Release,
             );
             self.mic_gain.store(
-                (cfg.mic_volume.min(100) as u32) * 10,
+                cfg.mic_volume.min(100) * 10,
                 Ordering::Release,
             );
             *self.mic_device.write() = cfg.mic_device_id.clone();
@@ -2397,7 +2397,7 @@ mod win {
                 return Ok(());
             };
 
-            let flags = MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(MF_EVENT_FLAG_NO_WAIT.0 as u32);
+            let flags = MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(MF_EVENT_FLAG_NO_WAIT.0);
             loop {
                 let evt = match gen.GetEvent(flags) {
                     Ok(e) => e,

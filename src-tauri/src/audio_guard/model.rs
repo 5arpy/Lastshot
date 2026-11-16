@@ -394,7 +394,7 @@ pub fn diff(from: &Snapshot, to: &Snapshot) -> Vec<Change> {
 /// older than `max_age_ms`. Named ones are never pruned. Returns ids.
 pub fn prune(snaps: &[(String, u64, bool)], now: u64, keep: usize, max_age_ms: u64) -> Vec<String> {
     let mut auto: Vec<&(String, u64, bool)> = snaps.iter().filter(|s| !s.2).collect();
-    auto.sort_by(|a, b| b.1.cmp(&a.1));
+    auto.sort_by_key(|s| std::cmp::Reverse(s.1));
     auto.iter()
         .enumerate()
         .filter(|(i, s)| *i >= keep || now.saturating_sub(s.1) > max_age_ms)

@@ -1042,6 +1042,9 @@ pub async fn guard_set_settings(app: AppHandle, settings_new: GuardSettings) -> 
         if gs.mic_mute_hotkey != old.mic_mute_hotkey {
             if !gs.mic_mute_hotkey.is_empty() {
                 crate::hotkeys::validate(&gs.mic_mute_hotkey)?;
+                if let Some(other) = crate::hotkeys::used_by(&app, &gs.mic_mute_hotkey, "mic") {
+                    return Err(format!("'{}' is already the shortcut for {other}", gs.mic_mute_hotkey));
+                }
             }
             // Kept working by the shortcut guard; a taken combo shows in Settings.
             if let Err(e) = crate::hotkey_guard::set(&app, "mic", &gs.mic_mute_hotkey) {
@@ -1214,7 +1217,7 @@ pub async fn guard_set_app_volume(app: AppHandle, exe: String, volume: Option<f3
             save_settings(&app, gs)?;
         }
         if let Some(m) = mute {
-            log(&app, "app-volume", short(&exe).to_string(), (!m).then_some("muted").unwrap_or("not muted").into(), m.then_some("muted").unwrap_or("not muted").into(), Cause::Lastshot, "changed in Lastshot");
+            log(&app, "app-volume", short(&exe).to_string(), (if m { "not muted" } else { "muted" }).into(), (if m { "muted" } else { "not muted" }).into(), Cause::Lastshot, "changed in Lastshot");
         }
         Ok(n)
     })

@@ -477,7 +477,7 @@ mod imp {
                 if let Ok(rate) = t.GetUINT64(&MF_MT_FRAME_RATE) {
                     let num = (rate >> 32) as u32;
                     let den = (rate & 0xFFFF_FFFF) as u32;
-                    out.fps = if den > 0 { num / den } else { num };
+                    out.fps = num.checked_div(den).unwrap_or(num);
                 }
             }
             out.has_audio = reader

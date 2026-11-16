@@ -1033,6 +1033,7 @@ export default function EditorView(props: EditorProps) {
       { keys: "Ctrl+Shift+C", label: "Copy the frame as a picture", group: "File", run: () => void snapshot("copy") },
       { keys: "?", label: "Show all shortcuts", group: "Help", run: () => setHelp((h) => !h) },
       { keys: "F1", label: "Show all shortcuts", group: "Help", run: () => setHelp((h) => !h) },
+      { keys: "Ctrl+Shift+P", label: "Find and run any action", group: "Help", run: () => setHelp(true) },
     ];
     return [...editorKeymap(a), ...extra];
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1810,32 +1811,62 @@ function AskDialog({ ask, onClose }: { ask: Ask; onClose: () => void }) {
 }
 
 function KeysHelp({ list, onClose }: { list: Shortcut[]; onClose: () => void }) {
-  const groups = new Map<string, Map<string, string[]>>();
+  // Also a command palette: type to find an action, Enter or a click runs it.
+  const [q, setQ] = useState("");
+  const words = q.toLowerCase().split(/\s+/).filter(Boolean);
+  const groups = new Map<string, Map<string, { keys: string[]; s: Shortcut }>>();
   for (const s of list) {
-    const g = groups.get(s.group ?? "Other") ?? new Map<string, string[]>();
-    const keys = g.get(s.label) ?? [];
-    if (!/^[0-9]$/.test(s.keys) || s.keys === "1") keys.push(/^[0-9]$/.test(s.keys) ? "0-9" : s.keys.replace("Arrow", ""));
-    g.set(/^Opacity/.test(s.label) ? "Opacity (10 % - 100 %)" : s.label, keys);
+    const label = /^Opacity/.test(s.label) ? "Opacity (10 % - 100 %)" : s.label;
+    const hay = `${label} ${s.keys} ${s.group ?? ""}`.toLowerCase();
+    if (words.length && !words.every((w) => hay.includes(w))) continue;
+    const g = groups.get(s.group ?? "Other") ?? new Map<string, { keys: string[]; s: Shortcut }>();
+    const row = g.get(label) ?? { keys: [], s };
+    if (!/^[0-9]$/.test(s.keys) || s.keys === "1") row.keys.push(/^[0-9]$/.test(s.keys) ? "0-9" : s.keys.replace("Arrow", ""));
+    g.set(label, row);
     groups.set(s.group ?? "Other", g);
   }
+  const rows = [...groups.values()].flatMap((g) => [...g.values()]);
+  const run = (s: Shortcut) => {
+    onClose();
+    if (!s.when || s.when()) window.setTimeout(() => s.run(), 0);
+  };
   return (
     <div className="fixed inset-0 z-[90] grid place-items-center bg-black/50" onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="max-h-[85vh] w-[min(920px,94vw)] overflow-y-auto rounded-xl border border-line-2 bg-surface p-5 shadow-2xl">
-        <div className="mb-3 flex items-center">
-          <div className="flex-1 text-[14px] font-semibold text-ink">Editor shortcuts</div>
-          <button type="button" onClick={onClose} className="text-ink-3 hover:text-ink">
+      <div className="flex max-h-[85vh] w-[min(920px,94vw)] flex-col rounded-xl border border-line-2 bg-surface p-5 shadow-2xl">
+        <div className="mb-3 flex items-center gap-3">
+          <div className="text-[14px] font-semibold text-ink">Editor shortcuts</div>
+          <input
+            autoFocus
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Escape") onClose();
+              if (e.key === "Enter" && rows[0]) run(rows[0].s);
+            }}
+            placeholder="Find an action… (Enter runs the first)"
+            title="Search every action; Enter runs the first match"
+            className="h-7 min-w-0 flex-1 rounded-md border border-line bg-surface-2 px-2 text-[12px] text-ink placeholder:text-ink-4 focus:border-accent focus:outline-none"
+          />
+          <button type="button" onClick={onClose} className="text-ink-3 hover:text-ink" title="Close (Esc)">
             <Ico d={I.close} />
           </button>
         </div>
-        <div className="columns-1 gap-6 sm:columns-2 lg:columns-3">
+        <div className="min-h-0 columns-1 gap-6 overflow-y-auto sm:columns-2 lg:columns-3">
+          {!rows.length && <div className="text-[12px] text-ink-3">Nothing matches.</div>}
           {[...groups].map(([g, items]) => (
             <div key={g} className="mb-4 break-inside-avoid">
               <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-ink-3">{g}</div>
-              {[...items].map(([label, keys]) => (
-                <div key={label} className="flex items-baseline justify-between gap-3 py-0.5 text-[11.5px]">
+              {[...items].map(([label, { keys, s }]) => (
+                <button
+                  type="button"
+                  key={label}
+                  onClick={() => run(s)}
+                  className="flex w-full items-baseline justify-between gap-3 rounded px-1 py-0.5 text-left text-[11.5px] hover:bg-surface-3"
+                >
                   <span className="text-ink-2">{label}</span>
                   <span className="shrink-0 text-right font-mono text-[10.5px] text-ink-4">{[...new Set(keys)].join(" · ")}</span>
-                </div>
+                </button>
               ))}
             </div>
           ))}

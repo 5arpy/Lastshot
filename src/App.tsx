@@ -441,6 +441,8 @@ export default function App() {
     attach(Promise.resolve(lastshot.onRecording(applyBar)));
     // Videos dropped on the window, or opened with "Open with Lastshot".
     const openFile = async (path: string) => {
+      // Pictures (a snip sent to the editor) open as an editor project.
+      if (/\.(png|jpe?g|webp|gif|bmp)$/i.test(path)) return sendToEditor([path], { mode: "open" });
       try {
         const clip = await lastshot.openVideoFile(path);
         setActiveClip(clip);

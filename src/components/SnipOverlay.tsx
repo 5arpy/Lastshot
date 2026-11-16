@@ -321,7 +321,8 @@ export default function SnipOverlay() {
   ) : null;
 
   const finish = useCallback(
-    async (save: boolean) => {
+    /** `toEditor`: saved, then opened in the main window's editor. */
+    async (save: boolean, toEditor = false) => {
       const c = canvasRef.current;
       if (!c || !sel || busy) return;
       setBusy(save ? "Saving…" : "Copying…");
@@ -331,7 +332,12 @@ export default function SnipOverlay() {
           const s = await lastshot.getSettings().catch(() => null);
           const jpg =
             s?.screenshotFormat === "jpg" ? c.toDataURL("image/jpeg", (s.screenshotQuality ?? 90) / 100) : undefined;
-          await lastshot.snipFinish(png, true, save, jpg);
+          const done = await lastshot.snipFinish(png, true, save || toEditor, jpg);
+          if (toEditor && done.path) {
+            const t = (window as unknown as { __TAURI__: { core: { invoke: (c: string) => Promise<unknown> }; event: { emitTo: (to: string, e: string, p: unknown) => Promise<void> } } }).__TAURI__;
+            await t.core.invoke("show_main_window").catch(() => undefined);
+            await t.event.emitTo("main", "lastshot://open-file", done.path).catch(() => undefined);
+          }
         } else {
           const a = document.createElement("a");
           a.href = png;
@@ -404,6 +410,7 @@ export default function SnipOverlay() {
       if (ctrl && (k === "y" || (e.shiftKey && k === "z"))) return done(), redo();
       if (ctrl && !e.shiftKey && k === "c") return done(), void finish(false);
       if (ctrl && k === "s") return done(), void finish(true);
+      if (ctrl && k === "e") return done(), void finish(true, true);
       if (ctrl && k === "p") return done(), void popOut();
       if (ctrl && k === "a") return done(), setPicked(shapesRef.current.map((s) => s.id));
       if (ctrl && k === "d" && one) return done(), duplicatePicked();
@@ -852,6 +859,15 @@ export default function SnipOverlay() {
               className="rounded-lg border border-white/15 px-2.5 py-1.5 text-[12px] font-medium hover:bg-white/10 disabled:opacity-50"
             >
               Save
+            </button>
+            <button
+              type="button"
+              title="Save and open in the Lastshot editor (Ctrl+E)"
+              disabled={!!busy}
+              onClick={() => void finish(true, true)}
+              className="rounded-lg border border-white/15 px-2.5 py-1.5 text-[12px] font-medium hover:bg-white/10 disabled:opacity-50"
+            >
+              Editor
             </button>
             <button
               type="button"

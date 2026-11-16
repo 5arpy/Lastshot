@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import pro from "lastshot-pro";
-import { assetUrl } from "../lib/bridge";
+import { assetUrl, lastshot } from "../lib/bridge";
 import { cn } from "../utils/cn";
 import { frames, popOutPicturePath, viewFlags, type Frame, type FrameCmd } from "./frames";
 
@@ -48,6 +48,19 @@ export default function FramesPanel({
   const [list, setList] = useState<Frame[]>([]);
   const [hotkey, setHotkey] = useState("");
   const [recording, setRecording] = useState(false);
+  // Apps with a window, for "Only over" (refreshed when the panel opens).
+  const [apps, setApps] = useState<string[]>([]);
+  useEffect(() => {
+    if (!open) return;
+    void lastshot
+      .listWindows()
+      .then((w) => {
+        const seen = new Map<string, string>();
+        for (const x of w) if (x.exe && !/^lastshot/i.test(x.exe)) seen.set(x.exe.toLowerCase(), x.exe);
+        setApps([...seen.values()].sort((a, b) => (/blender/i.test(a) ? -1 : /blender/i.test(b) ? 1 : a.localeCompare(b))));
+      })
+      .catch(() => undefined);
+  }, [open]);
 
   useEffect(() => {
     let off: (() => void) | undefined;
@@ -179,7 +192,7 @@ export default function FramesPanel({
             </div>
           )}
           {list.map((f) => (
-            <FrameRow key={f.id} f={f} upd={upd} cmd={cmd} fail={fail} />
+            <FrameRow key={f.id} f={f} upd={upd} cmd={cmd} fail={fail} apps={apps} />
           ))}
         </div>
 
@@ -197,7 +210,9 @@ function FrameRow({
   upd,
   cmd,
   fail,
+  apps,
 }: {
+  apps: string[];
   f: Frame;
   upd: (f: Frame, p: Parameters<typeof frames.update>[1]) => void;
   cmd: (f: Frame, c: FrameCmd) => void;
@@ -279,6 +294,22 @@ function FrameRow({
           Full screen
         </button>
       </div>
+
+      <label className="mt-1.5 flex items-center gap-2 text-[11px] text-ink-3" title="Show this frame only while that app (or Lastshot) is in front, so it never covers your browser or a game">
+        <span className="w-12 shrink-0">Show over</span>
+        <select
+          value={f.onlyWith}
+          onChange={(e) => upd(f, { onlyWith: e.target.value })}
+          className="h-6 min-w-0 flex-1 rounded border border-line bg-surface px-1 text-[11px] text-ink"
+        >
+          <option value="">every app</option>
+          {[...new Set([...(f.onlyWith ? [f.onlyWith] : []), ...apps])].map((a) => (
+            <option key={a} value={a}>
+              only {a.replace(/\.exe$/i, "")}
+            </option>
+          ))}
+        </select>
+      </label>
 
       {(f.kind === "image" || f.kind === "video") && (
         <div className="mt-1.5 flex flex-wrap items-center gap-1">

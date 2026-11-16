@@ -274,7 +274,7 @@ function FrameChrome({
             onPointerUp={endDrag}
             onPointerCancel={endDrag}
             onDoubleClick={toggleFull}
-            title="Drag to move (snaps to screen edges and other frames; hold Alt to stop snapping). Double-click: full screen (F)."
+            title="Drag to move (snaps to screen edges and other frames; hold Alt to stop snapping). Double-click: full screen."
             className="flex h-full min-w-0 flex-1 cursor-move items-center gap-1.5 px-1.5"
           >
             <span className="h-3 w-1 shrink-0 rounded-sm bg-white/30" />
@@ -300,17 +300,17 @@ function FrameChrome({
             />
             <span className="w-8 text-right font-mono text-[10px] text-white/70">{Math.round(frame.opacity * 100)}%</span>
           </label>
-          <Btn title="Always on top (T)" on={frame.onTop} onClick={() => patch({ onTop: !frame.onTop })}>
+          <Btn title="Always on top" on={frame.onTop} onClick={() => patch({ onTop: !frame.onTop })}>
             <Icon d={FI.pin} />
           </Btn>
           <Btn
-            title="Click-through (X): clicks go to the app below and this frame cannot be clicked. Turn it off from the Pop-outs panel in Lastshot, the tray menu, or Ctrl+Alt+Shift+X."
+            title="Click-through: clicks go to the app below and this frame cannot be clicked. Turn it off from the Pop-outs panel in Lastshot, the tray menu, or Ctrl+Alt+Shift+X."
             on={frame.clickThrough}
             onClick={() => patch({ clickThrough: true })}
           >
             <Icon d={FI.through} />
           </Btn>
-          <Btn title={full ? "Leave full screen (F or Esc)" : "Full screen (F or double-click the bar)"} on={full} onClick={toggleFull}>
+          <Btn title={full ? "Leave full screen (double-click the bar)" : "Full screen (or double-click the bar)"} on={full} onClick={toggleFull}>
             <Icon d={FI.full} />
           </Btn>
           <Btn title="Show the Pop-outs panel in Lastshot" onClick={() => void frames.showPanel()}>
@@ -319,7 +319,7 @@ function FrameChrome({
           <Btn title="Hide (bring it back from the Pop-outs panel or the tray)" onClick={() => patch({ hidden: true })}>
             <Icon d={FI.hide} />
           </Btn>
-          <Btn title="Close (Ctrl+W)" onClick={close} className="hover:bg-red-500/70">
+          <Btn title="Close" onClick={close} className="hover:bg-red-500/70">
             <Icon d={FI.close} />
           </Btn>
         </div>

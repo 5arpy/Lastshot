@@ -336,7 +336,7 @@ fn window_pid(_hwnd: isize) -> Option<u32> {
 }
 
 #[cfg(windows)]
-fn foreground_pid() -> Option<u32> {
+pub(crate) fn foreground_pid() -> Option<u32> {
     use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
     let hwnd = unsafe { GetForegroundWindow() };
     if hwnd.is_invalid() {
@@ -346,7 +346,7 @@ fn foreground_pid() -> Option<u32> {
 }
 
 #[cfg(not(windows))]
-fn foreground_pid() -> Option<u32> {
+pub(crate) fn foreground_pid() -> Option<u32> {
     None
 }
 

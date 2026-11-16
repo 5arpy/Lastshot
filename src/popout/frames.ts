@@ -23,6 +23,8 @@ export interface Frame {
   onTop: boolean;
   clickThrough: boolean;
   hidden: boolean;
+  /** Only shown while this app (exe name) or Lastshot is in front; "" = always. */
+  onlyWith: string;
   view: unknown;
   owned: boolean;
   createdMs: number;
@@ -35,6 +37,7 @@ export interface FramePatch {
   hidden?: boolean;
   view?: unknown;
   title?: string;
+  onlyWith?: string;
 }
 
 export interface OpenFrame {

@@ -58,6 +58,9 @@ pub struct Frame {
     pub on_top: bool,
     pub click_through: bool,
     pub hidden: bool,
+    /// Only shown while this app (exe name, e.g. "blender.exe") or Lastshot
+    /// is in front; "" = over every app.
+    pub only_with: String,
     /// The frame's own view and settings (zoom, colour, crop, video, board
     /// items…), owned by the frontend.
     pub view: serde_json::Value,
@@ -81,6 +84,7 @@ impl Default for Frame {
             on_top: true,
             click_through: false,
             hidden: false,
+            only_with: String::new(),
             view: serde_json::Value::Null,
             owned: false,
             created_ms: 0,
@@ -110,6 +114,7 @@ pub struct FramePatch {
     pub hidden: Option<bool>,
     pub view: Option<serde_json::Value>,
     pub title: Option<String>,
+    pub only_with: Option<String>,
 }
 
 impl Frame {
@@ -138,6 +143,11 @@ impl Frame {
         }
         if let Some(t) = &p.title {
             self.title = t.chars().take(120).collect();
+        }
+        if let Some(o) = &p.only_with {
+            let o: String = o.trim().chars().take(80).collect();
+            shown |= o != self.only_with;
+            self.only_with = o;
         }
         (top, through, shown)
     }
@@ -281,17 +291,11 @@ fn window(app: &AppHandle, id: &str) -> Option<WebviewWindow> {
     app.get_webview_window(&label_of(id))
 }
 
-/// Shows a window without activating it.
+/// Shows a window without activating it. Frames are built with
+/// `focused(false)`, which makes tao show them with SW_SHOWNOACTIVATE every
+/// time; going through tao also keeps its idea of "visible" right (a raw
+/// ShowWindow would be undone by tao's next style change).
 fn show_quietly(win: &WebviewWindow) {
-    #[cfg(windows)]
-    if let Ok(hwnd) = win.hwnd() {
-        use windows::Win32::Foundation::HWND;
-        use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWNOACTIVATE};
-        unsafe {
-            let _ = ShowWindow(HWND(hwnd.0 as _), SW_SHOWNOACTIVATE);
-        }
-        return;
-    }
     let _ = win.show();
 }
 
@@ -381,7 +385,7 @@ fn build_window(app: &AppHandle, f: &Frame) -> Result<WebviewWindow, String> {
         let _ = win.set_ignore_cursor_events(true);
         keep_visible(&win);
     }
-    if !f.hidden {
+    if !f.hidden && over_its_app(f) {
         show_quietly(&win);
     }
     Ok(win)
@@ -608,12 +612,15 @@ pub fn frame_update(app: AppHandle, id: String, patch: FramePatch) -> Result<Fra
             set_click_through(&app, &win, f.click_through);
         }
         if shown {
-            if f.hidden {
+            if f.hidden || !over_its_app(&f) {
                 let _ = win.hide();
             } else {
                 show_quietly(&win);
             }
         }
+    }
+    if patch.only_with.is_some() {
+        start_follow(&app);
     }
     // Every window hears it (view changes too, so the Pop-outs panel shows
     // flip, grayscale and grid); frames save their view at most every 0.7 s.
@@ -924,6 +931,89 @@ pub(crate) fn allow_file(app: &AppHandle, path: &str) {
 }
 
 // ---------------------------------------------------------------------------
+// "Only over one app": the frame shows while that app (or Lastshot) is in
+// front and hides when anything else is, so a tracing frame never covers
+// the browser or a game. A light thread (5 checks a second, one window
+// query each) runs only while a frame uses it.
+// ---------------------------------------------------------------------------
+
+static FRONT: Mutex<Option<String>> = Mutex::new(None);
+
+/// True when the app in front is the one this frame follows, or Lastshot.
+pub fn front_matches(only_with: &str, front: Option<&str>) -> bool {
+    if only_with.is_empty() {
+        return true;
+    }
+    match front {
+        None => true, // unknown (desktop, lock screen): leave it as it is
+        Some(e) => e.eq_ignore_ascii_case(only_with) || e.to_ascii_lowercase().starts_with("lastshot"),
+    }
+}
+
+fn over_its_app(f: &Frame) -> bool {
+    if f.only_with.is_empty() {
+        return true;
+    }
+    let front = FRONT.lock().clone();
+    front_matches(&f.only_with, front.as_deref())
+}
+
+fn start_follow(app: &AppHandle) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+    if RUNNING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let app = app.clone();
+    let _ = std::thread::Builder::new().name("frames-follow".into()).spawn(move || {
+        let mut last_pid = 0u32;
+        let mut last_exe: Option<String> = None;
+        let mut shown: std::collections::HashMap<String, bool> = Default::default();
+        loop {
+            let users: Vec<Frame> = all().into_iter().filter(|f| !f.only_with.is_empty()).collect();
+            if users.is_empty() {
+                RUNNING.store(false, Ordering::Release);
+                // A frame may have started following meanwhile.
+                if all().iter().any(|f| !f.only_with.is_empty()) && !RUNNING.swap(true, Ordering::AcqRel) {
+                    continue;
+                }
+                return;
+            }
+            if let Some(pid) = crate::appname::foreground_pid() {
+                if pid != last_pid {
+                    last_pid = pid;
+                    let exe = if pid == std::process::id() { Some("lastshot.exe".to_string()) } else { crate::appname::snapshot_exe(pid) };
+                    // Explorer (desktop, taskbar) and shell pop-ups keep the
+                    // last real app, so clicking the taskbar does not flicker.
+                    if let Some(e) = exe.filter(|e| e.eq_ignore_ascii_case("lastshot.exe") || !crate::appname::is_not_an_app(e)) {
+                        last_exe = Some(e);
+                    }
+                }
+            }
+            *FRONT.lock() = last_exe.clone();
+            for f in users {
+                let want = !f.hidden && front_matches(&f.only_with, last_exe.as_deref());
+                if shown.get(&f.id) == Some(&want) {
+                    continue;
+                }
+                shown.insert(f.id.clone(), want);
+                if let Some(win) = window(&app, &f.id) {
+                    let w2 = win.clone();
+                    let _ = app.run_on_main_thread(move || {
+                        if want {
+                            show_quietly(&w2);
+                        } else {
+                            let _ = w2.hide();
+                        }
+                    });
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Start-up, window events, shortcut, tray
 // ---------------------------------------------------------------------------
 
@@ -964,6 +1054,9 @@ pub fn init(app: &AppHandle) {
     }
     store().lock().file.frames = keep.clone();
     save_soon();
+    if keep.iter().any(|f| !f.only_with.is_empty()) {
+        start_follow(app);
+    }
     for f in keep {
         if let Err(e) = build_window(app, &f) {
             log::warn!("[frames] could not reopen {}: {e}", f.id);
@@ -1235,6 +1328,19 @@ mod tests {
         webp.extend_from_slice(&[0; 8]);
         webp.extend_from_slice(&[0x7F, 0x02, 0x00, 0xDF, 0x01, 0x00]);
         assert_eq!(picture_size(&webp), Some((640, 480)));
+    }
+
+    #[test]
+    fn only_over_one_app() {
+        assert!(front_matches("", Some("chrome.exe")));
+        assert!(front_matches("blender.exe", Some("Blender.exe")));
+        assert!(front_matches("blender.exe", Some("lastshot.exe")));
+        assert!(!front_matches("blender.exe", Some("chrome.exe")));
+        assert!(front_matches("blender.exe", None));
+        let mut f = Frame::default();
+        let (_, _, shown) = f.apply(&FramePatch { only_with: Some(" blender.exe ".into()), ..Default::default() });
+        assert!(shown);
+        assert_eq!(f.only_with, "blender.exe");
     }
 
     #[test]

@@ -3,6 +3,12 @@ import type { ClipMetadata } from "./types";
 import {
   allClips,
   breadcrumb,
+  extraHits,
+  filterKind,
+  mergeListing,
+  moveFocus,
+  typeAhead,
+  entryPath,
   clipGame,
   folderContents,
   go,
@@ -51,7 +57,7 @@ const clips = [
   clip("D:\\More clips\\old.mp4", 500),
 ];
 
-const names = (es: Entry[]) => es.map((e) => (e.kind === "folder" ? `[${e.name}]` : e.clip.file_name));
+const names = (es: Entry[]) => es.map((e) => (e.kind === "folder" ? `[${e.name}]` : e.kind === "clip" ? e.clip.file_name : e.name));
 
 describe("folderContents", () => {
   it("shows game folders with counts, sizes and latest clip, then loose clips (old names too)", () => {
@@ -171,5 +177,87 @@ describe("navigation", () => {
     // 3 columns of 100x80 tiles, 10 px gap.
     expect(tilesInRect({ x0: 50, y0: 50, x1: 160, y1: 100 }, 7, 3, 100, 80, 10)).toEqual([0, 1, 3, 4]);
     expect(tilesInRect({ x0: 101, y0: 0, x1: 109, y1: 300 }, 7, 3, 100, 80, 10)).toEqual([]);
+  });
+});
+
+describe("real folders", () => {
+  const L = (path: string, dir = false, size = 10) => ({ name: path.slice(path.lastIndexOf("\\") + 1), path, dir, size, modifiedMs: 7 });
+
+  it("shows what is really there: gone items go, new folders and files come", () => {
+    const base = folderContents(clips, [], ROOT, ["D:\\More clips"]);
+    const listing = [
+      L(`${ROOT}\\Roblox`, true),
+      L(`${ROOT}\\New folder`, true),
+      L(`${ROOT}\\Valorant Recording 2026-11-16 21-00-00.mp4`),
+      L(`${ROOT}\\shot.png`),
+      // Lastshot_2026-11-01_10-00-00.mp4 was deleted outside.
+    ];
+    const got = mergeListing(base, listing, ROOT);
+    const names = got.map((e) => `${e.kind}:${entryPath(e).slice(ROOT.length + 1) || entryPath(e)}`).sort();
+    expect(names).toEqual([
+      "clip:Valorant Recording 2026-11-16 21-00-00.mp4",
+      "file:shot.png",
+      "folder:D:\\More clips",
+      "folder:New folder",
+      "folder:Roblox",
+    ]);
+    // The scanned folder keeps its clip count.
+    expect(got.find((e) => e.kind === "folder" && e.name === "Roblox")).toMatchObject({ count: 3 });
+  });
+
+  it("files sort after folders and with clips", () => {
+    const es: Entry[] = [
+      { kind: "file", path: `${ROOT}\\a.png`, name: "a.png", size: 5, modified: 9000 },
+      ...folderContents(clips, [], ROOT),
+    ];
+    const sorted = sortEntries(es, { col: "date", desc: true });
+    expect(sorted[0].kind).toBe("folder");
+    expect(entryPath(sorted[1])).toBe(`${ROOT}\\a.png`);
+  });
+
+  it("filters by kind but keeps folders", () => {
+    const es = mergeListing(folderContents(clips, [], ROOT), [L(`${ROOT}\\Roblox`, true), L(`${ROOT}\\x.png`), L(`${ROOT}\\n.txt`), L(`${ROOT}\\Lastshot_2026-11-01_10-00-00.mp4`)], ROOT);
+    expect(filterKind(es, "pictures").map((e) => e.kind)).toEqual(["folder", "file"]);
+    expect(filterKind(es, "videos").map((e) => e.kind).sort()).toEqual(["clip", "folder"]);
+    expect(filterKind(es, "other").length).toBe(2);
+    expect(filterKind(es, "all").length).toBe(4);
+  });
+
+  it("splits videos into clips, recordings and edits", () => {
+    const mk = (n: string): Entry => ({ kind: "file", path: `C:\\v\\${n}`, name: n, size: 1, modified: 1 });
+    const es = [mk("Lastshot_2026-11-01_10-00-00.mp4"), mk("Valorant Recording 2026-11-16 21-00-00.mp4"), mk("Lastshot_Edit_2026-11-01_10-00-00.mp4"), mk("a.png")];
+    const names = (k: Parameters<typeof filterKind>[1]) => filterKind(es, k).map((e) => (e.kind === "file" ? e.name.slice(0, 12) : ""));
+    expect(names("clips")).toEqual(["Lastshot_202"]);
+    expect(names("recordings")).toEqual(["Valorant Rec"]);
+    expect(names("edits")).toEqual(["Lastshot_Edi"]);
+    expect(names("videos").length).toBe(3);
+  });
+
+  it("search adds files on disk that are not clips", () => {
+    const hits = searchClips(clips, "roblox", null);
+    const more = extraHits(hits, [L(`${ROOT}\\Roblox`, true), L(`${ROOT}\\Roblox\\Roblox 2026-11-16 20-15-03.mp4`), L(`${ROOT}\\roblox.png`)], new Set());
+    expect(more.map((e) => e.kind)).toEqual(["folder", "file"]);
+  });
+});
+
+describe("keyboard", () => {
+  it("type-ahead finds and cycles like File Explorer", () => {
+    const names = ["Apex", "Best", "Bingo", "Clips"];
+    expect(typeAhead(names, "b", -1)).toBe(1);
+    expect(typeAhead(names, "b", 1)).toBe(2);
+    expect(typeAhead(names, "bb", 2)).toBe(1);
+    expect(typeAhead(names, "bi", 1)).toBe(2);
+    expect(typeAhead(names, "be", 1)).toBe(1);
+    expect(typeAhead(names, "z", 0)).toBe(-1);
+  });
+
+  it("arrows, Home/End and pages move within the grid", () => {
+    expect(moveFocus("Right", -1, 10, 4, 2)).toBe(0);
+    expect(moveFocus("Down", 1, 10, 4, 2)).toBe(5);
+    expect(moveFocus("Down", 8, 10, 4, 2)).toBe(9);
+    expect(moveFocus("Up", 2, 10, 4, 2)).toBe(0);
+    expect(moveFocus("End", 0, 10, 4, 2)).toBe(9);
+    expect(moveFocus("PageUp", 9, 10, 4, 2)).toBe(1);
+    expect(moveFocus("Home", 5, 0, 4, 2)).toBe(-1);
   });
 });

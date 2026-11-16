@@ -289,58 +289,81 @@ pub fn recycle(paths: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// Watches the save folder (and its subfolders) for new, removed or renamed
-/// files and folders, and tells the window (debounced). Cheap: one change
-/// handle and a 1 s wait; follows the save folder when it changes.
+/// Watches the save folder and every linked library folder (with their
+/// subfolders) for new, removed or renamed files and folders, and tells every
+/// window (debounced). Cheap: one change handle per folder and one wait for
+/// all of them. Follows the folders as they are linked, unlinked, unplugged
+/// and plugged back in.
 #[cfg(windows)]
 pub fn start_watch(app: &AppHandle) {
     use windows::core::HSTRING;
-    use windows::Win32::Foundation::WAIT_OBJECT_0;
+    use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
     use windows::Win32::Storage::FileSystem::{
         FindCloseChangeNotification, FindFirstChangeNotificationW, FindNextChangeNotification, FILE_NOTIFY_CHANGE_DIR_NAME,
         FILE_NOTIFY_CHANGE_FILE_NAME,
     };
-    use windows::Win32::System::Threading::WaitForSingleObject;
+    use windows::Win32::System::Threading::WaitForMultipleObjects;
     let app = app.clone();
     let _ = std::thread::Builder::new().name("lastshot-libwatch".into()).spawn(move || {
-        let mut watching: Option<(PathBuf, windows::Win32::Foundation::HANDLE)> = None;
+        let mut watching: Vec<(String, HANDLE)> = Vec::new();
         let mut pending: Option<std::time::Instant> = None;
+        let mut checked = std::time::Instant::now() - std::time::Duration::from_secs(10);
         loop {
-            let Some(state) = app.try_state::<AppState>() else {
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                continue;
-            };
-            let dir = state.output_dir();
-            if watching.as_ref().map(|(d, _)| d != &dir).unwrap_or(true) {
-                if let Some((_, h)) = watching.take() {
-                    unsafe {
-                        let _ = FindCloseChangeNotification(h);
+            // Which folders to watch (again every 2 s: links change, drives come and go).
+            if checked.elapsed() >= std::time::Duration::from_secs(2) {
+                checked = std::time::Instant::now();
+                let want: Vec<PathBuf> = match app.try_state::<AppState>() {
+                    Some(state) => watch_roots(&roots(&state)),
+                    None => Vec::new(),
+                };
+                let keys: Vec<String> = want.iter().map(|p| norm(p)).collect();
+                watching.retain(|(k, h)| {
+                    let keep = keys.contains(k) && Path::new(k).is_dir();
+                    if !keep {
+                        unsafe {
+                            let _ = FindCloseChangeNotification(*h);
+                        }
                     }
-                }
-                if dir.is_dir() {
+                    keep
+                });
+                for (dir, key) in want.iter().zip(keys) {
+                    if watching.len() >= 60 || watching.iter().any(|(k, _)| k == &key) || !dir.is_dir() {
+                        continue;
+                    }
                     let h = unsafe {
                         FindFirstChangeNotificationW(&HSTRING::from(dir.as_os_str()), true, FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME)
                     };
                     if let Ok(h) = h {
-                        watching = Some((dir.clone(), h));
+                        watching.push((key, h));
                     }
                 }
             }
-            match watching.as_ref() {
-                Some((_, h)) => {
-                    let r = unsafe { WaitForSingleObject(*h, 1000) };
-                    if r == WAIT_OBJECT_0 {
-                        pending.get_or_insert_with(std::time::Instant::now);
-                        if unsafe { FindNextChangeNotification(*h) }.is_err() {
-                            if let Some((_, h)) = watching.take() {
-                                unsafe {
-                                    let _ = FindCloseChangeNotification(h);
-                                }
-                            }
+            if watching.is_empty() {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                continue;
+            }
+            let handles: Vec<HANDLE> = watching.iter().map(|(_, h)| *h).collect();
+            let r = unsafe { WaitForMultipleObjects(&handles, false, 1000) };
+            if r != WAIT_TIMEOUT {
+                let i = r.0.wrapping_sub(WAIT_OBJECT_0.0) as usize;
+                if i < watching.len() {
+                    pending.get_or_insert_with(std::time::Instant::now);
+                    if unsafe { FindNextChangeNotification(watching[i].1) }.is_err() {
+                        // The folder went away (deleted, drive unplugged): drop it; the next check re-adds it.
+                        let (_, h) = watching.remove(i);
+                        unsafe {
+                            let _ = FindCloseChangeNotification(h);
                         }
                     }
+                } else {
+                    // A handle went bad: start over.
+                    for (_, h) in watching.drain(..) {
+                        unsafe {
+                            let _ = FindCloseChangeNotification(h);
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
                 }
-                None => std::thread::sleep(std::time::Duration::from_secs(2)),
             }
             // Debounce: a save or a big move makes many changes at once.
             if pending.map(|t| t.elapsed() >= std::time::Duration::from_millis(600)).unwrap_or(false) {
@@ -349,6 +372,20 @@ pub fn start_watch(app: &AppHandle) {
             }
         }
     });
+}
+
+/// The folders to watch: no duplicates, and none inside another (a watch
+/// covers its subfolders).
+pub fn watch_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for r in roots {
+        if norm(r).is_empty() || out.iter().any(|o| within(r, std::slice::from_ref(o))) {
+            continue;
+        }
+        out.retain(|o| !within(o, std::slice::from_ref(r)));
+        out.push(r.clone());
+    }
+    out
 }
 
 #[cfg(not(windows))]
@@ -374,6 +411,14 @@ mod tests {
         assert!(!within(Path::new(r"C:\Videos\LastshotOther\a.mp4"), &roots));
         assert!(!within(Path::new(r"C:\Videos\Lastshot\..\secret.txt"), &roots));
         assert!(!within(Path::new(r"C:\Windows\a.mp4"), &roots));
+    }
+
+    #[test]
+    fn watches_each_folder_once() {
+        let r = watch_roots(&[PathBuf::from(r"C:\Clips"), PathBuf::from(r"C:\Clips\Roblox"), PathBuf::from(r"D:\Games"), PathBuf::from(r"d:\games\")]);
+        assert_eq!(r, vec![PathBuf::from(r"C:\Clips"), PathBuf::from(r"D:\Games")]);
+        let r = watch_roots(&[PathBuf::from(r"D:\Games\Sub"), PathBuf::from(r"D:\Games")]);
+        assert_eq!(r, vec![PathBuf::from(r"D:\Games")]);
     }
 
     #[test]

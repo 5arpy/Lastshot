@@ -14,6 +14,7 @@ pub mod clipmeta;
 pub mod files;
 pub mod commands;
 pub mod editor;
+pub mod explorer_fs;
 pub mod foreground;
 pub mod frames;
 pub mod hotkey_guard;
@@ -103,6 +104,8 @@ pub fn run() {
         // Second instance ⇒ just surface the existing window; Lastshot is a
         // single-instance app by design (one buffer, one encoder session).
         .manage(AppState::new())
+        // Real paths for files dropped into any window (the Clips explorer).
+        .on_page_load(|webview, _| explorer_fs::attach_drop_paths(webview))
         .setup(|app| {
             let handle = app.handle().clone();
             // Started by Windows: stay in the tray. The window (WebView) is
@@ -408,6 +411,16 @@ pub fn run() {
             library_ops::copy_clips_to,
             library_ops::rename_library_item,
             library_ops::recycle_items,
+            explorer_fs::fs_list_dir,
+            explorer_fs::fs_search,
+            explorer_fs::fs_transfer,
+            explorer_fs::fs_restore,
+            explorer_fs::fs_move_back,
+            explorer_fs::fs_set_clipboard,
+            explorer_fs::fs_clipboard_files,
+            explorer_fs::fs_open_with,
+            explorer_fs::fs_properties,
+            explorer_fs::start_file_drag,
             media::voice::get_audio_levels,
             hotkey_guard::get_hotkey_status,
             hotkey_guard::retry_hotkeys,

@@ -91,7 +91,7 @@ pub fn run() {
             // Old "Shrink & copy" files from previous sessions.
             std::thread::spawn(paths::cleanup_share_temp);
 
-            build_tray(&handle)?;
+            if std::env::var("LASTSHOT_TEST_INSTANCE").as_deref() == Ok("1") { /* no tray in test instances */ } else { build_tray(&handle)?; }
 
             // Audio tab: remembered "this app plays on that output" choices
             // are set again whenever the app starts.

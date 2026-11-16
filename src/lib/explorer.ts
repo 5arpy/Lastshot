@@ -30,9 +30,20 @@ export interface ClipEntry {
   kind: "clip";
   clip: ClipMetadata;
 }
-export type Entry = FolderEntry | ClipEntry;
+/** Any other file in a folder (a picture, a clip not scanned yet, a note…). */
+export interface FileEntry {
+  kind: "file";
+  path: string;
+  name: string;
+  size: number;
+  modified: number;
+  readonly?: boolean;
+}
+export type Entry = FolderEntry | ClipEntry | FileEntry;
 
-export const entryPath = (e: Entry) => (e.kind === "folder" ? e.path : e.clip.path);
+export const entryPath = (e: Entry) => (e.kind === "clip" ? e.clip.path : e.path);
+export const entryName = (e: Entry) => (e.kind === "clip" ? e.clip.file_name : e.name);
+export const isFolder = (e: Entry): e is FolderEntry => e.kind === "folder";
 
 export function normPath(p: string): string {
   return p.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
@@ -192,6 +203,18 @@ export function searchClips(clips: readonly ClipMetadata[], q: string, within: s
 }
 
 function key(e: Entry, col: SortCol): number | string {
+  if (e.kind === "file") {
+    switch (col) {
+      case "date":
+        return e.modified;
+      case "size":
+        return e.size;
+      case "name":
+        return e.name.toLowerCase();
+      default:
+        return col === "game" ? "" : 0;
+    }
+  }
   if (e.kind === "folder") {
     switch (col) {
       case "date":
@@ -231,7 +254,7 @@ export function sortEntries(entries: readonly Entry[], spec: SortSpec): Entry[] 
     return r !== 0 ? r * dir : entryPath(a).localeCompare(entryPath(b));
   };
   const folders = entries.filter((e) => e.kind === "folder").sort(cmp);
-  const files = entries.filter((e) => e.kind === "clip").sort(cmp);
+  const files = entries.filter((e) => e.kind !== "folder").sort(cmp);
   return [...folders, ...files];
 }
 
@@ -307,4 +330,131 @@ export function tilesInRect(
     if (x < r && x + tileW > l && y < b && y + tileH > t) out.push(i);
   }
   return out;
+}
+
+/** One item of a real folder listing (what `fs_list_dir` returns). */
+export interface Listed {
+  name: string;
+  path: string;
+  dir: boolean;
+  size: number;
+  modifiedMs: number;
+  readonly?: boolean;
+}
+
+/**
+ * What is really in `dir`: the clips view (`base`, from the library scan)
+ * merged with a live listing of the folder. The listing wins: items deleted
+ * outside disappear at once, new folders and other files (pictures, notes,
+ * clips not scanned yet) show up. Linked folders shown at the top stay.
+ */
+export function mergeListing(base: readonly Entry[], listing: readonly Listed[], dir: string): Entry[] {
+  const here = new Map<string, Listed>();
+  for (const l of listing) here.set(normPath(l.path), l);
+  const out: Entry[] = [];
+  const seen = new Set<string>();
+  for (const e of base) {
+    const k = normPath(entryPath(e));
+    const l = here.get(k);
+    const inDir = samePath(parentOf(entryPath(e)), dir);
+    if (e.kind === "folder" && e.external && !inDir) {
+      out.push(e);
+      continue;
+    }
+    if (!l) continue; // gone (deleted or moved outside)
+    seen.add(k);
+    out.push(e);
+  }
+  for (const [k, l] of here) {
+    if (seen.has(k)) continue;
+    out.push(
+      l.dir
+        ? { kind: "folder", path: l.path, name: l.name, count: 0, bytes: 0, latest: null }
+        : { kind: "file", path: l.path, name: l.name, size: l.size, modified: l.modifiedMs, readonly: l.readonly || undefined },
+    );
+  }
+  return out;
+}
+
+/** Search hits on disk that are not clips already shown. */
+export function extraHits(clipHits: readonly Entry[], disk: readonly Listed[], clipPaths: ReadonlySet<string>): Entry[] {
+  const shown = new Set(clipHits.map((e) => normPath(entryPath(e))));
+  const out: Entry[] = [];
+  for (const l of disk) {
+    const k = normPath(l.path);
+    if (shown.has(k) || clipPaths.has(k)) continue;
+    shown.add(k);
+    out.push(
+      l.dir
+        ? { kind: "folder", path: l.path, name: l.name, count: 0, bytes: 0, latest: null }
+        : { kind: "file", path: l.path, name: l.name, size: l.size, modified: l.modifiedMs, readonly: l.readonly || undefined },
+    );
+  }
+  return out;
+}
+
+export type KindFilter = "all" | "videos" | "pictures" | "other";
+const VIDEO = /\.(mp4|m4v|mov|mkv|webm|avi|wmv|flv|ts|mts)$/i;
+const PICTURE = /\.(png|jpe?g|gif|webp|bmp|tiff?|ico|avif|heic)$/i;
+
+/** Show only one kind of file (folders always stay, so you can still go in). */
+export function filterKind(entries: readonly Entry[], kind: KindFilter): Entry[] {
+  if (kind === "all") return [...entries];
+  return entries.filter((e) => {
+    if (e.kind === "folder") return true;
+    const name = entryName(e);
+    const k = e.kind === "clip" || VIDEO.test(name) ? "videos" : PICTURE.test(name) ? "pictures" : "other";
+    return k === kind;
+  });
+}
+
+/**
+ * Type-ahead like File Explorer: the next item (after `from`) whose name
+ * starts with `typed`; typing one letter again cycles through those items.
+ */
+export function typeAhead(names: readonly string[], typed: string, from: number): number {
+  const t = typed.toLowerCase();
+  if (!t || !names.length) return -1;
+  const same = t.split("").every((c) => c === t[0]);
+  const want = same && t.length > 1 ? t[0] : t;
+  const start = same || t.length === 1 ? from + 1 : Math.max(0, from);
+  for (let i = 0; i < names.length; i++) {
+    const j = (start + i) % names.length;
+    if (names[j].toLowerCase().startsWith(want)) return j;
+  }
+  return -1;
+}
+
+/** Where keyboard focus goes in a grid of `cols` columns. */
+export function moveFocus(key: string, at: number, count: number, cols: number, pageRows: number): number {
+  if (!count) return -1;
+  const c = Math.max(1, cols);
+  let i = at < 0 ? 0 : at;
+  switch (key) {
+    case "Left":
+      i = at < 0 ? 0 : i - 1;
+      break;
+    case "Right":
+      i = at < 0 ? 0 : i + 1;
+      break;
+    case "Up":
+      i = at < 0 ? 0 : i - c;
+      break;
+    case "Down":
+      i = at < 0 ? 0 : i + c;
+      break;
+    case "Home":
+      i = 0;
+      break;
+    case "End":
+      i = count - 1;
+      break;
+    case "PageUp":
+      i -= c * Math.max(1, pageRows);
+      break;
+    case "PageDown":
+      i += c * Math.max(1, pageRows);
+      break;
+  }
+  return Math.min(count - 1, Math.max(0, i));
 }

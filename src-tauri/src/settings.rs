@@ -175,6 +175,9 @@ pub struct Settings {
     /// Where each popped-out tab's window was last (logical pixels).
     #[serde(default)]
     pub popout_places: Vec<WindowPlace>,
+    /// Audio tab → Cables.
+    #[serde(default)]
+    pub cables: crate::cables::CableSettings,
 }
 
 /// A popped-out tab's window size and position.
@@ -318,6 +321,7 @@ impl Default for Settings {
             streamer_mode: false,
             app_outputs: Vec::new(),
             popout_places: Vec::new(),
+            cables: Default::default(),
         }
     }
 }

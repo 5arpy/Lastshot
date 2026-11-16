@@ -11,6 +11,8 @@ import {
   type VmStatus,
 } from "../lib/audio";
 import { lastshot } from "../lib/bridge";
+import { cableOutputIds, type CablesView } from "../lib/cables";
+import CablesSection from "./CablesSection";
 import { cn } from "../utils/cn";
 
 /**
@@ -80,6 +82,7 @@ export default function AudioPanel({ active = true, onToast }: { active?: boolea
   const [devices, setDevices] = useState<RenderDevice[]>([]);
   const [rules, setRules] = useState<AppOutputRule[]>([]);
   const [starting, setStarting] = useState(false);
+  const [cablesView, setCablesView] = useState<CablesView | null>(null);
   const shown = useWindowShown();
   const live = active && shown;
   /** No status refresh over a control that is being moved. */
@@ -251,7 +254,7 @@ export default function AudioPanel({ active = true, onToast }: { active?: boolea
                 <b>Voicemeeter isn't installed.</b>{" "}
                 <span className="text-ink-3">
                   This tab controls Voicemeeter, VB-Audio's virtual mixer (free from vb-audio.com). Sending apps to an
-                  output below works without it.
+                  output and Lastshot's own Cables below work without it.
                 </span>
               </div>
             )}
@@ -336,6 +339,8 @@ export default function AudioPanel({ active = true, onToast }: { active?: boolea
         </>
       )}
 
+      <CablesSection live={live} onToast={onToast} onView={setCablesView} />
+
       {/* Apps */}
       <section className="panel rounded-xl p-5">
         <SectionHead
@@ -358,7 +363,7 @@ export default function AudioPanel({ active = true, onToast }: { active?: boolea
                 </div>
                 <label className="flex shrink-0 items-center gap-2 text-[12px] text-ink-3">
                   Send to
-                  <DeviceSelect devices={devices} value={a.output} onChange={(id) => void sendApp(a, id)} />
+                  <DeviceSelect devices={devices} cableIds={cableOutputIds(cablesView)} value={a.output} onChange={(id) => void sendApp(a, id)} />
                 </label>
               </div>
             ))}
@@ -399,15 +404,19 @@ function SectionHead({ title, hint }: { title: string; hint: string }) {
 
 function DeviceSelect({
   devices,
+  cableIds,
   value,
   onChange,
 }: {
   devices: RenderDevice[];
+  /** Render endpoints that are Lastshot cables. */
+  cableIds: Set<string>;
   value: string | null;
   onChange: (id: string | null) => void;
 }) {
   const vm = devices.filter((d) => isVoicemeeterDevice(d.name));
-  const other = devices.filter((d) => !isVoicemeeterDevice(d.name));
+  const cab = devices.filter((d) => cableIds.has(d.id));
+  const other = devices.filter((d) => !isVoicemeeterDevice(d.name) && !cableIds.has(d.id));
   const missing = value && !devices.some((d) => d.id === value);
   return (
     <select
@@ -420,6 +429,15 @@ function DeviceSelect({
       {vm.length > 0 && (
         <optgroup label="Voicemeeter">
           {vm.map((d) => (
+            <option key={d.id} value={d.id}>
+              {d.name}
+            </option>
+          ))}
+        </optgroup>
+      )}
+      {cab.length > 0 && (
+        <optgroup label="Lastshot cables">
+          {cab.map((d) => (
             <option key={d.id} value={d.id}>
               {d.name}
             </option>

@@ -96,6 +96,14 @@ features = [
     # and its install path in the registry.
     "Win32_System_LibraryLoader",
     "Win32_System_Registry",
+    # Audio tab → Cables: endpoint → USB device lookup, installer checks.
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Security",
+    "Win32_Security_Cryptography",
+    "Win32_Security_Cryptography_Catalog",
+    "Win32_Security_Cryptography_Sip",
+    "Win32_Security_WinTrust",
+    "Win32_System_Variant",
 ]
 
 [target.'cfg(windows)'.dependencies]

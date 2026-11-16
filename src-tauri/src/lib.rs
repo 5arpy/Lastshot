@@ -5,6 +5,7 @@
 //! heartbeat and the IPC surface.
 
 pub mod audio_routing;
+pub mod cables;
 pub mod clipmeta;
 pub mod files;
 pub mod commands;
@@ -99,6 +100,9 @@ pub fn run() {
             // Audio tab: remembered "this app plays on that output" choices
             // are set again whenever the app starts.
             audio_routing::start_watcher(&handle);
+
+            // Audio tab → Cables: Lastshot's own virtual cables.
+            cables::init(&handle);
 
             if let Some(path) = files::video_arg(&std::env::args().collect::<Vec<_>>()) {
                 files::request_open(&handle, path);
@@ -359,6 +363,17 @@ pub fn run() {
             popout::popout_open,
             popout::popout_close,
             popout::popout_list,
+            cables::cables_status,
+            cables::cables_enable,
+            cables::cables_add,
+            cables::cables_remove,
+            cables::cables_rename,
+            cables::cables_set_routes,
+            cables::cables_set_jitter,
+            cables::cables_levels,
+            cables::cables_list_inputs,
+            cables::cables_list_outputs,
+            cables::cables_install_support,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Lastshot")
@@ -369,6 +384,7 @@ pub fn run() {
                 }
             }
             if let tauri::RunEvent::Exit = event {
+                cables::shutdown(app);
                 audio_routing::voicemeeter::shutdown();
             }
         });
@@ -510,6 +526,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 if let Some(state) = app.try_state::<AppState>() {
                     state.engine.stop();
                 }
+                cables::shutdown(app);
                 audio_routing::voicemeeter::shutdown();
                 std::process::exit(0);
             }

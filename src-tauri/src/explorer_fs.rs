@@ -614,6 +614,9 @@ pub mod drag {
 
     /// A shell data object for files anywhere (absolute item ids under the
     /// desktop): CF_HDROP, shell ids and file names, like File Explorer's.
+    ///
+    /// # Safety
+    /// COM calls: run on a thread where OLE may be initialised (STA).
     pub unsafe fn data_object(files: &[PathBuf]) -> windows::core::Result<IDataObject> {
         let _ = OleInitialize(None);
         let mut ids: Vec<*const ITEMIDLIST> = Vec::new();
@@ -673,6 +676,10 @@ pub mod drag {
         data.SetData(&hdrop_format(), &med, true)
     }
 
+    /// Runs a shell drag of `files` from window `hwnd` (copy or link only).
+    ///
+    /// # Safety
+    /// Call on the UI thread that owns `hwnd` (the drag loop pumps its messages).
     pub unsafe fn run(hwnd: isize, files: &[PathBuf]) -> windows::core::Result<()> {
         use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
         // The page asks a moment after its drag began. If the button is
@@ -687,6 +694,9 @@ pub mod drag {
     }
 
     /// The paths a data object carries as CF_HDROP (what drop targets read).
+    ///
+    /// # Safety
+    /// `data` must be a live data object; COM must be initialised on this thread.
     pub unsafe fn hdrop_paths(data: &IDataObject) -> windows::core::Result<Vec<String>> {
         use windows::Win32::System::Ole::ReleaseStgMedium;
         use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};

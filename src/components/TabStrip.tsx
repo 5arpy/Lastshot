@@ -61,6 +61,8 @@ export default function TabStrip({ tabs, active, label, windows, counts, onSelec
   const stripRef = useRef<HTMLDivElement | null>(null);
   const tabRefs = useRef(new Map<TabId, HTMLButtonElement>());
   const drag = useRef<Drag | null>(null);
+  /** Removes the window listeners of the drag in progress. */
+  const detach = useRef<(() => void) | null>(null);
   const [order, setOrder] = useState<TabId[] | null>(null);
   const [dragging, setDragging] = useState<TabId | null>(null);
   const [hintAt, setHintAt] = useState<number | null>(null);
@@ -116,12 +118,14 @@ export default function TabStrip({ tabs, active, label, windows, counts, onSelec
 
   const finish = useCallback(() => {
     drag.current = null;
+    detach.current?.();
+    detach.current = null;
     setDragging(null);
     setHintAt(null);
   }, []);
 
   /** The drag left the strip: the tab (or this whole window) follows the cursor. */
-  const tearOut = (d: Drag, e: PointerEvent | React.PointerEvent) => {
+  const tearOut = (d: Drag, e: PointerEvent) => {
     if (isMain && tabs.length === 1) {
       if (!d.warned) onNote("The main window keeps one tab", "Drag another tab here first, or move this one from its menu.");
       d.warned = true;
@@ -165,10 +169,27 @@ export default function TabStrip({ tabs, active, label, windows, counts, onSelec
       ended: false,
       warned: false,
     };
-    stripRef.current?.setPointerCapture(e.pointerId);
+    // The whole window follows the drag (pointer capture alone can be lost
+    // when the strip re-renders, and the pointer leaves the strip to tear out).
+    detach.current?.();
+    const mv = (ev: PointerEvent) => moveRef.current(ev);
+    const up = (ev: PointerEvent) => endRef.current(ev);
+    window.addEventListener("pointermove", mv, true);
+    window.addEventListener("pointerup", up, true);
+    window.addEventListener("pointercancel", up, true);
+    detach.current = () => {
+      window.removeEventListener("pointermove", mv, true);
+      window.removeEventListener("pointerup", up, true);
+      window.removeEventListener("pointercancel", up, true);
+    };
+    try {
+      stripRef.current?.setPointerCapture(e.pointerId);
+    } catch {
+      /* the window listeners carry the drag */
+    }
   };
 
-  const onPointerMove = (e: React.PointerEvent) => {
+  const onPointerMove = (e: PointerEvent) => {
     const d = drag.current;
     if (!d || d.pointer !== e.pointerId || d.mode === "out") return;
     if (d.mode === "press") {
@@ -191,7 +212,7 @@ export default function TabStrip({ tabs, active, label, windows, counts, onSelec
     setOrder((o) => (o && o.join() === next.join() ? o : next));
   };
 
-  const end = (e: React.PointerEvent | null) => {
+  const end = (e: PointerEvent | null) => {
     const d = drag.current;
     if (!d || d.ended || (e && d.pointer !== e.pointerId)) return;
     d.ended = true;
@@ -209,6 +230,12 @@ export default function TabStrip({ tabs, active, label, windows, counts, onSelec
       })();
     } else finish();
   };
+
+  const moveRef = useRef(onPointerMove);
+  moveRef.current = onPointerMove;
+  const endRef = useRef(end);
+  endRef.current = end;
+  useEffect(() => () => detach.current?.(), []);
 
   // Escape cancels a drag: the tab goes back where it was.
   useEffect(() => {
@@ -279,10 +306,6 @@ export default function TabStrip({ tabs, active, label, windows, counts, onSelec
       role="tablist"
       aria-label="Tabs"
       className="relative flex h-full min-w-0 items-center gap-1"
-      onPointerMove={onPointerMove}
-      onPointerUp={(e) => end(e)}
-      onPointerCancel={(e) => end(e)}
-      onLostPointerCapture={(e) => end(e)}
       onDoubleClick={(e) => {
         // Double-click on the empty strip, like a title bar.
         if (e.target === e.currentTarget) void lastshot.toggleMaximize();

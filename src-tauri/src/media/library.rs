@@ -233,12 +233,14 @@ fn scan_into(
             None
         };
 
-        // Per-game tag = the folder name relative to the output root.
+        // Per-game tag = the folder name relative to the output root, else
+        // the app in the file name (`Roblox 2026-11-16 20-15-03.mp4`).
         let game = path
             .parent()
             .and_then(|p| p.strip_prefix(root).ok())
             .filter(|rel| !rel.as_os_str().is_empty())
-            .map(|rel| rel.to_string_lossy().to_string());
+            .map(|rel| rel.to_string_lossy().to_string())
+            .or_else(|| crate::appname::parse_file_name(&file_name).app.filter(|a| a != "Desktop"));
         let id_key = key.clone();
 
         out.push(ClipMetadata {
@@ -279,6 +281,11 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 }
 
 pub(crate) fn pretty_title(file_name: &str) -> String {
+    // New names are already readable: "Roblox 2026-11-16 20-15-03".
+    let parsed = crate::appname::parse_file_name(file_name);
+    if parsed.app.is_some() && parsed.stamp.is_some() {
+        return file_name.rsplit_once('.').map(|(a, _)| a).unwrap_or(file_name).to_string();
+    }
     file_name
         .trim_end_matches(".mp4")
         .replace("Lastshot_Recording_", "Recording ")
@@ -835,6 +842,16 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{scan_directory_impl, suggested_trim_path, ProbeCache};
+
+    #[test]
+    fn titles_for_old_and_new_names() {
+        use super::pretty_title;
+        assert_eq!(pretty_title("Roblox 2026-11-16 20-15-03.mp4"), "Roblox 2026-11-16 20-15-03");
+        assert_eq!(pretty_title("Roblox Recording 2026-11-16 20-15-03_2.mp4"), "Roblox Recording 2026-11-16 20-15-03_2");
+        assert_eq!(pretty_title("Lastshot_2026-11-16_20-15-03.mp4"), "Clip 2026-11-16 20-15-03");
+        assert_eq!(pretty_title("Lastshot_Recording_2026-11-16_20-15-03.mp4"), "Recording 2026-11-16 20-15-03");
+        assert_eq!(pretty_title("my_clip.mp4"), "my clip");
+    }
 
     /// Unique temp dir per test process so parallel runs never collide.
     fn temp_dir(tag: &str) -> PathBuf {

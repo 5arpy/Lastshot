@@ -182,49 +182,41 @@ pub fn sanitize_file_stem(raw: &str, fallback: &str) -> String {
     }
 }
 
-/// Sanitises a foreground exe into a safe per-game folder name. Returns `None`
-/// for our own process so pressing Alt+C on the deck never creates a "lastshot"
-/// folder.
-fn game_folder_name(exe: &str) -> Option<String> {
-    let exe = exe.to_ascii_lowercase();
-    if exe.starts_with("lastshot") {
-        return None;
-    }
-    let stem = match exe.rfind('.') {
-        Some(i) if i > 0 => &exe[..i],
-        _ => exe.as_str(),
-    };
-    let sanitized: String = stem
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let name = sanitized.trim_matches('-').to_string();
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
-}
-
 /// Resolves the per-game subfolder for the next flush: the game in the
 /// foreground, or `game_override` when the caller already knows the game (the
 /// auto-save-on-game-exit flow). Returns `None` when per-game organisation is
 /// off or no game applies — the clip then lands in the output root.
 pub fn resolve_game_folder(state: &AppState, game_override: Option<&str>) -> Option<String> {
-    let s = state.settings.read();
-    if !s.organize_by_game {
-        return None;
-    }
-    if let Some(g) = game_override {
-        return game_folder_name(g);
-    }
-    crate::foreground::foreground_exe().and_then(|exe| game_folder_name(&exe))
+    resolve_app_and_folder(state, game_override).1
+}
+
+/// The app a save is named after (`Roblox`), and the per-game folder it goes
+/// to (`None` = the save folder itself: per-game folders off, or nothing but
+/// the desktop was in use). A window source is named after its app; a full
+/// screen save after the app in the foreground (or the last one played in
+/// the last few seconds when Lastshot or the desktop has focus).
+pub fn resolve_app_and_folder(state: &AppState, game_override: Option<&str>) -> (String, Option<String>) {
+    let (organize, source) = {
+        let s = state.settings.read();
+        (s.organize_by_game, s.capture_source.clone())
+    };
+    let app = match (game_override, source) {
+        (Some(exe), _) if !crate::appname::is_not_an_app(exe) => crate::appname::display_name(exe, None),
+        (_, crate::media::CaptureSource::Window { hwnd, exe, .. }) => crate::appname::window_app(hwnd as isize, &exe),
+        _ => crate::appname::foreground_app(),
+    };
+    let app = crate::appname::sanitize(&app);
+    let folder = (organize && app != "Desktop").then(|| app.clone());
+    (app, folder)
+}
+
+/// Before a replay save: name the clip after the app and route it into the
+/// app's folder. Returns the folder (the clip's game tag).
+pub fn prepare_save(state: &AppState, game_override: Option<&str>) -> Option<String> {
+    let (app, folder) = resolve_app_and_folder(state, game_override);
+    state.engine.set_output_subfolder(folder.clone());
+    state.engine.set_clip_app(Some(app));
+    folder
 }
 
 /// The single source of truth for the privacy gate: pause only when the
@@ -282,8 +274,7 @@ pub async fn save_instant_replay(
     }
     // Per-game organisation: route the flush into output_dir/<game>/. The
     // subfolder is recomputed on every save so it can never go stale.
-    let game_folder = resolve_game_folder(&state, game_override.as_deref());
-    state.engine.set_output_subfolder(game_folder.clone());
+    let game_folder = prepare_save(&state, game_override.as_deref());
 
     let engine = Arc::clone(&state.engine);
 

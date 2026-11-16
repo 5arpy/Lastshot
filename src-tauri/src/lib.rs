@@ -4,6 +4,7 @@
 //! Tauri v2 application setup: tray icon, global shortcuts, the stats
 //! heartbeat and the IPC surface.
 
+pub mod appname;
 pub mod audio_routing;
 pub mod clipmeta;
 pub mod files;
@@ -135,6 +136,7 @@ pub fn run() {
 
             recording::sync_bar(&handle);
             studio::init(&handle);
+            appname::start_tracker();
 
             if let Err(e) =
                 hotkeys::register_all(&handle, &save_key, &toggle_key, &snip_key, &record_key)
@@ -462,8 +464,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                     // Same routing + metadata + event as the hotkey and the
                     // deck, so a tray save shows up in the gallery immediately
                     // instead of requiring a manual Rescan.
-                    let game_folder = commands::resolve_game_folder(&state, None);
-                    state.engine.set_output_subfolder(game_folder.clone());
+                    let game_folder = commands::prepare_save(&state, None);
                     let engine = Arc::clone(&state.engine);
                     let written = tauri::async_runtime::spawn_blocking(move || {
                         engine.flush_to_disk(Some(30.0))

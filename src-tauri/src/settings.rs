@@ -424,6 +424,7 @@ impl Settings {
             mic_device_id: self.mic_device_id.clone(),
             output_dir: PathBuf::from(&self.output_dir),
             output_subfolder: None,
+            clip_app: None,
             source: self.capture_source.clone(),
             app_audio: self.app_audio.clone(),
             capture_cursor: self.capture_cursor,

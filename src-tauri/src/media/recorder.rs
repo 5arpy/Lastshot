@@ -152,6 +152,9 @@ pub struct RecorderConfig {
     pub output_dir: PathBuf,
     /// Per-game subfolder the next flush lands in (None = output root).
     pub output_subfolder: Option<String>,
+    /// App the next clip is named after (`Roblox 2026-11-16 20-15-03.mp4`).
+    #[serde(default)]
+    pub clip_app: Option<String>,
     /// What to capture: the whole monitor (default) or one window / app.
     #[serde(default)]
     pub source: CaptureSource,
@@ -221,6 +224,7 @@ impl Default for RecorderConfig {
             mic_device_id: None,
             output_dir: default_output_dir(),
             output_subfolder: None,
+            clip_app: None,
             source: CaptureSource::Display,
             app_audio: Default::default(),
             capture_cursor: true,
@@ -1255,6 +1259,10 @@ impl CaptureEngine {
 
     /// Routes Alt+C flushes into `output_dir/<sub>/` (per-game folders). The
     /// commands layer recomputes this on every save, so it can never go stale.
+    pub fn set_clip_app(&self, app: Option<String>) {
+        self.config.write().clip_app = app;
+    }
+
     pub fn set_output_subfolder(&self, sub: Option<String>) {
         self.config.write().output_subfolder = sub;
     }
@@ -1354,9 +1362,10 @@ impl CaptureEngine {
         // Everything that can fail runs inside this closure so the state is
         // restored on *every* exit path, not just the happy one.
         let written = (|| -> RResult<(PathBuf, String)> {
-            let stem = format!(
-                "Lastshot_{}",
-                chrono::Local::now().format("%Y-%m-%d_%H-%M-%S")
+            let stem = crate::appname::file_stem(
+                cfg.clip_app.as_deref().unwrap_or("Desktop"),
+                None,
+                chrono::Local::now(),
             );
             let out_dir = match &cfg.output_subfolder {
                 Some(sub) => cfg.output_dir.join(sub),

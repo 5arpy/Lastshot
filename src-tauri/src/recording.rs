@@ -197,7 +197,7 @@ pub async fn start_with(app: &AppHandle, area: Option<Area>) -> Result<Recording
     let engine = Arc::clone(&state.engine);
     let out = state.output_dir();
     let rec_dir = state.settings.read().recording_dir.trim().to_string();
-    let game = crate::commands::resolve_game_folder(&state, None);
+    let (app_name, game) = crate::commands::resolve_app_and_folder(&state, None);
     let cfg = state.settings.read().to_recorder_config();
     let base = if rec_dir.is_empty() { out } else { std::path::PathBuf::from(rec_dir) };
     let dir = match &game {
@@ -206,7 +206,7 @@ pub async fn start_with(app: &AppHandle, area: Option<Area>) -> Result<Recording
     };
     let path = unique(
         &dir,
-        &format!("Lastshot_Recording_{}", chrono::Local::now().format("%Y-%m-%d_%H-%M-%S")),
+        &crate::appname::file_stem(&app_name, Some("Recording"), chrono::Local::now()),
     );
     let h = app.clone();
     let status = tauri::async_runtime::spawn_blocking(move || {

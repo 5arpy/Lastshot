@@ -74,7 +74,7 @@ function loadPrefs(): Prefs {
       view: p.view === "details" ? "details" : "grid",
       size: Math.min(360, Math.max(120, Number(p.size) || 220)),
       sort: p.sort?.col ? p.sort : DEFAULT_PREFS.sort,
-      kind: ["all", "videos", "pictures", "other"].includes(p.kind) ? p.kind : "all",
+      kind: X.KIND_FILTERS.includes(p.kind) ? p.kind : "all",
       preview: !!p.preview,
       hoverPlay: p.hoverPlay !== false,
     };
@@ -1355,7 +1355,10 @@ function ClipsExplorer(props: Props) {
           aria-label="Kind"
         >
           <option value="all">All files</option>
-          <option value="videos">Videos</option>
+          <option value="videos">All videos</option>
+          <option value="clips">Clips (instant replay)</option>
+          <option value="recordings">Recordings</option>
+          <option value="edits">Edits</option>
           <option value="pictures">Pictures</option>
           <option value="other">Other files</option>
         </select>

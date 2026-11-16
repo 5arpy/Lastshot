@@ -223,6 +223,16 @@ describe("real folders", () => {
     expect(filterKind(es, "all").length).toBe(4);
   });
 
+  it("splits videos into clips, recordings and edits", () => {
+    const mk = (n: string): Entry => ({ kind: "file", path: `C:\\v\\${n}`, name: n, size: 1, modified: 1 });
+    const es = [mk("Lastshot_2026-11-01_10-00-00.mp4"), mk("Valorant Recording 2026-11-16 21-00-00.mp4"), mk("Lastshot_Edit_2026-11-01_10-00-00.mp4"), mk("a.png")];
+    const names = (k: Parameters<typeof filterKind>[1]) => filterKind(es, k).map((e) => (e.kind === "file" ? e.name.slice(0, 12) : ""));
+    expect(names("clips")).toEqual(["Lastshot_202"]);
+    expect(names("recordings")).toEqual(["Valorant Rec"]);
+    expect(names("edits")).toEqual(["Lastshot_Edi"]);
+    expect(names("videos").length).toBe(3);
+  });
+
   it("search adds files on disk that are not clips", () => {
     const hits = searchClips(clips, "roblox", null);
     const more = extraHits(hits, [L(`${ROOT}\\Roblox`, true), L(`${ROOT}\\Roblox\\Roblox 2026-11-16 20-15-03.mp4`), L(`${ROOT}\\roblox.png`)], new Set());

@@ -393,7 +393,9 @@ export function extraHits(clipHits: readonly Entry[], disk: readonly Listed[], c
   return out;
 }
 
-export type KindFilter = "all" | "videos" | "pictures" | "other";
+/** "videos" is every video; "clips", "recordings" and "edits" split them by how Lastshot made them. */
+export type KindFilter = "all" | "videos" | "clips" | "recordings" | "edits" | "pictures" | "other";
+export const KIND_FILTERS: readonly KindFilter[] = ["all", "videos", "clips", "recordings", "edits", "pictures", "other"];
 const VIDEO = /\.(mp4|m4v|mov|mkv|webm|avi|wmv|flv|ts|mts)$/i;
 const PICTURE = /\.(png|jpe?g|gif|webp|bmp|tiff?|ico|avif|heic)$/i;
 
@@ -403,8 +405,14 @@ export function filterKind(entries: readonly Entry[], kind: KindFilter): Entry[]
   return entries.filter((e) => {
     if (e.kind === "folder") return true;
     const name = entryName(e);
-    const k = e.kind === "clip" || VIDEO.test(name) ? "videos" : PICTURE.test(name) ? "pictures" : "other";
-    return k === kind;
+    const video = e.kind === "clip" || VIDEO.test(name);
+    if (kind === "videos") return video;
+    if (kind === "clips" || kind === "recordings" || kind === "edits") {
+      if (!video) return false;
+      const made = parseClipName(name).kind;
+      return kind === "recordings" ? made === "Recording" : kind === "edits" ? made === "Edit" : made !== "Recording" && made !== "Edit";
+    }
+    return (video ? "videos" : PICTURE.test(name) ? "pictures" : "other") === kind;
   });
 }
 

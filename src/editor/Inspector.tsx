@@ -48,6 +48,8 @@ export interface ClipActions {
   moveToLibrary?: () => void;
   splitFile: () => void;
   discard: () => void;
+  /** What Discard removes, said in the confirm. */
+  discardNote: string;
 }
 
 const SIZES: { v: string; label: string; w: number; h: number }[] = [
@@ -353,7 +355,7 @@ function ClipFile({ clip, a, flushMs }: { clip: ClipMetadata; a: ClipActions; fl
           </button>
         ) : (
           <div className="flex items-center gap-1 px-1.5 py-1 text-[11px]">
-            <span className="flex-1 text-danger">Move the file to the Recycle Bin?</span>
+            <span className="flex-1 text-danger">{a.discardNote}</span>
             <button type="button" className="rounded bg-red-600 px-2 py-0.5 font-semibold text-white" onClick={a.discard}>
               Discard
             </button>

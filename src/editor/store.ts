@@ -11,7 +11,6 @@ import { DEFAULT_FX, type EdItem, type EdProject, newProject, tracksOf, withSpar
 
 const LIST = "lastshot.editor.projects.v2";
 const OLD = "lastshot.editor.project";
-const KEEP = 24;
 
 export const IMAGE_RE = /\.(png|jpe?g|webp|gif|bmp)$/i;
 export const AUDIO_RE = /\.(mp3|wav|m4a|aac|wma|flac|ogg)$/i;
@@ -39,17 +38,17 @@ export function loadProjects(): EdProject[] {
   return [];
 }
 
-export function saveProjects(list: EdProject[]) {
-  const sorted = [...list].sort((a, b) => b.updated - a.updated).slice(0, KEEP);
+/**
+ * Saves the project list (newest first). Nothing is ever dropped to make
+ * room: false when storage is full, and the caller tells the user.
+ */
+export function saveProjects(list: EdProject[]): boolean {
+  const sorted = [...list].sort((a, b) => b.updated - a.updated);
   try {
     localStorage.setItem(LIST, JSON.stringify(sorted));
+    return true;
   } catch {
-    // Full: keep fewer.
-    try {
-      localStorage.setItem(LIST, JSON.stringify(sorted.slice(0, 6)));
-    } catch {
-      /* give up quietly; the open project stays in memory */
-    }
+    return false;
   }
 }
 

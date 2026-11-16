@@ -77,8 +77,6 @@ function censor(g: CanvasRenderingContext2D, s: Shape) {
     g.rect(r.x, r.y, r.w, r.h);
     g.clip();
     g.filter = `blur(${strength}px)`;
-    // Twice: a single pass leaves readable text at small strengths.
-    g.drawImage(t.canvas, sx, sy);
     g.drawImage(t.canvas, sx, sy);
     g.filter = "none";
   }

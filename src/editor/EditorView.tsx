@@ -27,6 +27,7 @@ import {
   rippleTrimToPlayhead,
   shiftItems,
   splitAt,
+  trimItem,
 } from "../timeline/ops";
 import { History } from "../timeline/history";
 import TimelineView, { type EditPhase, type TimelineApi } from "../timeline/TimelineView";
@@ -106,16 +107,26 @@ type Ask = { title: string; body?: string; ok: string; danger?: boolean; field?:
  * The open project and its undo history, kept while the editor is not on
  * screen (switching tabs unmounts it) so coming back finds both as they were.
  */
-const session: { p: EdProject | null; hist: History<EdProject> } = { p: null, hist: new History<EdProject>() };
+const session: { p: EdProject | null; hist: History<EdProject>; savedAt: number } = { p: null, hist: new History<EdProject>(), savedAt: 0 };
+
+/** Discarding `path` keeps the project: it holds other media or objects. */
+const discardKeeps = (p: EdProject, path: string) => p.tl.items.some((i) => i.path !== path);
 
 /** The kept project, unless another window saved a newer version of it meanwhile. */
 function resume(): EdProject {
   const list = loadProjects();
   const kept = session.p;
   const stored = kept ? list.find((x) => x.id === kept.id) : undefined;
-  if (kept && ((stored && stored.updated <= kept.updated) || (!stored && isEmpty(kept)))) return kept;
+  if (kept && ((stored && stored.updated <= session.savedAt) || (!stored && isEmpty(kept)))) return kept;
   session.hist.clear();
   return lastOpen(list);
+}
+
+/** Saves the open project first in the list; false when storage is full. */
+function saveOpen(cur: EdProject, rest = loadProjects().filter((x) => x.id !== cur.id)): boolean {
+  const stamp = Date.now();
+  session.savedAt = stamp;
+  return saveProjects([{ ...cur, updated: stamp }, ...rest]);
 }
 
 export default function EditorView(props: EditorProps) {
@@ -168,21 +179,22 @@ export default function EditorView(props: EditorProps) {
 
   // ------------------------------------------------------------ saving
   const saveTimer = useRef(0);
+  const warnedFull = useRef(false);
   useEffect(() => {
     window.clearTimeout(saveTimer.current);
     saveTimer.current = window.setTimeout(() => {
-      const cur = pRef.current;
-      const list = loadProjects().filter((x) => x.id !== cur.id);
-      if (isEmpty(cur) && !cur.source) saveProjects(list.length ? [{ ...cur, updated: Date.now() }, ...list] : [{ ...cur, updated: Date.now() }]);
-      else saveProjects([{ ...cur, updated: Date.now() }, ...list]);
+      if (saveOpen(pRef.current)) warnedFull.current = false;
+      else if (!warnedFull.current) {
+        // Never lose projects quietly: say so (once) and keep this one in memory.
+        warnedFull.current = true;
+        onToast("err", "Projects could not be saved", "The project list is full. Delete old projects (Projects menu) to save again; this edit stays open.");
+      }
     }, 500);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [p]);
   // Save straight away when the editor goes (tab switch, window close).
   useEffect(() => {
-    const flush = () => {
-      const cur = pRef.current;
-      saveProjects([{ ...cur, updated: Date.now() }, ...loadProjects().filter((x) => x.id !== cur.id)]);
-    };
+    const flush = () => void saveOpen(pRef.current);
     window.addEventListener("beforeunload", flush);
     return () => {
       window.removeEventListener("beforeunload", flush);
@@ -718,9 +730,9 @@ export default function EditorView(props: EditorProps) {
     const cur = pRef.current;
     const it = cur.tl.items.find((i) => i.id === id);
     if (!it) return;
-    const max = it.srcDuration !== undefined ? it.srcDuration - it.srcIn : Infinity;
-    const nd = Math.max(0.05, Math.min(max, d));
-    const tl = place(cur.tl, [{ ...it, duration: nd }], "overwrite", editOpts());
+    // A ripple trim of the end: what follows moves along instead of being
+    // cut, linked sound keeps the same length, and it stops at the source.
+    const tl = trimItem(cur.tl, id, "right", it.start + Math.max(0.05, d), { ripple: true, ...editOpts() });
     apply({ ...cur, tl }, "once", "Length");
   };
 
@@ -780,6 +792,8 @@ export default function EditorView(props: EditorProps) {
         res = await lastshot.exportClip({ segments: route.segments, crop: route.crop, mode, copy: mode === "share", progressKey: key });
       } else {
         await preloadImages(cur);
+        // Normalise needs each file's peaks: wait for them (never export at gain 1).
+        await media.whenPeaks(cur.tl.items.filter((i) => i.audio?.normalize));
         const env = { image: (s: string) => images.get(urlOf(s)), content: outputSize(cur) };
         const job = await renderJob(cur, {
           range: r,
@@ -811,9 +825,10 @@ export default function EditorView(props: EditorProps) {
     const chosen = cur.tl.items.filter((i) => selRef.current.has(i.id) && sounds(i));
     const items = chosen.length ? chosen : cur.tl.items;
     const range = chosen.length ? { start: Math.min(...chosen.map((i) => i.start)), end: Math.max(...chosen.map((i) => end(i))) } : exportRange(cur);
+    await media.whenPeaks(items.filter((i) => i.audio?.normalize));
     const job = audioJob(cur, items.filter((i) => !i.disabled), (it) => media.normGain(it), range);
     if (!job.length) return onToast("info", "No sound to export", "The selection has no sound (or it is muted).");
-    const formats = await (window as unknown as { __TAURI__: { core: { invoke: <T>(c: string) => Promise<T> } } }).__TAURI__.core.invoke<string[]>("audio_formats").catch(() => ["wav", "m4a"]);
+    const formats = await editorApi.audioFormats().catch(() => ["wav", "m4a"]);
     const filters = [
       { name: "WAV (lossless)", extensions: ["wav"] },
       ...(formats.includes("mp3") ? [{ name: "MP3", extensions: ["mp3"] }] : []),
@@ -897,14 +912,24 @@ export default function EditorView(props: EditorProps) {
             })
             .catch((e) => onToast("err", "Could not split", String(e)));
         },
+        // The edit goes too only when it holds nothing but this clip;
+        // otherwise only the clip's pieces leave it.
+        discardNote: discardKeeps(p, sourceClip.path)
+          ? "Move the file to the Recycle Bin? Its pieces leave this edit; everything else stays."
+          : "Move the file to the Recycle Bin? This edit (only that clip) is removed too.",
         discard: () =>
           void lastshot
             .deleteClip(sourceClip.path)
             .then(() => {
               onToast("ok", "Clip discarded", sourceClip.file_name);
               props.onClipsChanged?.();
-              const rest = loadProjects().filter((x) => x.id !== pRef.current.id);
-              saveProjects(rest);
+              const cur = pRef.current;
+              if (discardKeeps(cur, sourceClip.path)) {
+                const gone = new Set(cur.tl.items.filter((i) => i.path === sourceClip.path).map((i) => i.id));
+                apply({ ...cur, source: null, tl: removeItems(cur.tl, gone) }, "once", "Discard clip");
+                return;
+              }
+              saveProjects(loadProjects().filter((x) => x.id !== cur.id));
               switchTo(newProject());
             })
             .catch((e) => onToast("err", "Could not discard", String(e))),

@@ -44,6 +44,7 @@ export const editorApi = {
   render: (project: RenderJob, mode: "save" | "share", name: string) =>
     invoke<ClipMetadata | ShrinkResult>("render_project", { project, mode, name }),
   exportAudio: (items: RenderAudio[], duration: number, dest: string) => invoke<string>("export_audio", { items, duration, dest }),
+  audioFormats: () => invoke<string[]>("audio_formats"),
   onRenderProgress(h: (p: number) => void): Promise<Unlisten> {
     if (!isTauri()) return Promise.resolve(() => undefined);
     return T().event.listen<number>("lastshot://render-progress", (e) => h(e.payload));
@@ -59,20 +60,26 @@ export const editorApi = {
     const win = T().webviewWindow?.getCurrentWebviewWindow();
     return new Promise<string[]>((resolve) => {
       let off: Unlisten | null = null;
-      const timer = window.setTimeout(() => {
+      let done = false;
+      const finish = (paths: string[]) => {
+        if (done) return;
+        done = true;
+        window.clearTimeout(timer);
+        // The listener may still be on its way: drop it as soon as it is.
         off?.();
-        resolve([]);
-      }, 4000);
+        resolve(paths);
+      };
+      const timer = window.setTimeout(() => finish([]), 4000);
       const listen = win ? win.listen.bind(win) : T().event.listen;
       void listen<{ id: string; paths: string[] }>("lastshot://drop-paths", (e) => {
-        if (e.payload.id !== id) return;
-        window.clearTimeout(timer);
-        off?.();
-        resolve(e.payload.paths);
-      }).then((u) => {
-        off = u;
-        wv.postMessageWithAdditionalObjects!(JSON.stringify({ lastshotDrop: id }), files);
-      });
+        if (e.payload.id === id) finish(e.payload.paths);
+      })
+        .then((u) => {
+          off = u;
+          if (done) u();
+          else wv.postMessageWithAdditionalObjects!(JSON.stringify({ lastshotDrop: id }), files);
+        })
+        .catch(() => finish([]));
     });
   },
 };

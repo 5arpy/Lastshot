@@ -188,3 +188,15 @@ describe("every edit keeps the rules", () => {
     }
   });
 });
+
+describe("setting a length (Inspector)", () => {
+  it("pushes the next clip along and keeps linked sound in step", () => {
+    const t = tl([it2("a", "v1", 0, 4, { link: "L" }), it2("aa", "a1", 0, 4, { link: "L" }), it2("b", "v1", 4, 2)]);
+    const out = trimItem(t, "a", "right", 6, { ripple: true });
+    expectValid(out);
+    expect(out.items.find((i) => i.id === "a")?.duration).toBe(6);
+    expect(out.items.find((i) => i.id === "aa")?.duration).toBe(6);
+    expect(startOf(out, "b")).toBe(6);
+    expect(out.items.find((i) => i.id === "b")?.duration).toBe(2);
+  });
+});

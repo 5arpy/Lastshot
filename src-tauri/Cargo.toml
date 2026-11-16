@@ -82,6 +82,8 @@ features = [
     "Win32_System_DataExchange",
     "Win32_System_Ole",
     "Win32_UI_Shell",
+    # Item ids for native file drags out of the Clips explorer.
+    "Win32_UI_Shell_Common",
     "Win32_UI_Shell_PropertiesSystem",
     # Window/app capture (Windows.Graphics.Capture) and the GPU compositor.
     "Foundation",
@@ -119,6 +121,9 @@ tauri-winrt-notification = "0.7.3"
 # Same version Tauri's WebView2 layer uses (no extra download): lets the
 # Studio layer window use the webcam without a permission prompt.
 webview2-com = "0.38"
+# The windows-core that webview2-com uses (already in the build), for casting
+# its interfaces (the Clips explorer reads the paths of dropped files).
+windows-core-061 = { package = "windows-core", version = "0.61" }
 
 [features]
 # Allows `cargo run --features headless-sim` on non-Windows dev machines: the

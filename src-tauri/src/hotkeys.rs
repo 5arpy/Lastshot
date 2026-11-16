@@ -197,12 +197,10 @@ pub fn publish_saved_clip(
             open_trimmer,
         },
     );
+    // In the tray without a window, the save chime comes from here.
+    crate::startup::play_save_sound_if_no_window(app);
     if raise_deck {
-        if let Some(w) = app.get_webview_window("main") {
-            let _ = w.show();
-            let _ = w.unminimize();
-            let _ = w.set_focus();
-        }
+        crate::startup::show_main(app);
     }
     clip
 }

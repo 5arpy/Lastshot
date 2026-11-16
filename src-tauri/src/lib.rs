@@ -21,6 +21,7 @@ pub mod recording;
 pub mod settings;
 pub mod share;
 pub mod snip;
+pub mod startup;
 pub mod studio;
 
 use std::sync::Arc;
@@ -35,6 +36,10 @@ use commands::{AppState, EVT_STATS};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // The crash watchdog is this exe started with --watchdog: no WebView.
+    if startup::run_watchdog_if_asked() {
+        return;
+    }
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info,lastshot=debug"),
     )
@@ -51,14 +56,15 @@ pub fn run() {
         // the output (Desktop Duplication only allows one duplicator per output,
         // so instance #2 used to fail with a confusing capture error).
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            // A start by Windows (sign-in, restart) while Lastshot already
+            // runs: nothing to do, and never pop the window up.
+            if argv.iter().any(|a| a == startup::ARG_AUTOSTART) {
+                return;
+            }
             if let Some(path) = files::video_arg(&argv) {
                 files::request_open(app, path);
             }
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.show();
-                let _ = w.unminimize();
-                let _ = w.set_focus();
-            }
+            startup::show_main(app);
         }));
     }
     builder
@@ -69,7 +75,7 @@ pub fn run() {
         // calls only), so no extra JS surface or capability is needed.
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            Some(vec![]),
+            Some(vec![startup::ARG_AUTOSTART]),
         ))
         .plugin(tauri_plugin_process::init())
         .plugin(
@@ -84,15 +90,24 @@ pub fn run() {
         .manage(AppState::new())
         .setup(|app| {
             let handle = app.handle().clone();
-            // Studio's webcam preview runs in the main window.
-            if let Some(w) = app.get_webview_window("main") {
-                studio::allow_camera(&w);
+            // Started by Windows: stay in the tray. The window (WebView) is
+            // made when opened, or hidden now when a feature needs it.
+            {
+                let need_bg = startup::window_needed_in_background(&handle.state::<AppState>().settings.read());
+                if !startup::is_autostart() {
+                    startup::ensure_main(&handle, true);
+                } else if need_bg {
+                    startup::ensure_main(&handle, false);
+                }
             }
+            startup::register_restart();
+            startup::spawn_watchdog();
 
             // Old "Shrink & copy" files from previous sessions.
             std::thread::spawn(paths::cleanup_share_temp);
 
             if std::env::var("LASTSHOT_TEST_INSTANCE").as_deref() == Ok("1") { /* no tray in test instances */ } else { build_tray(&handle)?; }
+            startup::mark("tray");
 
             // Audio tab: remembered "this app plays on that output" choices
             // are set again whenever the app starts.
@@ -128,7 +143,9 @@ pub fn run() {
                 let want = handle.state::<AppState>().settings.read().launch_at_startup;
                 let autostart = handle.autolaunch();
                 let is_on = autostart.is_enabled().unwrap_or(false);
-                if want && !is_on {
+                // Written again when on, so an entry from an older version
+                // gets the "start in the tray" argument.
+                if want {
                     let _ = autostart.enable();
                 } else if !want && is_on {
                     let _ = autostart.disable();
@@ -152,6 +169,7 @@ pub fn run() {
                     let _ = h.emit(commands::EVT_ERROR, msg);
                 });
             }
+            startup::mark("hotkeys");
 
             // Pinned window: honour the saved always-on-top preference.
             if let Some(w) = handle.get_webview_window("main") {
@@ -205,6 +223,7 @@ pub fn run() {
                         tauri::async_runtime::spawn_blocking(move || engine.start(cfg)).await;
                     match result {
                         Ok(Ok(stats)) => {
+                            startup::mark("buffer");
                             let _ = h.emit(commands::EVT_BUFFER_STATE, stats);
                         }
                         Ok(Err(e)) => {
@@ -359,6 +378,7 @@ pub fn run() {
             library_ops::copy_clips_to,
             library_ops::rename_library_item,
             library_ops::recycle_items,
+            startup::crash_for_test,
             snip::snip_cancel,
             snip::open_screenshots_folder,
             audio_routing::vm_status,
@@ -503,13 +523,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
             "snip_rec" => snip::begin_with(app.clone(), false, "rec"),
             "bar" => recording::show_bar(app.clone()),
             "record" => recording::toggle(app.clone()),
-            "show" => {
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.show();
-                    let _ = w.unminimize();
-                    let _ = w.set_focus();
-                }
-            }
+            "show" => startup::show_main(app),
             "folder" => {
                 use tauri_plugin_opener::OpenerExt;
                 if let Some(state) = app.try_state::<AppState>() {
@@ -539,12 +553,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                     button: MouseButton::Left,
                     ..
                 } => {
-                    let app = tray.app_handle();
-                    if let Some(w) = app.get_webview_window("main") {
-                        let _ = w.show();
-                        let _ = w.unminimize();
-                        let _ = w.set_focus();
-                    }
+                    startup::show_main(tray.app_handle());
                 }
                 _ => {}
             }

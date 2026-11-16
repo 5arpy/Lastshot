@@ -619,11 +619,7 @@ pub fn effective_mic_volume(volume: u32) -> u32 {
 
 #[tauri::command]
 pub fn show_main_window(app: AppHandle) {
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.show();
-        let _ = w.unminimize();
-        let _ = w.set_focus();
-    }
+    crate::startup::show_main(&app);
 }
 
 // ------------------------------------------------------------- control bar

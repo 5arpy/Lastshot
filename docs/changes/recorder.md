@@ -15,6 +15,7 @@ Lines for the next release notes, written by the recorder work. Merge them into
 - **Clips works like File Explorer.** The Clips tab opens on your game folders (with how many clips, their size and the newest clip's picture) and the clips that are not in a folder, old *Lastshot_* clips included. Double-click a folder to open it; the path bar, back / forward (Alt+Left / Alt+Right, mouse side buttons) and Backspace move around. *All clips* lists everything newest first and *Recent* the last 7 days. Pick *Grid* (with a picture-size slider) or *Details* (name, game, date, length, size, resolution; click a column to sort). Search this folder or, with *All*, every folder.
 - **Organise clips.** Select with click, Ctrl+click, Shift+click, Ctrl+A or by dragging a box. *New folder*, *Rename* (F2), *Move to…*, drag clips onto a folder (hold Ctrl to copy), cut / copy / paste (Ctrl+X / Ctrl+C / Ctrl+V), *Show in File Explorer* and *Copy for Discord*, also from the right-click menu. Nothing is ever overwritten: a name that is taken gets "(2)".
 - The library updates by itself when clips are added, removed or renamed in File Explorer.
+- **Always on, in the tray.** With *Launch at startup* on, Lastshot now starts with Windows straight into the tray, with the replay buffer armed and no window (the window is only made when you open it, so it uses less memory). If Lastshot crashes, it starts again by itself (after 2 s, 10 s, then 30 s; it stops trying after three crashes in a row), and Windows starts it again after an update restart. A normal Quit is never undone. Starting it a second time never opens a second copy.
 
 ### Changed
 
@@ -22,4 +23,5 @@ Lines for the next release notes, written by the recorder work. Merge them into
 
 ### Fixed
 
+- Quitting Lastshot left its tray icon behind until the mouse passed over it.
 - Replays and recordings could drop frames or play unevenly at 60 fps when the graphics driver asked for frames in bursts. Every frame now goes to the encoder, and frames are placed on an even 60 fps grid, so players show a steady picture.

@@ -369,3 +369,56 @@ describe("slip and roll", () => {
     expect(rollEdit(tl([it2("a", "v1", 0, 4)]), "a", "right", 6).items[0].duration).toBe(4);
   });
 });
+
+import { clampScroll, easeView, edgeNear, endRoom, follow, keyZoomAnchor, viewOfSpan } from "./view";
+
+describe("navigation math", () => {
+  it("leaves room after the last clip (30 %, at least 10 s)", () => {
+    expect(endRoom(0)).toBe(10);
+    expect(endRoom(20)).toBe(30);
+    expect(endRoom(100)).toBe(130);
+    // Scroll stops there.
+    expect(clampScroll({ pxPerSec: 10, scroll: 999 }, 20, 100).scroll).toBe(20);
+    expect(clampScroll({ pxPerSec: 10, scroll: -5 }, 20, 100).scroll).toBe(0);
+    expect(clampScroll({ pxPerSec: 1, scroll: 50 }, 20, 1000).scroll).toBe(0);
+  });
+  it("zoom keeps the time under the pointer still", () => {
+    const v = { pxPerSec: 10, scroll: 5 };
+    for (const f of [0.9, 1.7, 3]) {
+      const z = zoomAt(v, f, 230);
+      expect(xToTime(z, 230)).toBeCloseTo(xToTime(v, 230));
+    }
+    // Keys zoom around the playhead when it is on screen, else the middle.
+    expect(keyZoomAnchor(v, 10, 800)).toBe(50);
+    expect(keyZoomAnchor(v, 500, 800)).toBe(400);
+  });
+  it("the overview box edges set the shown span", () => {
+    const z = viewOfSpan(10, 30, 1000);
+    expect(z).toEqual({ pxPerSec: 50, scroll: 10 });
+    expect(viewOfSpan(30, 10, 1000)).toEqual(z);
+  });
+  it("follows the playhead by page or smoothly", () => {
+    const v = { pxPerSec: 10, scroll: 0 };
+    expect(follow(v, 50, 1000, "page")).toBe(v);
+    expect(follow(v, 120, 1000, "page").scroll).toBeCloseTo(115);
+    expect(follow(v, 30, 1000, "smooth")).toBe(v);
+    expect(follow(v, 60, 1000, "smooth").scroll).toBeCloseTo(20);
+  });
+  it("animated zoom starts and ends where it should", () => {
+    const a = { pxPerSec: 10, scroll: 0 };
+    const b = { pxPerSec: 1000, scroll: 40 };
+    expect(easeView(a, b, 0).pxPerSec).toBeCloseTo(10);
+    expect(easeView(a, b, 0).scroll).toBe(0);
+    expect(easeView(a, b, 1).pxPerSec).toBeCloseTo(1000);
+    expect(easeView(a, b, 1).scroll).toBeCloseTo(40);
+  });
+  it("finds the edge under the pointer, inside or just outside a clip", () => {
+    const items = [it2("a", "v1", 0, 4), it2("b", "v1", 4, 2), it2("c", "v1", 10, 0.1)];
+    expect(edgeNear(items, 3.9, 0.2)).toMatchObject({ edge: "right", t: 4 });
+    expect(edgeNear(items, 4.05, 0.2)).toMatchObject({ edge: "left", t: 4 });
+    expect(edgeNear(items, 9.9, 0.2)).toMatchObject({ edge: "left", t: 10 });
+    expect(edgeNear(items, 2, 0.2)).toBeNull();
+    // A tiny clip keeps its middle for moving.
+    expect(edgeNear([items[2]], 10.05, 0.2)).toBeNull();
+  });
+});

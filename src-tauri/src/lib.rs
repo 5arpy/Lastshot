@@ -5,6 +5,7 @@
 //! heartbeat and the IPC surface.
 
 pub mod appname;
+mod browser_keys;
 pub mod audio_guard;
 pub mod audio_routing;
 // Lastshot Pro: virtual audio cables (the `pro-cables` feature).
@@ -28,11 +29,11 @@ pub mod hotkeys;
 pub mod library_ops;
 pub mod media;
 pub mod paths;
-pub mod popout;
 pub mod power;
 pub mod recording;
 pub mod scenes;
 pub mod settings;
+pub mod shell;
 pub mod share;
 pub mod snip;
 pub mod startup;
@@ -105,7 +106,12 @@ pub fn run() {
         // single-instance app by design (one buffer, one encoder session).
         .manage(AppState::new())
         // Real paths for files dropped into any window (the Clips explorer).
-        .on_page_load(|webview, _| explorer_fs::attach_drop_paths(webview))
+        .on_page_load(|webview, _| {
+            explorer_fs::attach_drop_paths(webview);
+            // No browser keys (reload, find, print, zoom, devtools, back…)
+            // and no browser menus in any Lastshot window.
+            browser_keys::lock_down(webview);
+        })
         .setup(|app| {
             let handle = app.handle().clone();
             // Started by Windows: stay in the tray. The window (WebView) is
@@ -305,7 +311,7 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            popout::on_event(window, event);
+            shell::on_event(window, event);
             frames::on_event(window, event);
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == snip::SNIP_LABEL
@@ -438,9 +444,19 @@ pub fn run() {
             audio_routing::list_audio_apps,
             audio_routing::get_app_output,
             audio_routing::set_app_output,
-            popout::popout_open,
-            popout::popout_close,
-            popout::popout_list,
+            shell::shell_restore,
+            shell::shell_layout,
+            shell::shell_set_active,
+            shell::shell_reorder,
+            shell::shell_report_strip,
+            shell::shell_test_cursor,
+            shell::shell_tear_out,
+            shell::shell_drag_to,
+            shell::shell_drop,
+            shell::shell_move_tab,
+            shell::shell_open_tab,
+            shell::shell_focus_self,
+            shell::shell_apply_scale,
             frames::viewer_copy_png,
             frames::viewer_save_png,
             frames::frame_open,
@@ -529,6 +545,8 @@ fn invoke_handler(
 /// release Voicemeeter.
 pub(crate) fn quit_cleanup(app: &tauri::AppHandle) {
     frames::flush();
+    // Window places and tabs, as they are now (a quit never docks tabs).
+    shell::save_now(app);
     #[cfg(feature = "pro-cables")]
     cables::shutdown(app);
     #[cfg(feature = "pro")]

@@ -1,14 +1,14 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capabilities for the Lastshot main window, the snip overlay and popped-out tabs.",
+  "description": "Capabilities for the Lastshot main window, windows of dragged-out tabs, the snip overlay and pop-out frames.",
   "windows": [
     "main",
     "snip",
     "bar",
     "annot",
     "scene",
-    "pop-*",
+    "shell-*",
     "frame-*"
   ],
   "permissions": [
@@ -16,6 +16,7 @@
     "core:window:allow-start-dragging",
     "core:window:allow-minimize",
     "core:window:allow-toggle-maximize",
+    "core:window:allow-set-title",
     "core:window:allow-hide",
     "core:window:allow-show",
     "core:window:allow-set-focus",

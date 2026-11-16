@@ -183,8 +183,18 @@ pub struct Settings {
     #[serde(default)]
     pub app_outputs: Vec<crate::audio_routing::AppOutputRule>,
     /// Where each popped-out tab's window was last (logical pixels).
-    #[serde(default)]
+    /// Read once to seed `shell` from older settings; no longer written.
+    #[serde(default, skip_serializing)]
     pub popout_places: Vec<WindowPlace>,
+    /// The app's windows and which tabs each one holds (see `shell.rs`).
+    #[serde(default)]
+    pub shell: crate::shell::ShellLayout,
+    /// In-app shortcut rebindings: "scope:id" -> keys ("" = no key).
+    #[serde(default)]
+    pub shortcuts: std::collections::BTreeMap<String, String>,
+    /// UI scale of every Lastshot window (1.0 = 100 %), Ctrl+= / Ctrl+- / Ctrl+0.
+    #[serde(default = "default_ui_scale")]
+    pub ui_scale: f64,
     /// Audio tab → Cables (Pro). Kept as plain JSON so a build without
     /// cables keeps them untouched; the cables module reads and writes it.
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
@@ -278,6 +288,10 @@ impl Settings {
     }
 }
 
+fn default_ui_scale() -> f64 {
+    1.0
+}
+
 fn default_true() -> bool {
     true
 }
@@ -337,6 +351,9 @@ impl Default for Settings {
             streamer_mode: false,
             app_outputs: Vec::new(),
             popout_places: Vec::new(),
+            shell: Default::default(),
+            shortcuts: Default::default(),
+            ui_scale: default_ui_scale(),
             cables: Default::default(),
             audio_guard: Default::default(),
         }

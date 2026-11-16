@@ -74,6 +74,8 @@ pub const EVT_STATS: &str = "lastshot://stats";
 pub const EVT_ERROR: &str = "lastshot://error";
 pub const EVT_HOTKEY: &str = "lastshot://hotkey";
 pub const EVT_BUFFER_STATE: &str = "lastshot://buffer-state";
+/// Every window hears the settings whenever they change (payload: Settings).
+pub const EVT_SETTINGS: &str = "lastshot://settings";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -737,6 +739,9 @@ pub struct SettingsPatch {
     pub screenshot_copy: Option<bool>,
     pub recording_dir: Option<String>,
     pub streamer_mode: Option<bool>,
+    /// In-app shortcut rebindings (the whole map).
+    pub shortcuts: Option<std::collections::BTreeMap<String, String>>,
+    pub ui_scale: Option<f64>,
 }
 
 #[tauri::command]
@@ -827,6 +832,20 @@ pub fn update_settings(
     }
     if let Some(v) = patch.recording_dir.as_ref() {
         s.recording_dir = v.trim().to_string();
+    }
+    if let Some(v) = patch.shortcuts.as_ref() {
+        s.shortcuts = v
+            .iter()
+            .filter(|(k, v)| k.len() <= 200 && v.len() <= 200 && k.contains(':'))
+            .take(500)
+            .map(|(k, v)| (k.clone(), v.trim().to_string()))
+            .collect();
+    }
+    if let Some(v) = patch.ui_scale {
+        if !v.is_finite() {
+            return Err("UI scale must be a number".into());
+        }
+        s.ui_scale = crate::shell::clamp_scale(v);
     }
     if let Some(v) = patch.streamer_mode {
         s.streamer_mode = v;
@@ -1030,6 +1049,11 @@ pub fn update_settings(
     }
 
     *state.settings.write() = s.clone();
+    // Every window (tabs in their own windows too) shows the same settings.
+    let _ = app.emit(EVT_SETTINGS, &s);
+    if patch.ui_scale.is_some() {
+        crate::shell::apply_scale_all(&app, s.ui_scale);
+    }
     // A new source takes effect at once: restart a running engine with it
     // (off the main thread; the replay buffer starts over).
     if source_changed && state.engine.is_running() {

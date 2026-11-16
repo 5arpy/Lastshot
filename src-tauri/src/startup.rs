@@ -67,15 +67,30 @@ pub fn ensure_main(app: &AppHandle, visible: bool) -> Option<tauri::WebviewWindo
         conf.y = Some(100.0);
         conf.focus = false;
         conf.visible = false;
+        // No taskbar button for a window nobody can see.
+        conf.skip_taskbar = true;
+    } else if let Some(p) = crate::shell::main_place(app) {
+        // Where it was last (on a screen that is still there).
+        conf.center = false;
+        conf.x = Some(p.x as f64);
+        conf.y = Some(p.y as f64);
+        conf.width = p.width.max(conf.min_width.unwrap_or(0.0));
+        conf.height = p.height.max(conf.min_height.unwrap_or(0.0));
+        conf.maximized = p.maximized;
     }
     let w = tauri::WebviewWindowBuilder::from_config(app, &conf).ok()?.build().ok()?;
     if test {
+        // Off screen, so never a taskbar button or an Alt+Tab stop.
+        crate::recording::hide_from_alt_tab(&w);
         let _ = w.set_position(tauri::PhysicalPosition::new(-24000, 100));
         if visible {
             let _ = w.show();
         }
     }
     crate::studio::allow_camera(&w);
+    if let Some(state) = app.try_state::<crate::commands::AppState>() {
+        crate::shell::apply_scale(&w, state.settings.read().ui_scale);
+    }
     if let Some(state) = app.try_state::<crate::commands::AppState>() {
         if state.settings.read().always_on_top {
             let _ = w.set_always_on_top(true);
@@ -88,16 +103,13 @@ pub fn ensure_main(app: &AppHandle, visible: bool) -> Option<tauri::WebviewWindo
 /// Shows (and makes, the first time) the main window.
 pub fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
-        let _ = w.show();
-        let _ = w.unminimize();
-        let _ = w.set_focus();
+        crate::shell::bring_to_front(&w);
         return;
     }
     let h = app.clone();
     tauri::async_runtime::spawn(async move {
         if let Some(w) = ensure_main(&h, true) {
-            let _ = w.show();
-            let _ = w.set_focus();
+            crate::shell::bring_to_front(&w);
         }
     });
 }

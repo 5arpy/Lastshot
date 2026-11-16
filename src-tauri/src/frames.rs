@@ -659,6 +659,9 @@ fn build_window(app: &AppHandle, f: &Frame) -> Result<WebviewWindow, String> {
         .background_color(tauri::window::Color(0, 0, 0, 0))
         .build()
         .map_err(|e| e.to_string())?;
+    // Never an Alt+Tab or taskbar entry: a frame cannot take the focus, so
+    // Alt+Tab landing on it looked like Alt+Tab doing nothing.
+    crate::recording::hide_from_alt_tab(&win);
     place(&win, f.x, f.y, f.w, f.h);
     #[cfg(feature = "pro-board")]
     crate::pro_board::on_window(&win, f);
@@ -1576,9 +1579,7 @@ pub fn frame_show_panel(app: AppHandle) {
 
 pub fn show_panel(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
-        let _ = w.show();
-        let _ = w.unminimize();
-        let _ = w.set_focus();
+        crate::shell::bring_to_front(&w);
     }
     let _ = app.emit(EVT_PANEL, ());
 }

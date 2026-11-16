@@ -234,6 +234,7 @@ export default function AnnotationLayer(p: Props) {
         dash: p.style.dash,
         n: p.nextStep,
         pts: IS_LINE(tool) ? [pt, pt] : undefined,
+        ...(tool === "spotlight" ? { opacity: 0.6, fill: null, width: 0 } : {}),
       };
       if (tool === "step") {
         const r = Math.max(18, p.style.size * 0.45);

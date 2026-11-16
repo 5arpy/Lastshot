@@ -22,6 +22,7 @@ export const TOOLS: { id: Tool; label: string; key: string; icon: string }[] = [
   { id: "pixelate", label: "Pixelate (hide names, chat)", key: "Shift+B", icon: "M3 3h3v3H3zM8 3h3v3H8zM5.5 7.5h3v3h-3zM3 10h3v3H3zM10 10h3v3h-3z" },
   { id: "blur", label: "Blur", key: "", icon: "M8 2c2.5 3 4 5 4 7a4 4 0 0 1-8 0c0-2 1.5-4 4-7z" },
   { id: "redact", label: "Black box (redact)", key: "", icon: "M2.5 5h11v6h-11z" },
+  { id: "spotlight", label: "Spotlight (dim the rest)", key: "", icon: "M1.5 2.5h13v11h-13zM5 6h6v4H5z" },
 ];
 
 const WIDTHS = [2, 4, 6, 10, 16];
@@ -116,6 +117,25 @@ export default function StyleControls({
               <input type="color" value={/^#[0-9a-f]{6}$/i.test(color) ? color : "#ffffff"} onChange={(e) => set({ color: e.target.value }, "Colour", false)} onBlur={(e) => set({ color: e.target.value }, "Colour")} className="absolute inset-0 h-full w-full cursor-pointer opacity-0" />
               <span className="pointer-events-none grid h-full place-items-center text-[11px] text-ink-3">+</span>
             </label>
+            {"EyeDropper" in window && (
+              <button
+                type="button"
+                title="Pick a colour from the screen"
+                onClick={() => {
+                  const ED = (window as unknown as { EyeDropper: new () => { open: () => Promise<{ sRGBHex: string }> } }).EyeDropper;
+                  void new ED()
+                    .open()
+                    .then((r) => set({ color: r.sRGBHex }, "Colour"))
+                    .catch(() => undefined);
+                }}
+                className="grid h-6 w-6 place-items-center rounded-full border-2 border-line text-ink-3 hover:text-ink"
+              >
+                <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M10 2.5l3.5 3.5M11.5 4.5L5 11l-2.5.5.5-2.5L9.5 2.5" />
+                </svg>
+              </button>
+            )}
+            <HexField value={color} onCommit={(c) => set({ color: c }, "Colour")} />
           </div>
         </div>
       )}
@@ -266,5 +286,32 @@ export default function StyleControls({
         </div>
       )}
     </div>
+  );
+}
+
+/** Colour as text (#rrggbb or #rgb); Enter or leaving the field applies it. */
+function HexField({ value, onCommit }: { value: string; onCommit: (c: string) => void }) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const commit = () => {
+    if (draft === null) return;
+    const v = draft.trim().replace(/^#?/, "#");
+    const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(v);
+    if (m) onCommit(m[1].length === 3 ? `#${[...m[1]].map((c) => c + c).join("")}`.toLowerCase() : v.toLowerCase());
+    setDraft(null);
+  };
+  return (
+    <input
+      value={draft ?? value}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") commit();
+        if (e.key === "Escape") setDraft(null);
+      }}
+      title="Colour code (#rrggbb)"
+      spellCheck={false}
+      className="h-6 w-[72px] rounded border border-line bg-surface-2 px-1.5 font-mono text-[11px] text-ink focus:border-accent focus:outline-none"
+    />
   );
 }

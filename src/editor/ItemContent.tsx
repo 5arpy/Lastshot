@@ -163,6 +163,7 @@ const SHAPE_LABEL: Record<string, string> = {
   blur: "Blur",
   pixelate: "Pixelate",
   redact: "Black box",
+  spotlight: "Spotlight",
 };
 
 export const ItemContent = memo(function ItemContent({ it, g, selected, onFx }: { it: EdItem; g: ItemGeom; selected: boolean; onFx: FxEdit }) {

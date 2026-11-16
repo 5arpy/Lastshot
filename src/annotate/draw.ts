@@ -8,6 +8,8 @@ import { IS_LINE, type Pt, type Shape, TEXT_PAD, centre, drawnBounds, fontOf } f
 export interface DrawEnv {
   /** Loaded picture for an image shape (null while loading). */
   image?: (src: string) => CanvasImageSource | null;
+  /** Size of the whole picture (a spotlight covers all of it). */
+  content?: { w: number; h: number };
 }
 
 function arrowHead(g: CanvasRenderingContext2D, from: Pt, to: Pt, size: number) {
@@ -127,6 +129,17 @@ export function drawShape(g: CanvasRenderingContext2D, s: Shape, env: DrawEnv = 
   g.translate(-cx, -cy);
 
   switch (s.kind) {
+    case "spotlight": {
+      // Everything but the box, dimmed (even-odd: the box is a hole).
+      g.beginPath();
+      g.rect(-1e5, -1e5, 2e5, 2e5);
+      const r = Math.min(s.radius ?? 0, s.w / 2, s.h / 2);
+      if (r > 0) g.roundRect(s.x, s.y, s.w, s.h, r);
+      else g.rect(s.x, s.y, s.w, s.h);
+      g.fillStyle = s.fill ?? "#000000";
+      g.fill("evenodd");
+      break;
+    }
     case "rect":
     case "redact": {
       g.beginPath();
@@ -252,7 +265,7 @@ export function drawShape(g: CanvasRenderingContext2D, s: Shape, env: DrawEnv = 
  * returns the picture and its top-left corner in content pixels.
  */
 export function rasterize(s: Shape, env: DrawEnv = {}): { png: string; x: number; y: number } | null {
-  const b = drawnBounds(s);
+  const b = s.kind === "spotlight" && env.content ? { x: 0, y: 0, ...env.content } : drawnBounds(s);
   const x = Math.floor(b.x);
   const y = Math.floor(b.y);
   const w = Math.ceil(b.x + b.w) - x;

@@ -24,7 +24,9 @@ export type ShapeKind =
   | "image"
   | "blur"
   | "pixelate"
-  | "redact";
+  | "redact"
+  /** Dims everything outside its box. */
+  | "spotlight";
 
 export type Pt = [number, number];
 
@@ -77,7 +79,7 @@ export interface Shape {
 export type Tool = "select" | ShapeKind;
 
 /** Kinds whose box cannot turn (they read the picture under them straight). */
-export const NO_ROTATE: ReadonlySet<ShapeKind> = new Set(["blur", "pixelate", "redact"]);
+export const NO_ROTATE: ReadonlySet<ShapeKind> = new Set(["blur", "pixelate", "redact", "spotlight"]);
 export const IS_LINE = (k: ShapeKind) => k === "line" || k === "arrow";
 /** Kinds that keep their shape on corner drags unless Shift is held. */
 const KEEP_ASPECT: ReadonlySet<ShapeKind> = new Set(["image", "text", "step"]);

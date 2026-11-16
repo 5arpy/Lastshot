@@ -529,7 +529,7 @@ export default function EditorView(props: EditorProps) {
     // On a busy track, use the free space up to the next object.
     const next = r.tl.items.filter((i) => i.track === r.track && i.start >= t).sort((a, b) => a.start - b.start)[0];
     if (next && next.start < t + d) d = Math.max(0.2, next.start - t);
-    const names: Record<string, string> = { text: "Text", rect: "Rectangle", ellipse: "Ellipse", arrow: "Arrow", line: "Line", pen: "Drawing", highlight: "Highlight", step: "Step", pixelate: "Pixelate", blur: "Blur", redact: "Black box", image: "Picture" };
+    const names: Record<string, string> = { text: "Text", rect: "Rectangle", ellipse: "Ellipse", arrow: "Arrow", line: "Line", pen: "Drawing", highlight: "Highlight", step: "Step", pixelate: "Pixelate", blur: "Blur", redact: "Black box", spotlight: "Spotlight", image: "Picture" };
     const it: EdItem = { id: s.id, track: r.track, kind: "shape", name: names[s.kind] ?? s.kind, start: t, duration: d, srcIn: 0, shape: s };
     apply({ ...cur, tl: place(r.tl, [it], "overwrite") }, "once", `Add ${it.name.toLowerCase()}`);
     setSel(new Set([it.id]));
@@ -589,9 +589,30 @@ export default function EditorView(props: EditorProps) {
   const paste = (at?: number) => {
     const cur = pRef.current;
     if (!clipboard.current.length) return;
+    const at0 = at ?? player.time;
+    if (clipboard.current.every((i) => i.kind === "shape")) {
+      // Objects never cut into other objects: each goes on a free overlay track.
+      const a = Math.min(...clipboard.current.map((i) => i.start));
+      let tl = cur.tl;
+      const made: string[] = [];
+      for (const src of clipboard.current) {
+        const start = at0 + src.start - a;
+        const f = freeTrack(tl, "overlay", start, start + src.duration);
+        if (!f.track) break;
+        tl = f.tl;
+        const id = newId("i");
+        const busy = tl.items.some((i) => i.track === f.track && i.start < start + src.duration - 1e-6 && end(i) > start + 1e-6);
+        const placed = { ...src, id, start, link: undefined, track: f.track, shape: { ...src.shape!, id } };
+        tl = busy ? place(tl, [placed], "overwrite", editOpts()) : { ...tl, items: [...tl.items, placed] };
+        made.push(id);
+      }
+      apply({ ...cur, tl }, "once", "Paste");
+      setSel(new Set(made));
+      return;
+    }
     const fallback = (i: EdItem) => firstTrack(cur.tl, i);
     const items = clipboard.current.map((i) => (i.shape ? { ...i, shape: { ...i.shape, id: "" } } : i));
-    const r = pasteItems(cur.tl, items, at ?? player.time, fallback, "overwrite", editOpts());
+    const r = pasteItems(cur.tl, items, at0, fallback, "overwrite", editOpts());
     // Shapes keep item id = shape id.
     const tl = { ...r.tl, items: r.tl.items.map((i) => (r.created.includes(i.id) && i.shape ? { ...i, shape: { ...i.shape, id: i.id } } : i)) };
     apply({ ...cur, tl }, "once", "Paste");
@@ -603,18 +624,22 @@ export default function EditorView(props: EditorProps) {
     if (!copySel()) return;
     const objs = clipboard.current.every((i) => i.kind === "shape");
     if (objs && focusArea.current === "preview") {
-      // Objects: a copy slightly offset on the picture, same time.
-      const r = pasteItems(cur.tl, clipboard.current, Math.min(...clipboard.current.map((i) => i.start)), () => null, "overwrite");
-      let tl = r.tl;
-      // Same track would overlap: put copies on a free overlay track.
-      const copies = r.tl.items.filter((i) => r.created.includes(i.id));
-      if (copies.length < clipboard.current.length || copies.some((c) => !c.shape)) return paste(end(clipboard.current[0]));
-      tl = {
-        ...tl,
-        items: tl.items.map((i) => (r.created.includes(i.id) && i.shape ? { ...i, shape: { ...moveBy(i.shape, 24, 24), id: i.id } } : i)),
-      };
+      // Objects: a copy slightly offset on the picture, at the same time, on
+      // a free overlay track (one is added when needed and allowed).
+      let tl = cur.tl;
+      const copies: EdItem[] = [];
+      for (const src of clipboard.current) {
+        const f = freeTrack(tl, "overlay", src.start, end(src));
+        tl = f.tl;
+        const busy = !f.track || tl.items.some((i) => i.track === f.track && i.start < end(src) - 1e-6 && end(i) > src.start + 1e-6);
+        if (busy) return paste(Math.max(...clipboard.current.map((i) => end(i))));
+        const id = newId("i");
+        const copy: EdItem = { ...src, id, track: f.track!, link: undefined, shape: { ...moveBy(src.shape!, 24, 24), id } };
+        tl = { ...tl, items: [...tl.items, copy] };
+        copies.push(copy);
+      }
       apply({ ...cur, tl }, "once", "Duplicate");
-      setSel(new Set(r.created));
+      setSel(new Set(copies.map((c) => c.id)));
       return;
     }
     paste(Math.max(...clipboard.current.map((i) => end(i))));
@@ -735,7 +760,7 @@ export default function EditorView(props: EditorProps) {
         res = await lastshot.exportClip({ segments: route.segments, crop: route.crop, mode, copy: mode === "share", progressKey: key });
       } else {
         await preloadImages(cur);
-        const env = { image: (s: string) => images.get(urlOf(s)) };
+        const env = { image: (s: string) => images.get(urlOf(s)), content: outputSize(cur) };
         const job = await renderJob(cur, {
           range: r,
           targetMb: mode === "share" ? shareMb : null,
@@ -1015,11 +1040,21 @@ export default function EditorView(props: EditorProps) {
   const k = (label: string, text?: string) => tip(keymap, label, text);
 
   const active = props.active ?? true;
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  /** An app dialog (welcome card, settings sheet…) lies over the editor. */
+  const covered = () => {
+    const el = rootRef.current;
+    if (!el) return false;
+    const r = el.getBoundingClientRect();
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return !!hit && !el.contains(hit);
+  };
   useEffect(() => {
     if (!active) return;
     const onKey = (e: KeyboardEvent) => {
       if (menu || ask || editing) return;
       if (help && e.key === "Escape") return setHelp(false);
+      if (!help && covered()) return;
       // "?" arrives as Shift+/ on most layouts.
       if (e.key === "?" && !(e.target as HTMLElement)?.closest?.("input,textarea,select")) {
         e.preventDefault();
@@ -1272,6 +1307,7 @@ export default function EditorView(props: EditorProps) {
 
   return (
     <div
+      ref={rootRef}
       className="flex h-full min-h-0 flex-col bg-app text-ink"
       onDragOver={(e) => {
         if (droppable(e)) e.preventDefault();

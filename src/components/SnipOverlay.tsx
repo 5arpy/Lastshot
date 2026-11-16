@@ -56,6 +56,7 @@ const SNIP_KEYS: Record<string, Tool> = {
   b: "blur",
   "shift+b": "pixelate",
   k: "redact",
+  l: "spotlight",
 };
 function keyOf(t: Tool): string | undefined {
   const k = Object.entries(SNIP_KEYS).find(([, v]) => v === t)?.[0];

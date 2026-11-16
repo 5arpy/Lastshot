@@ -8,7 +8,7 @@ import * as X from "../lib/explorer";
 import { dragHasFiles, droppedPaths, dropMode, fileKind, fs, isShowablePicture, splitExt, type DroppedItem } from "../lib/files";
 import { isPinned, togglePin, repointPin, usePins } from "../lib/pins";
 import { useShortcuts } from "../lib/useShortcuts";
-import { activeShortcuts, comboFromEvent, isTextField, splitKeys, withKeys } from "../lib/shortcuts";
+import { activeShortcuts, comboFromEvent, declareShortcuts, isTextField, splitKeys, withKeys } from "../lib/shortcuts";
 import { popOutPicturePath } from "../popout/frames";
 
 /**
@@ -192,6 +192,54 @@ function friendly(err: unknown): string {
 }
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * The Clips explorer's keys (scope "clips", stable ids for rebinding).
+ * Declared when the app loads so Settings > Shortcuts and the cheat sheet
+ * list them even while Clips is closed.
+ */
+const NAV_KEYS = ["Left", "Right", "Up", "Down", "Home", "End", "PageUp", "PageDown"] as const;
+const NAV_LABEL: Record<(typeof NAV_KEYS)[number], string> = {
+  Left: "Left",
+  Right: "Right",
+  Up: "Up",
+  Down: "Down",
+  Home: "First item",
+  End: "Last item",
+  PageUp: "Page up",
+  PageDown: "Page down",
+};
+export const CLIPS_KEYS: { id: string; keys: string; label: string; group: string }[] = [
+  { id: "back", keys: "Alt+Left | BrowserBack", label: "Back", group: "Folders" },
+  { id: "forward", keys: "Alt+Right | BrowserForward", label: "Forward", group: "Folders" },
+  { id: "up", keys: "Alt+Up | Backspace", label: "Up a folder", group: "Folders" },
+  { id: "address", keys: "Ctrl+L | Alt+D | F4", label: "Type a path", group: "Folders" },
+  { id: "search", keys: "Ctrl+F | Ctrl+E | F3", label: "Search", group: "Folders" },
+  { id: "refresh", keys: "F5 | Ctrl+R", label: "Refresh", group: "Folders" },
+  { id: "new-folder", keys: "Ctrl+Shift+N", label: "New folder", group: "Files" },
+  { id: "open", keys: "Enter", label: "Open", group: "Files" },
+  { id: "open-default", keys: "Ctrl+Enter", label: "Open in its default app", group: "Files" },
+  { id: "rename", keys: "F2", label: "Rename", group: "Files" },
+  { id: "delete", keys: "Delete", label: "Delete (to the Recycle Bin)", group: "Files" },
+  { id: "copy", keys: "Ctrl+C", label: "Copy", group: "Files" },
+  { id: "cut", keys: "Ctrl+X", label: "Cut", group: "Files" },
+  { id: "paste", keys: "Ctrl+V", label: "Paste", group: "Files" },
+  { id: "copy-path", keys: "Ctrl+Shift+C", label: "Copy path", group: "Files" },
+  { id: "undo", keys: "Ctrl+Z", label: "Undo", group: "Files" },
+  { id: "properties", keys: "Alt+Enter", label: "Properties", group: "Files" },
+  { id: "select-all", keys: "Ctrl+A", label: "Select all", group: "Select" },
+  { id: "toggle-select", keys: "Ctrl+Space", label: "Select or unselect", group: "Select" },
+  { id: "menu", keys: "Shift+F10 | ContextMenu", label: "Menu", group: "Select" },
+  { id: "escape", keys: "Escape", label: "Cancel / clear", group: "Select" },
+  ...NAV_KEYS.flatMap((k) => [
+    { id: `focus-${k.toLowerCase()}`, keys: k, label: NAV_LABEL[k], group: "Move around" },
+    { id: `extend-${k.toLowerCase()}`, keys: `Shift+${k}`, label: `${NAV_LABEL[k]}, selecting`, group: "Move around" },
+  ]),
+  { id: "preview", keys: "Alt+P", label: "Preview pane", group: "View" },
+  { id: "view-grid", keys: "Ctrl+Shift+2", label: "Pictures view", group: "View" },
+  { id: "view-details", keys: "Ctrl+Shift+6", label: "Details view", group: "View" },
+];
+declareShortcuts("clips", CLIPS_KEYS);
 
 interface Menu {
   x: number;
@@ -661,10 +709,6 @@ function ClipsExplorer(props: Props) {
     return !a || a === document.body || !!rootRef.current?.contains(a);
   };
   const onItems = () => keysHere() && !menu && !renaming && !addr && !(document.activeElement instanceof HTMLButtonElement || document.activeElement instanceof HTMLSelectElement);
-  const nav = (key: string, label: string): { id: string; keys: string; label: string; group: string; run: () => void; when: () => boolean }[] => [
-    { id: `focus-${key.toLowerCase()}`, keys: key, label, group: "Move around", run: () => moveTo(key, false), when: onItems },
-    { id: `extend-${key.toLowerCase()}`, keys: `Shift+${key}`, label: `${label}, selecting`, group: "Move around", run: () => moveTo(key, true), when: onItems },
-  ];
   const openMenuAtFocus = () => {
     const p = focus ?? selection[0];
     const el = p ? scrollRef.current?.querySelector(`[data-entry="${CSS.escape(p)}"]`) : null;
@@ -674,52 +718,49 @@ function ClipsExplorer(props: Props) {
     if (target && !selected.has(X.entryPath(target))) onSelection([X.entryPath(target)], X.entryPath(target));
     setMenu({ x: r.left + 24, y: r.top + 24, target });
   };
-  useShortcuts("clips", [
-    { id: "back", keys: "Alt+Left | BrowserBack", label: "Back", group: "Folders", run: () => setHist(X.goBack), when: keysHere },
-    { id: "forward", keys: "Alt+Right | BrowserForward", label: "Forward", group: "Folders", run: () => setHist(X.goForward), when: keysHere },
-    { id: "up", keys: "Alt+Up | Backspace", label: "Up a folder", group: "Folders", run: up, when: onItems },
-    { id: "address", keys: "Ctrl+L | Alt+D | F4", label: "Type a path", group: "Folders", run: () => setAddr(loc.kind === "folder" ? loc.path : ""), when: keysHere },
-    { id: "search", keys: "Ctrl+F | Ctrl+E | F3", label: "Search", group: "Folders", run: () => searchRef.current?.focus(), when: keysHere },
-    { id: "refresh", keys: "F5 | Ctrl+R", label: "Refresh", group: "Folders", run: refresh, when: keysHere },
-    { id: "new-folder", keys: "Ctrl+Shift+N", label: "New folder", group: "Files", run: newFolder, when: keysHere },
-    { id: "open", keys: "Enter", label: "Open", group: "Files", run: () => selectedEntries.length === 1 && openEntry(selectedEntries[0]), when: () => onItems() && selectedEntries.length === 1 },
-    { id: "open-default", keys: "Ctrl+Enter", label: "Open in its default app", group: "Files", run: () => single && single.kind !== "folder" && openDefault(X.entryPath(single)), when: () => onItems() && !!single },
-    { id: "rename", keys: "F2", label: "Rename", group: "Files", run: () => selection.length === 1 && startRename(selection[0]), when: () => onItems() && selection.length === 1 },
-    { id: "delete", keys: "Delete", label: "Delete (to the Recycle Bin)", group: "Files", run: () => recycle(selection), when: () => onItems() && selection.length > 0 },
-    { id: "copy", keys: "Ctrl+C", label: "Copy", group: "Files", run: () => copySel(false), when: () => onItems() && selection.length > 0 },
-    { id: "cut", keys: "Ctrl+X", label: "Cut", group: "Files", run: () => copySel(true), when: () => onItems() && selection.length > 0 },
-    { id: "paste", keys: "Ctrl+V", label: "Paste", group: "Files", run: paste, when: () => onItems() && loc.kind === "folder" },
-    { id: "copy-path", keys: "Ctrl+Shift+C", label: "Copy path", group: "Files", run: () => copyPath(selection.length ? selection : [currentDir]), when: onItems },
-    { id: "undo", keys: "Ctrl+Z", label: "Undo", group: "Files", run: doUndo, when: () => onItems() && undo.length > 0 },
-    { id: "properties", keys: "Alt+Enter", label: "Properties", group: "Files", run: () => properties(single ? X.entryPath(single) : currentDir), when: () => onItems() && native },
-    { id: "select-all", keys: "Ctrl+A", label: "Select all", group: "Select", run: () => onSelection(order, order[0] ?? null), when: onItems },
-    { id: "toggle-select", keys: "Ctrl+Space", label: "Select or unselect", group: "Select", run: () => focus && select(focus, { ctrlKey: true, shiftKey: false }), when: () => onItems() && !!focus },
-    { id: "menu", keys: "Shift+F10 | ContextMenu", label: "Menu", group: "Select", run: openMenuAtFocus, when: onItems },
-    {
-      id: "escape",
-      keys: "Escape",
-      label: "Cancel / clear",
-      group: "Select",
-      run: () => {
+  // What each key in CLIPS_KEYS does here (and when it applies).
+  const acts: Record<string, [run: () => void, when: () => boolean]> = {
+    back: [() => setHist(X.goBack), keysHere],
+    forward: [() => setHist(X.goForward), keysHere],
+    up: [up, onItems],
+    address: [() => setAddr(loc.kind === "folder" ? loc.path : ""), keysHere],
+    search: [() => searchRef.current?.focus(), keysHere],
+    refresh: [refresh, keysHere],
+    "new-folder": [newFolder, keysHere],
+    open: [() => selectedEntries.length === 1 && openEntry(selectedEntries[0]), () => onItems() && selectedEntries.length === 1],
+    "open-default": [() => single && single.kind !== "folder" && openDefault(X.entryPath(single)), () => onItems() && !!single],
+    rename: [() => selection.length === 1 && startRename(selection[0]), () => onItems() && selection.length === 1],
+    delete: [() => recycle(selection), () => onItems() && selection.length > 0],
+    copy: [() => copySel(false), () => onItems() && selection.length > 0],
+    cut: [() => copySel(true), () => onItems() && selection.length > 0],
+    paste: [paste, () => onItems() && loc.kind === "folder"],
+    "copy-path": [() => copyPath(selection.length ? selection : [currentDir]), onItems],
+    undo: [doUndo, () => onItems() && undo.length > 0],
+    properties: [() => properties(single ? X.entryPath(single) : currentDir), () => onItems() && native],
+    "select-all": [() => onSelection(order, order[0] ?? null), onItems],
+    "toggle-select": [() => focus && select(focus, { ctrlKey: true, shiftKey: false }), () => onItems() && !!focus],
+    menu: [openMenuAtFocus, onItems],
+    escape: [
+      () => {
         if (places) setPlaces(false);
         else if (linkAsk) setLinkAsk(null);
         else if (q) setQuery("");
         else onSelection([], null);
       },
-      when: () => keysHere() && !menu && !renaming && !addr && (places || !!linkAsk || !!q || selection.length > 0),
-    },
-    ...nav("Left", "Left"),
-    ...nav("Right", "Right"),
-    ...nav("Up", "Up"),
-    ...nav("Down", "Down"),
-    ...nav("Home", "First item"),
-    ...nav("End", "Last item"),
-    ...nav("PageUp", "Page up"),
-    ...nav("PageDown", "Page down"),
-    { id: "preview", keys: "Alt+P", label: "Preview pane", group: "View", run: () => setPrefs((p) => ({ ...p, preview: !p.preview })), when: keysHere },
-    { id: "view-grid", keys: "Ctrl+Shift+2", label: "Pictures view", group: "View", run: () => setPrefs((p) => ({ ...p, view: "grid" })), when: keysHere },
-    { id: "view-details", keys: "Ctrl+Shift+6", label: "Details view", group: "View", run: () => setPrefs((p) => ({ ...p, view: "details" })), when: keysHere },
-  ]);
+      () => keysHere() && !menu && !renaming && !addr && (places || !!linkAsk || !!q || selection.length > 0),
+    ],
+    preview: [() => setPrefs((p) => ({ ...p, preview: !p.preview })), keysHere],
+    "view-grid": [() => setPrefs((p) => ({ ...p, view: "grid" })), keysHere],
+    "view-details": [() => setPrefs((p) => ({ ...p, view: "details" })), keysHere],
+  };
+  for (const k of NAV_KEYS) {
+    acts[`focus-${k.toLowerCase()}`] = [() => moveTo(k, false), onItems];
+    acts[`extend-${k.toLowerCase()}`] = [() => moveTo(k, true), onItems];
+  }
+  useShortcuts(
+    "clips",
+    CLIPS_KEYS.map((s) => ({ ...s, run: () => acts[s.id]?.[0](), when: () => !!acts[s.id]?.[1]() })),
+  );
   const tip = (label: string, id: string) => withKeys(label, "clips", id);
 
   // Type-ahead: typing a name jumps to it (letters the shortcuts don't use).

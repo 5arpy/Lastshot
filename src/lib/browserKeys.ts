@@ -7,7 +7,7 @@
  *
  * It only cancels the browser's default action. The event still reaches the
  * app, marked `__lsGuard`, so app shortcuts on the same keys (Ctrl+F search,
- * Alt+Left back, Ctrl+0 reset, Ctrl+= UI scale) keep working.
+ * Alt+Left back, Ctrl+0 viewer reset, Ctrl+Shift+= interface size) keep working.
  */
 import { comboFromEvent, isTextField } from "./shortcuts";
 
@@ -40,6 +40,7 @@ const ALWAYS = new Set([
   "Ctrl+-",
   "Ctrl+Shift+=",
   "Ctrl+Shift+-",
+  "Ctrl+_",
   "Ctrl+0",
   "Ctrl+N",
   "Ctrl+Shift+N",

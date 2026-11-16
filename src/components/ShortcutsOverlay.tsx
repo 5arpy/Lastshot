@@ -1,5 +1,5 @@
 /**
- * The cheat sheet (? or F1) and command list (Ctrl+K): every shortcut that
+ * The cheat sheet (? or F1) and command list (Ctrl+Shift+P): every shortcut that
  * works right now in this window, searchable by name or key. Enter or a
  * click runs the highlighted one; "All" also lists keys for parts of the app
  * that are not open.
@@ -9,10 +9,11 @@ import { activeShortcuts, allShortcuts, onShortcutsChange, splitKeys, type Short
 import { cn } from "../utils/cn";
 
 export const SCOPE_NAMES: Record<string, string> = {
-  global: "Everywhere",
+  global: "App-wide",
   clips: "Clips",
-  viewer: "Pictures and clips (viewer)",
-  frame: "Pop-out frames",
+  viewer: "Viewer",
+  frame: "Frames",
+  snip: "Snip",
   editor: "Editor",
 };
 export const scopeName = (s: string) => SCOPE_NAMES[s] ?? s.charAt(0).toUpperCase() + s.slice(1);

@@ -7,8 +7,8 @@ export const FRAME_KEYS: { id: string; keys: string; label: string; group: strin
   { id: "leave-full", keys: "Escape", label: "Leave full screen", group: "Frame" },
   { id: "on-top", keys: "T", label: "Always on top", group: "Frame" },
   { id: "through", keys: "X", label: "Click-through (clicks reach the app below)", group: "Frame" },
-  { id: "opacity-down", keys: "Shift+-", label: "Less opaque", group: "Frame" },
-  { id: "opacity-up", keys: "Shift+=", label: "More opaque", group: "Frame" },
+  { id: "opacity-down", keys: "- | _", label: "Less opaque", group: "Frame" },
+  { id: "opacity-up", keys: "= | +", label: "More opaque", group: "Frame" },
   { id: "menu", keys: "Shift+F10", label: "The frame's menu", group: "Frame" },
 ];
 declareShortcuts("frame", FRAME_KEYS);

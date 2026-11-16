@@ -50,9 +50,10 @@ import TabStrip from "./components/TabStrip";
 import ShortcutsOverlay from "./components/ShortcutsOverlay";
 import { cycleTab, MAIN, myLabel, myWindow, shell, TAB_IDS, TAB_NAMES, useShellLayout, type TabId } from "./lib/shell";
 import { useShortcuts } from "./lib/useShortcuts";
+import { ak, APP_SCOPE } from "./lib/appKeys";
 import { setShortcutOverrides } from "./lib/shortcuts";
 
-/** UI sizes Ctrl+plus / Ctrl+minus step through. */
+/** UI sizes Ctrl+Shift+= / Ctrl+Shift+- step through. */
 const UI_SCALES = [0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
 import { screenshotsDir, setStreamerMode, shownPath } from "./lib/pathDisplay";
 
@@ -1974,13 +1975,10 @@ export default function App() {
     const next = step === 0 ? 1 : UI_SCALES[Math.max(0, Math.min(UI_SCALES.length - 1, step > 0 ? (exact ? i + 1 : i) : i - 1))];
     if (Math.abs(next - cur) < 0.001) return;
     void patchSettings({ uiScale: next });
-    pushToast("info", `Interface size ${Math.round(next * 100)}%`, step === 0 ? undefined : "Ctrl+0 goes back to 100%.");
+    pushToast("info", `Interface size ${Math.round(next * 100)}%`, step === 0 ? undefined : "Ctrl+Shift+0 goes back to 100%.");
   };
   const tabKeys = Array.from({ length: 9 }, (_, i) => ({
-    id: `tab-${i + 1}`,
-    keys: `Ctrl+${i + 1}`,
-    label: i === 8 ? "Last tab in this window" : `Tab ${i + 1} in this window`,
-    group: "Tabs",
+    ...ak(`tab-${i + 1}`),
     inText: true,
     when: () => i === 8 || i < myTabsRef.current.length,
     run: () => {
@@ -1989,46 +1987,26 @@ export default function App() {
       if (t) goTab(t);
     },
   }));
-  useShortcuts("global", [
+  const moveErr = (e: unknown) => pushToast("err", "Could not move the tab", String(e));
+  useShortcuts(APP_SCOPE, [
     ...tabKeys,
-    { id: "next-tab", keys: "Ctrl+Tab | Ctrl+PageDown", label: "Next tab", group: "Tabs", inText: true, run: () => goTab(cycleTab(myTabsRef.current, tabRef.current, 1)) },
-    { id: "prev-tab", keys: "Ctrl+Shift+Tab | Ctrl+PageUp", label: "Previous tab", group: "Tabs", inText: true, run: () => goTab(cycleTab(myTabsRef.current, tabRef.current, -1)) },
+    { ...ak("next-tab"), inText: true, run: () => goTab(cycleTab(myTabsRef.current, tabRef.current, 1)) },
+    { ...ak("prev-tab"), inText: true, run: () => goTab(cycleTab(myTabsRef.current, tabRef.current, -1)) },
     ...(native
       ? [
-          {
-            id: "tab-new-window",
-            keys: "Ctrl+Shift+N",
-            label: "Move this tab to a new window",
-            group: "Tabs",
-            when: () => myTabsRef.current.length > 1,
-            run: () => void shell.moveTab(tabRef.current, "new").catch((e) => pushToast("err", "Could not move the tab", String(e))),
-          },
-          {
-            id: "tab-dock",
-            keys: "Ctrl+Shift+M",
-            label: "Move this tab to the main window",
-            group: "Tabs",
-            when: () => !primary,
-            run: () => void shell.moveTab(tabRef.current, MAIN).catch((e) => pushToast("err", "Could not move the tab", String(e))),
-          },
-          {
-            id: "close-window",
-            keys: "",
-            label: "Close this window (its tabs go back to the main window)",
-            group: "Tabs",
-            when: () => !primary,
-            run: () => void shell.closeWindow(),
-          },
+          { ...ak("tab-new-window"), when: () => myTabsRef.current.length > 1, run: () => void shell.moveTab(tabRef.current, "new").catch(moveErr) },
+          { ...ak("tab-dock"), when: () => !primary, run: () => void shell.moveTab(tabRef.current, MAIN).catch(moveErr) },
+          { ...ak("close-window"), when: () => !primary, run: () => void shell.closeWindow() },
+          { ...ak("frames-panel"), run: () => setFramesOpen((o) => !o) },
         ]
       : []),
-    ...TAB_IDS.map((t) => ({ id: `go-${t}`, keys: "", label: `Go to ${TAB_NAMES[t]}`, group: "Tabs", run: () => goTab(t) })),
-    { id: "cheat-sheet", keys: "F1 | ?", label: "Keyboard shortcuts", group: "Help", run: () => setOverlay((o) => (o ? null : "keys")) },
-    { id: "commands", keys: "Ctrl+K | Ctrl+Shift+P", label: "Find a command", group: "Help", inText: true, run: () => setOverlay((o) => (o ? null : "commands")) },
-    { id: "ui-bigger", keys: "Ctrl+= | Ctrl++ | Ctrl+Shift+=", label: "Bigger interface", group: "View", run: () => scaleBy(1) },
-    { id: "ui-smaller", keys: "Ctrl+- | Ctrl+Shift+-", label: "Smaller interface", group: "View", run: () => scaleBy(-1) },
-    { id: "ui-reset", keys: "Ctrl+0", label: "Interface at 100%", group: "View", run: () => scaleBy(0) },
-    { id: "screenshot", keys: "", label: "Take a screenshot", group: "Capture", run: () => takeScreenshot() },
-    ...(native ? [{ id: "frames-panel", keys: "", label: "Pop-out frames panel", group: "View", run: () => setFramesOpen((o) => !o) }] : []),
+    ...TAB_IDS.map((t) => ({ ...ak(`go-${t}`), run: () => goTab(t) })),
+    { ...ak("cheat-sheet"), run: () => setOverlay((o) => (o ? null : "keys")) },
+    { ...ak("commands"), inText: true, run: () => setOverlay((o) => (o ? null : "commands")) },
+    { ...ak("ui-bigger"), run: () => scaleBy(1) },
+    { ...ak("ui-smaller"), run: () => scaleBy(-1) },
+    { ...ak("ui-reset"), run: () => scaleBy(0) },
+    { ...ak("screenshot"), run: () => takeScreenshot() },
   ]);
   // The user's keys (main.tsx keeps them current from the app too).
   useEffect(() => setShortcutOverrides(settings.shortcuts), [settings.shortcuts]);
@@ -2841,7 +2819,7 @@ export default function App() {
       )}
 
       {/* First-run Onboarding Dialog */}
-      {onboarding && (
+      {onboarding && primary && (
         <OnboardingOverlay
           hotkeySave={settings.hotkeySave}
           hotkeyToggle={settings.hotkeyToggle}

@@ -51,6 +51,8 @@ describe("combos", () => {
     expect(normalizeCombo("Ctrl++")).toBe("Ctrl++");
     expect(normalizeCombo("Shift+?")).toBe("?");
     expect(normalizeCombo("esc")).toBe("Escape");
+    expect(normalizeCombo("+")).toBe("+");
+    expect(splitKeys("= | +")).toEqual(["=", "+"]);
     expect(splitKeys("F1 | ?")).toEqual(["F1", "?"]);
   });
 
@@ -73,6 +75,17 @@ describe("dispatch", () => {
     off();
     dispatchKey(ev({ key: "Delete", code: "Delete" }));
     expect(log).toEqual(["viewer", "clips"]);
+  });
+
+  it("a tab's own key wins over an app-wide one on the same combo", () => {
+    const log: string[] = [];
+    registerShortcuts("clips", [{ keys: "F1", label: "Refresh", run: () => log.push("clips") }]);
+    const off = registerShortcuts("global", [{ keys: "F1", label: "Keys", run: () => log.push("global") }]);
+    dispatchKey(ev({ key: "F1", code: "F1" }));
+    setScopeEnabled("clips", false);
+    dispatchKey(ev({ key: "F1", code: "F1" }));
+    off();
+    expect(log).toEqual(["clips", "global"]);
   });
 
   it("never fires while typing unless allowed", () => {

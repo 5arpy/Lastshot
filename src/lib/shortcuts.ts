@@ -68,6 +68,8 @@ const notify = () => listeners.forEach((l) => l());
 
 export const idOf = (s: { id?: string; label: string }) => s.id ?? s.label;
 const keyOf = (scope: string, id: string) => `${scope}:${id}`;
+/** The app-wide scope (see appKeys.ts). */
+const APP = "global";
 
 // ------------------------------------------------------------------ combos
 
@@ -123,7 +125,7 @@ export function normalizeCombo(combo: string): string {
   const s = combo.trim();
   if (!s) return "";
   // "Ctrl++" ends in a plus key.
-  const parts = s.endsWith("++") ? [...s.slice(0, -2).split("+"), "+"] : s.split("+");
+  const parts = s === "+" ? ["+"] : s.endsWith("++") ? [...s.slice(0, -2).split("+"), "+"] : s.split("+");
   const mods = new Set<string>();
   let key = "";
   for (const p of parts) {
@@ -295,6 +297,44 @@ export function conflictsFor(scope: string, id: string, combo: string): Shortcut
   );
 }
 
+/** Every shortcut (any scope) that `combo` runs, for "what does Ctrl+D do?". */
+export function usesOf(combo: string): ShortcutInfo[] {
+  const c = normalizeCombo(combo);
+  return c ? allShortcuts().filter((s) => splitKeys(s.keys).includes(c)) : [];
+}
+
+export interface KeyClash {
+  combo: string;
+  a: { scope: string; id: string; label: string };
+  b: { scope: string; id: string; label: string };
+  /** Two in one scope, or an app-wide key also used by a tab. */
+  kind: "same-scope" | "app-wide";
+}
+
+/**
+ * Keys that fight: the same combo twice in one scope, or an app-wide
+ * (`appScope`) combo also used in a tab. The same key in two different tabs
+ * is fine. Pass defaults (`keys` = built-in) or what is in effect.
+ */
+export function findClashes(list: { scope: string; id: string; label: string; keys: string }[], appScope = "global"): KeyClash[] {
+  const by = new Map<string, { scope: string; id: string; label: string }[]>();
+  for (const s of list)
+    for (const c of new Set(splitKeys(s.keys))) {
+      const l = by.get(c) ?? [];
+      l.push({ scope: s.scope, id: s.id, label: s.label });
+      by.set(c, l);
+    }
+  const out: KeyClash[] = [];
+  for (const [combo, l] of by)
+    for (let i = 0; i < l.length; i++)
+      for (let j = i + 1; j < l.length; j++) {
+        const [a, b] = [l[i], l[j]];
+        if (a.scope === b.scope) out.push({ combo, a, b, kind: "same-scope" });
+        else if (a.scope === appScope || b.scope === appScope) out.push({ combo, a, b, kind: "app-wide" });
+      }
+  return out;
+}
+
 // ------------------------------------------------------------------ dispatch
 
 export const isTextField = (t: EventTarget | null): boolean => {
@@ -314,7 +354,9 @@ export function dispatchKey(e: KeyboardEvent): boolean {
   const combo = comboFromEvent(e);
   if (!combo) return false;
   const typing = isTextField(e.target);
-  for (const r of [...regs].sort((a, b) => b.seq - a.seq)) {
+  // A tab's own key wins over an app-wide one on the same combo (the user
+  // chose "keep both"); otherwise the newest registration wins.
+  for (const r of [...regs].sort((a, b) => Number(a.scope === APP) - Number(b.scope === APP) || b.seq - a.seq)) {
     if (disabledScopes.has(r.scope)) continue;
     for (const s of r.list) {
       if (typing && !s.inText) continue;

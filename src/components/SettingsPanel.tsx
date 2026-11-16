@@ -645,6 +645,9 @@ export default function SettingsPanel({
                 onChange={(e) => onChange({ micVolume: Number(e.target.value) })}
               />
             </Row>
+            <Row label="Clean up my voice" hint="Turns down background noise between words, cuts rumble and evens out loud and quiet speech.">
+              <Toggle on={!!settings.cleanVoice} onClick={() => onChange({ cleanVoice: !settings.cleanVoice })} />
+            </Row>
           </>
         )}
       </Section>

@@ -379,6 +379,7 @@ pub fn run() {
             library_ops::copy_clips_to,
             library_ops::rename_library_item,
             library_ops::recycle_items,
+            media::voice::get_audio_levels,
             startup::crash_for_test,
             scenes::get_scenes,
             scenes::save_scenes,

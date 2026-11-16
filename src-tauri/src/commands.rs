@@ -32,6 +32,7 @@ impl AppState {
         let mut settings = Settings::load();
         settings.seed_default_profiles();
         let _ = settings.save(); // persist the stock profiles once
+        crate::media::voice::set_clean_voice(settings.clean_voice);
         Self {
             engine: Arc::new(CaptureEngine::new()),
             settings: RwLock::new(settings),
@@ -717,6 +718,7 @@ pub struct SettingsPatch {
     pub game_volume: Option<u32>,
     pub mic_volume: Option<u32>,
     pub mic_device_id: Option<String>,
+    pub clean_voice: Option<bool>,
     pub adaptive_eco: Option<bool>,
     pub eco_battery_threshold_pct: Option<u32>,
     pub eco_ram_free_gbs: Option<u32>,
@@ -1011,6 +1013,10 @@ pub fn update_settings(
         state
             .engine
             .set_audio_volumes(s.game_volume, crate::recording::effective_mic_volume(s.mic_volume));
+    }
+    if let Some(v) = patch.clean_voice {
+        s.clean_voice = v;
+        crate::media::voice::set_clean_voice(v);
     }
     if patch.mic_device_id.is_some() {
         state.engine.set_mic_device(s.mic_device_id.clone());

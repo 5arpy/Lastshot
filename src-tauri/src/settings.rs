@@ -108,6 +108,10 @@ pub struct Settings {
     /// Specific microphone device ID, or None to use system default.
     #[serde(default)]
     pub mic_device_id: Option<String>,
+    /// "Clean up my voice": low cut, noise gate, compressor and limiter on
+    /// the microphone. Applies live.
+    #[serde(default)]
+    pub clean_voice: bool,
     /// Adaptive capture (ECO): on battery or under memory pressure the deck
     /// shrinks the rolling buffer live and caps the fps. Invisible when off.
     #[serde(default)]
@@ -303,6 +307,7 @@ impl Default for Settings {
             game_volume: 100,
             mic_volume: 100,
             mic_device_id: None,
+            clean_voice: false,
             adaptive_eco: false,
             eco_battery_threshold_pct: 30,
             eco_ram_free_gbs: 4,

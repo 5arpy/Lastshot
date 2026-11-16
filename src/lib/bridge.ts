@@ -234,6 +234,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   gameVolume: 100,
   micVolume: 100,
   micDeviceId: null,
+  cleanVoice: false,
   adaptiveEco: false,
   ecoBatteryThresholdPct: 30,
   ecoRamFreeGbs: 4,
@@ -780,6 +781,11 @@ export const lastshot = {
   async getStudioLayers<T>(): Promise<T[] | null> {
     if (isTauri()) return invoke<T[] | null>("get_studio_layers");
     return null;
+  },
+  /** Loudest PC sound / mic level since the last call, in dBFS (-100 = silence). */
+  async getAudioLevels(): Promise<{ gameDb: number; micDb: number }> {
+    if (isTauri()) return invoke<{ gameDb: number; micDb: number }>("get_audio_levels");
+    return { gameDb: -100, micDb: -100 };
   },
   async getScenes<T>(): Promise<T> {
     if (isTauri()) return invoke<T>("get_scenes");

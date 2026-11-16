@@ -621,8 +621,14 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
               <input type="checkbox" checked={settings.captureMicrophone} onChange={(e) => onPatch({ captureMicrophone: e.target.checked })} /> Microphone
             </label>
             {settings.captureMicrophone && (
-              <Slider label="Microphone volume" value={settings.micVolume * 100} min={0} max={200} step={5} suffix="%" onChange={(v) => onPatch({ micVolume: v / 100 })} />
+              <>
+                <Slider label="Microphone volume" value={settings.micVolume} min={0} max={100} step={5} suffix="%" onChange={(v) => onPatch({ micVolume: v })} />
+                <label className="flex items-center gap-2" title="Turns down background noise between words, cuts rumble and evens out loud and quiet speech.">
+                  <input type="checkbox" checked={!!settings.cleanVoice} onChange={(e) => onPatch({ cleanVoice: e.target.checked })} /> Clean up my voice
+                </label>
+              </>
             )}
+            {(settings.captureSystemAudio || settings.captureMicrophone) && <SoundMeters game={settings.captureSystemAudio} mic={settings.captureMicrophone} />}
             <label className="block space-y-1">
               <span className="text-ink-3">Control bar</span>
               <select value={settings.controlBar} onChange={(e) => onPatch({ controlBar: e.target.value as AppSettings["controlBar"] })} className="w-full rounded-md border border-line bg-surface-2 px-2 py-1 text-ink">
@@ -651,5 +657,47 @@ function Slider({ label, value, min, max, step, suffix, onChange }: { label: str
       </span>
       <input type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))} className="w-full accent-[var(--color-accent)]" />
     </label>
+  );
+}
+
+/** Live sound meters (what goes into the recording), while Studio is open. */
+function SoundMeters({ game, mic }: { game: boolean; mic: boolean }) {
+  const [lv, setLv] = useState({ gameDb: -100, micDb: -100 });
+  useEffect(() => {
+    let alive = true;
+    const shown = { gameDb: -100, micDb: -100 };
+    const t = window.setInterval(() => {
+      void lastshot
+        .getAudioLevels()
+        .then((l) => {
+          if (!alive) return;
+          // Rise at once, fall smoothly.
+          shown.gameDb = Math.max(l.gameDb, shown.gameDb - 3);
+          shown.micDb = Math.max(l.micDb, shown.micDb - 3);
+          setLv({ ...shown });
+        })
+        .catch(() => undefined);
+    }, 100);
+    return () => {
+      alive = false;
+      window.clearInterval(t);
+    };
+  }, []);
+  const bar = (label: string, d: number, id: string) => {
+    const pct = Math.max(0, Math.min(100, ((d + 60) / 60) * 100));
+    return (
+      <div className="flex items-center gap-2" data-testid={id} data-db={Math.round(d)} title={d <= -99 ? "Silent" : `${Math.round(d)} dB`}>
+        <span className="w-16 shrink-0 text-[11px] text-ink-3">{label}</span>
+        <div className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-surface-4">
+          <div className={cn("absolute inset-y-0 left-0 rounded-full", d > -3 ? "bg-danger" : d > -12 ? "bg-warn" : "bg-accent")} style={{ width: `${pct}%` }} />
+        </div>
+      </div>
+    );
+  };
+  return (
+    <div className="space-y-1">
+      {game && bar("PC sound", lv.gameDb, "meter-game")}
+      {mic && bar("Microphone", lv.micDb, "meter-mic")}
+    </div>
   );
 }

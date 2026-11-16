@@ -274,6 +274,8 @@ export interface AppSettings {
   micVolume: number;
   /** Specific microphone device ID, or null for Windows default console device. */
   micDeviceId?: string | null;
+  /** "Clean up my voice": low cut, noise gate, compressor, limiter on the mic. Applies live. */
+  cleanVoice?: boolean;
   /**
    * Adaptive capture (ECO): on battery or under memory pressure the deck
    * shrinks the rolling buffer live and caps the fps. Invisible when off.

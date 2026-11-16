@@ -10,6 +10,7 @@ pub mod preview;
 pub mod procaudio;
 pub mod recorder;
 pub mod shrink;
+pub mod voice;
 pub mod watchdog;
 pub mod webcam;
 pub mod wincap;

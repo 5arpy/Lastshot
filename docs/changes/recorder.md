@@ -18,6 +18,8 @@ Lines for the next release notes, written by the recorder work. Merge them into
 - **Always on, in the tray.** With *Launch at startup* on, Lastshot now starts with Windows straight into the tray, with the replay buffer armed and no window (the window is only made when you open it, so it uses less memory). If Lastshot crashes, it starts again by itself (after 2 s, 10 s, then 30 s; it stops trying after three crashes in a row), and Windows starts it again after an update restart. A normal Quit is never undone. Starting it a second time never opens a second copy.
 - **Scenes in Studio.** Save what you record plus its layers as a scene (*+ Scene*), then switch with one click; double-click to rename. Changes you make go into the scene that is on. Switching between scenes of the same source only swaps the layers, instantly and without losing the replay, also while recording. A scene with another source changes what is recorded (the replay starts again; not while recording).
 - **Crop pictures and the webcam** in Studio (left, right, top, bottom).
+- **Sound meters in Studio** for PC sound and the microphone, showing what goes into the recording.
+- **Clean up my voice** (Settings › Sound and Studio, off by default): turns down background noise between words, cuts low rumble, evens out loud and quiet speech and never clips. Applies live.
 
 ### Changed
 
@@ -25,5 +27,6 @@ Lines for the next release notes, written by the recorder work. Merge them into
 
 ### Fixed
 
+- The microphone volume slider in Studio set the volume to almost nothing when moved.
 - Quitting Lastshot left its tray icon behind until the mouse passed over it.
 - Replays and recordings could drop frames or play unevenly at 60 fps when the graphics driver asked for frames in bursts. Every frame now goes to the encoder, and frames are placed on an even 60 fps grid, so players show a steady picture.

@@ -22,6 +22,8 @@ import {
 } from "../lib/edit";
 import { clamp, formatBytes, formatTimecode } from "../lib/format";
 import { cn } from "../utils/cn";
+import Viewer, { type ViewerApi } from "../viewer/Viewer";
+import type { Size, View } from "../viewer/math";
 
 type Thumb = "start" | "end" | "playhead" | null;
 
@@ -94,6 +96,14 @@ export default function ClipTrimmerModal({
   onUpdateTags,
 }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [videoEl, setVideoElState] = useState<HTMLVideoElement | null>(null);
+  const setVideoEl = useCallback((el: HTMLVideoElement | null) => {
+    videoRef.current = el;
+    setVideoElState(el);
+  }, []);
+  const viewerApi = useRef<ViewerApi | null>(null);
+  /** Where the viewer shows the picture (for the crop box). */
+  const [viewerPlace, setViewerPlace] = useState<{ v: View; st: Size; c: Size } | null>(null);
   const trackRef = useRef<HTMLDivElement | null>(null);
 
   const [duration, setDuration] = useState(Math.max(clip.duration_seconds, 0.1));
@@ -353,14 +363,22 @@ export default function ClipTrimmerModal({
     end: r.end,
   }));
 
-  // Where the picture sits inside the (letterboxed) player.
+  // Where the picture sits inside the player: the viewer's placement when it
+  // is upright (zoomed or not), else the letterboxed fit.
   const pic = useMemo(() => {
     if (!view.w || !view.h) return null;
+    const p = viewerPlace;
+    if (p && p.c.w > 0) {
+      if (p.v.rot !== 0 || p.v.flipH || p.v.flipV) return null;
+      const w = p.c.w * p.v.scale;
+      const h = p.c.h * p.v.scale;
+      return { x: p.v.x - w / 2, y: p.v.y - h / 2, w, h };
+    }
     const scale = Math.min(view.w / srcW, view.h / srcH);
     const w = srcW * scale;
     const h = srcH * scale;
     return { x: (view.w - w) / 2, y: (view.h - h) / 2, w, h };
-  }, [view, srcW, srcH]);
+  }, [view, srcW, srcH, viewerPlace]);
 
   const cutOut = () => {
     // Cutting everything that is left would leave nothing: refuse.
@@ -498,6 +516,9 @@ export default function ClipTrimmerModal({
       setStatus(null);
     }
   };
+
+  /** Host buttons at the end of the viewer's bar. */
+  const viewerExtra: React.ReactNode = null;
 
   const takeSnapshot = () => {
     const v = videoRef.current;
@@ -641,19 +662,33 @@ export default function ClipTrimmerModal({
           {/* Player Viewport */}
           <div ref={viewRef} className="relative aspect-video w-full overflow-hidden bg-[#0a0c10]">
             {hasVideo ? (
-              <video
-                ref={videoRef}
-                src={src}
-                className="h-full w-full object-contain"
-                onLoadedMetadata={handleLoadedMetadata}
-                onPlay={() => setPlaying(true)}
-                onPause={() => setPlaying(false)}
-                onClick={togglePlay}
-                muted={muted}
-                playsInline
-                autoPlay
-                loop={false}
-              />
+              <>
+                {/* The video decodes here; the viewer draws its frames (zoom,
+                    pan, turn, inspect) so it is kept tiny but on screen. */}
+                <video
+                  ref={setVideoEl}
+                  src={src}
+                  crossOrigin="anonymous"
+                  className="pointer-events-none absolute left-0 top-0 h-px w-px opacity-0"
+                  onLoadedMetadata={handleLoadedMetadata}
+                  onPlay={() => setPlaying(true)}
+                  onPause={() => setPlaying(false)}
+                  muted={muted}
+                  playsInline
+                  autoPlay
+                  loop={false}
+                />
+                <Viewer
+                  source={videoEl}
+                  video={videoEl}
+                  fps={clip.fps || 60}
+                  name={clip.file_name}
+                  onTap={togglePlay}
+                  onViewChange={(v, st, c) => setViewerPlace({ v, st, c })}
+                  apiRef={viewerApi}
+                  extra={viewerExtra}
+                />
+              </>
             ) : (
               <div className="grid h-full w-full place-items-center text-center">
                 <div>
@@ -664,25 +699,19 @@ export default function ClipTrimmerModal({
             )}
 
             {/* Overlay Specs */}
-            <div className="pointer-events-none absolute inset-x-0 top-0 flex items-center justify-between p-3 font-mono text-[10px] text-white/90">
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 flex items-center justify-end gap-2 p-3 font-mono text-[10px] text-white/90">
               <span className="rounded bg-black/75 px-2 py-1 border border-white/10">
                 {clip.width}×{clip.height} · {clip.fps} FPS · {clip.has_audio ? "AAC 48 kHz" : "NO AUDIO"}
               </span>
               <span className="rounded bg-black/75 px-2 py-1 border border-white/10">{formatBytes(clip.size_bytes)}</span>
             </div>
 
-            <button
-              type="button"
-              onClick={togglePlay}
-              className={cn(
-                "absolute inset-0 grid place-items-center transition-opacity duration-150",
-                playing ? "opacity-0 hover:opacity-100" : "opacity-100",
-              )}
-            >
-              <span className="grid h-12 w-12 place-items-center rounded-full border border-white/20 bg-black/60 text-lg text-white backdrop-blur-sm">
-                {playing ? "❚❚" : "▶"}
+            {/* Click the picture to play / pause (dragging pans when zoomed). */}
+            {!playing && hasVideo && (
+              <span className="pointer-events-none absolute left-1/2 top-1/2 grid h-12 w-12 -translate-x-1/2 -translate-y-1/2 place-items-center rounded-full border border-white/20 bg-black/60 text-lg text-white backdrop-blur-sm">
+                ▶
               </span>
-            </button>
+            )}
 
             {/* Crop box: drag to move; the dimmed part is cut away. */}
             {cropBox && pic && (

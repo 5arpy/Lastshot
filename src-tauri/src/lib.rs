@@ -12,6 +12,7 @@ pub mod files;
 pub mod commands;
 pub mod editor;
 pub mod foreground;
+pub mod frames;
 pub mod hotkeys;
 pub mod media;
 pub mod paths;
@@ -366,6 +367,8 @@ pub fn run() {
             popout::popout_open,
             popout::popout_close,
             popout::popout_list,
+            frames::viewer_copy_png,
+            frames::viewer_save_png,
             cables::cables_status,
             cables::cables_enable,
             cables::cables_add,

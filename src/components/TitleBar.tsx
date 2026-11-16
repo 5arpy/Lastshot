@@ -5,9 +5,14 @@ interface Props {
   armed: boolean;
   native: boolean;
   version: string;
+  /**
+   * A window of tabs dragged out of the main one: its close button sends the
+   * tabs back to the main window (no tray, no quit here).
+   */
+  onCloseWindow?: () => void;
 }
 
-export default function TitleBar({ armed, native, version }: Props) {
+export default function TitleBar({ armed, native, version, onCloseWindow }: Props) {
   return (
     <header
       className="drag-region flex h-10 shrink-0 select-none items-center justify-between border-b border-line bg-app px-3.5"
@@ -78,28 +83,44 @@ export default function TitleBar({ armed, native, version }: Props) {
             <rect x="2.5" y="2.5" width="7" height="7" rx="0.5" />
           </svg>
         </button>
-        <button
-          onClick={() => void lastshot.hideToTray()}
-          className="grid h-7 w-8 place-items-center rounded text-ink-3 transition-colors hover:bg-surface-2 hover:text-ink"
-          title="Hide to tray (keeps recording in background)"
-          aria-label="Hide to tray"
-        >
-          <svg className="h-3.5 w-3.5" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.25">
-            <path d="M3 4l4 4 4-4" />
-            <line x1="2" y1="11" x2="12" y2="11" />
-          </svg>
-        </button>
-        <button
-          onClick={() => void lastshot.quit()}
-          className="grid h-7 w-8 place-items-center rounded text-ink-3 transition-colors hover:bg-red-500/20 hover:text-danger"
-          title="Quit Lastshot"
-          aria-label="Quit"
-        >
-          <svg className="h-3 w-3" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.25">
-            <line x1="2.5" y1="2.5" x2="9.5" y2="9.5" />
-            <line x1="9.5" y1="2.5" x2="2.5" y2="9.5" />
-          </svg>
-        </button>
+        {onCloseWindow ? (
+          <button
+            onClick={onCloseWindow}
+            className="grid h-7 w-8 place-items-center rounded text-ink-3 transition-colors hover:bg-red-500/20 hover:text-danger"
+            title="Close this window (its tabs go back to the main window)"
+            aria-label="Close window"
+          >
+            <svg className="h-3 w-3" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.25">
+              <line x1="2.5" y1="2.5" x2="9.5" y2="9.5" />
+              <line x1="9.5" y1="2.5" x2="2.5" y2="9.5" />
+            </svg>
+          </button>
+        ) : (
+          <>
+            <button
+              onClick={() => void lastshot.hideToTray()}
+              className="grid h-7 w-8 place-items-center rounded text-ink-3 transition-colors hover:bg-surface-2 hover:text-ink"
+              title="Hide to tray (keeps recording in background)"
+              aria-label="Hide to tray"
+            >
+              <svg className="h-3.5 w-3.5" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.25">
+                <path d="M3 4l4 4 4-4" />
+                <line x1="2" y1="11" x2="12" y2="11" />
+              </svg>
+            </button>
+            <button
+              onClick={() => void lastshot.quit()}
+              className="grid h-7 w-8 place-items-center rounded text-ink-3 transition-colors hover:bg-red-500/20 hover:text-danger"
+              title="Quit Lastshot"
+              aria-label="Quit"
+            >
+              <svg className="h-3 w-3" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.25">
+                <line x1="2.5" y1="2.5" x2="9.5" y2="9.5" />
+                <line x1="9.5" y1="2.5" x2="2.5" y2="9.5" />
+              </svg>
+            </button>
+          </>
+        )}
       </div>
     </header>
   );

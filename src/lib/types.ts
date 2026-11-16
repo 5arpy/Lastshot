@@ -331,6 +331,12 @@ export interface AppSettings {
   recordingDir: string;
   /** Hides folder paths on screen. */
   streamerMode: boolean;
+  /** In-app shortcut rebindings: "scope:id" -> keys ("" = no key). */
+  shortcuts: Record<string, string>;
+  /** UI scale of the app windows (1 = 100 %). */
+  uiScale: number;
+  /** The app's windows and their tabs (written by the shell commands). */
+  shell?: { windows: { label: string; tabs: string[]; active: string }[] };
 }
 
 /** A running screen recording. */

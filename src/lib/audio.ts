@@ -67,10 +67,6 @@ export interface AppOutputRule {
   deviceName: string;
 }
 
-export type PopView = "audio" | "editor" | "studio";
-export const POP_VIEWS: PopView[] = ["audio", "editor", "studio"];
-export const EVT_POPOUTS = "lastshot://popouts";
-
 function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const t = window.__TAURI__;
   if (!t) return Promise.reject(new Error("Tauri API unavailable"));
@@ -99,26 +95,6 @@ export const audio = {
   setAppOutput: (exe: string, deviceId: string | null): Promise<number> =>
     invoke("set_app_output", { exe, deviceId, remember: true }),
 };
-
-export const popout = {
-  list: (): Promise<PopView[]> => (isTauri() ? invoke("popout_list") : Promise.resolve([])),
-  open: (view: PopView, focus = true): Promise<void> => invoke("popout_open", { view, focus }),
-  close: (view: PopView): Promise<void> => invoke("popout_close", { view }),
-  /** Calls `handler` with the popped-out tabs whenever that changes. */
-  onChange(handler: (views: PopView[]) => void): Promise<() => void> {
-    const t = window.__TAURI__;
-    if (!t) return Promise.resolve(() => undefined);
-    return t.event.listen<PopView[]>(EVT_POPOUTS, (e) => handler(e.payload));
-  },
-};
-
-/** The tab this window shows on its own (`pop-audio` → "audio"), or null. */
-export function popViewOf(label: string | null, search: string): PopView | null {
-  const fromLabel = label?.startsWith("pop-") ? label.slice(4) : null;
-  const fromQuery = new URLSearchParams(search).get("view");
-  const v = fromLabel ?? fromQuery;
-  return v && (POP_VIEWS as string[]).includes(v) ? (v as PopView) : null;
-}
 
 /** Linear peak (1.0 = 0 dB) → dB, floored at -60. */
 export function toDb(linear: number): number {

@@ -46,10 +46,14 @@ import type { CaptureSource,
 } from "./lib/types";
 import { cn } from "./utils/cn";
 import AudioPanel from "./components/AudioPanel";
-import { POP_VIEWS, popout, type PopView } from "./lib/audio";
+import TabStrip from "./components/TabStrip";
+import ShortcutsOverlay from "./components/ShortcutsOverlay";
+import { cycleTab, MAIN, myLabel, myWindow, shell, TAB_IDS, TAB_NAMES, useShellLayout, type TabId } from "./lib/shell";
+import { useShortcuts } from "./lib/useShortcuts";
+import { setShortcutOverrides } from "./lib/shortcuts";
 
-const isPopView = (t: string): t is PopView => (POP_VIEWS as string[]).includes(t);
-const POP_NAMES: Record<PopView, string> = { audio: "Audio", editor: "Editor", studio: "Studio" };
+/** UI sizes Ctrl+plus / Ctrl+minus step through. */
+const UI_SCALES = [0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
 import { screenshotsDir, setStreamerMode, shownPath } from "./lib/pathDisplay";
 
 const APP_VERSION = "1.9.0";
@@ -133,21 +137,46 @@ export default function App() {
   const [clips, setClips] = useState<ClipMetadata[]>([]);
   const [loadingClips, setLoadingClips] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [tab, setTab] = useState<"home" | "clips" | "editor" | "studio" | "audio" | "settings">("home");
-  // Tabs shown in a window of their own (Audio, Editor, Studio).
-  const [popped, setPopped] = useState<PopView[]>([]);
+  // ------------------------------------------------- windows and tabs
+  // Every app window runs this component: "main" (the primary, which owns
+  // the app-wide side effects: toasts for saves, the trimmer after a save,
+  // foreground polling, ECO, update checks) and windows of tabs dragged out
+  // of it ("shell-<n>"), which show only their own tabs.
+  const primary = !lastshot.isTauri() || myLabel() === MAIN;
+  const layout = useShellLayout();
+  const me = myWindow(layout);
+  const myTabs: TabId[] = me?.tabs ?? (primary ? TAB_IDS : []);
+  const myTabsRef = useRef(myTabs);
+  myTabsRef.current = myTabs;
+  const [tab, setTab] = useState<TabId>("home");
+  // The layout says which tab is showing (it changes from other windows too).
+  useEffect(() => {
+    if (me) setTab(me.active);
+  }, [me?.active, me?.tabs.join()]); // eslint-disable-line react-hooks/exhaustive-deps
+  /** Shows `t`: here when this window holds it, else in the window that does. */
+  const goTab = useCallback((t: TabId, payload?: unknown) => {
+    if (myTabsRef.current.includes(t)) {
+      setTab(t);
+      void shell.setActive(t).catch(() => undefined);
+      return true;
+    }
+    void shell.openTab(t, payload).catch((e) => console.warn("[shell] open tab", e));
+    return false;
+  }, []);
+  const [overlay, setOverlay] = useState<"keys" | "commands" | null>(null);
   // Pop-out frames: the panel and how many frames are open.
   const [framesOpen, setFramesOpen] = useState(false);
   const [frameCount, setFrameCount] = useState(0);
-  const poppedRef = useRef<PopView[]>([]);
   // Files handed to the Editor (drag & drop on its tab, "Open in Editor").
   const [editorIncoming, setEditorIncoming] = useState<{ paths: string[]; seq: number } | null>(null);
   const tabRef = useRef(tab);
   tabRef.current = tab;
-  const sendToEditor = useCallback((paths: string[]) => {
-    setEditorIncoming((p) => ({ paths, seq: (p?.seq ?? 0) + 1 }));
-    setTab("editor");
-  }, []);
+  const sendToEditor = useCallback(
+    (paths: string[]) => {
+      if (goTab("editor", { paths })) setEditorIncoming((p) => ({ paths, seq: (p?.seq ?? 0) + 1 }));
+    },
+    [goTab],
+  );
   /** Settings section to scroll to when the Settings tab opens. */
   const [settingsFocus, setSettingsFocus] = useState<string | null>(null);
   const [barState, setBarState] = useState<BarState | null>(null);
@@ -267,24 +296,58 @@ export default function App() {
     window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 4200);
   }, []);
 
-  // Popped-out tabs. When one docks back, its window may have changed
-  // settings (Studio), so they are read again.
+  // A tab opened from another window ("Open in Editor", a Settings link).
   useEffect(() => {
     let off: (() => void) | undefined;
     let alive = true;
-    const apply = (views: PopView[]) => {
-      const docked = poppedRef.current.some((v) => !views.includes(v));
-      poppedRef.current = views;
-      setPopped(views);
-      if (docked) void lastshot.getSettings().then(setSettings).catch(() => undefined);
-    };
-    void popout.list().then((v) => alive && apply(v)).catch(() => undefined);
-    void popout.onChange(apply).then((u) => (alive ? (off = u) : u()));
+    void shell
+      .onOpen(({ tab: t, payload }) => {
+        setTab(t);
+        const p = (payload ?? {}) as { paths?: string[]; section?: string };
+        if (t === "editor" && p.paths?.length) setEditorIncoming((x) => ({ paths: p.paths!, seq: (x?.seq ?? 0) + 1 }));
+        if (t === "settings" && p.section) setSettingsFocus(p.section);
+      })
+      .then((u) => (alive ? (off = u) : u()));
     return () => {
       alive = false;
       off?.();
     };
   }, []);
+
+  // Settings changed in any window reach every window.
+  useEffect(() => {
+    let off: (() => void) | undefined;
+    let alive = true;
+    void lastshot.onSettings((s) => setSettings(s)).then((u) => (alive ? (off = u) : u()));
+    return () => {
+      alive = false;
+      off?.();
+    };
+  }, []);
+
+  // The main window reopens the tab windows of the last session once it is
+  // on screen (never in a tray-only start).
+  useEffect(() => {
+    if (!primary || !lastshot.isTauri()) return;
+    let done = false;
+    const go = () => {
+      if (done || document.visibilityState !== "visible") return;
+      done = true;
+      void shell.restore().catch((e) => console.warn("[shell] restore", e));
+    };
+    go();
+    document.addEventListener("visibilitychange", go);
+    return () => document.removeEventListener("visibilitychange", go);
+  }, [primary]);
+
+  // Window title: what this window shows (taskbar, Alt+Tab).
+  useEffect(() => {
+    if (primary || !me) return;
+    const title = `Lastshot – ${me.tabs.map((t) => TAB_NAMES[t]).join(", ")}`;
+    document.title = title;
+    const w = window.__TAURI__?.window?.getCurrentWindow() as unknown as { setTitle?: (t: string) => Promise<void> } | undefined;
+    void w?.setTitle?.(title)?.catch(() => undefined);
+  }, [primary, me?.tabs.join()]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const refreshClips = useCallback(async () => {
     try {
@@ -325,7 +388,7 @@ export default function App() {
       // Auto-cleanup: delete clips older than the configured age (0 = off).
       try {
         const days = loaded?.autoCleanupDays ?? 0;
-        if (days > 0) {
+        if (days > 0 && primary) {
           const deleted = await lastshot.cleanupOldClips(days);
           if (deleted > 0) {
             pushToast(
@@ -347,7 +410,7 @@ export default function App() {
       // that claim untrue: it opens an HTTPS connection to github.com before
       // the user has read anything. The manual button in Settings always
       // works; this only controls the silent startup probe.
-      if (lastshot.isTauri() && loaded?.checkUpdatesOnStartup) {
+      if (lastshot.isTauri() && primary && loaded?.checkUpdatesOnStartup) {
         try {
           const newer = await lastshot.checkLatestRelease(APP_VERSION);
           if (newer && !cancelled) {
@@ -400,6 +463,8 @@ export default function App() {
           setClips((prev) => [payload.clip, ...prev.filter((c) => c.path !== payload.clip.path)]);
           setSessionSaves((n) => n + 1);
           setSessionBytes((b) => b + payload.clip.size_bytes);
+          // Sound, toast and trimmer once, in the main window.
+          if (!primary) return;
           if (settingsRef.current.playSaveSound) playSaveSound();
           pushToast(
             "ok",
@@ -422,7 +487,7 @@ export default function App() {
       ),
     );
     attach(
-      Promise.resolve(lastshot.onError((msg) => pushToast("err", "Engine error", String(msg)))),
+      Promise.resolve(lastshot.onError((msg) => primary && pushToast("err", "Engine error", String(msg)))),
     );
     const applyBar = (b: BarState) => {
       setBarState(b);
@@ -440,10 +505,12 @@ export default function App() {
         pushToast("err", "Could not open the video", String(e));
       }
     };
-    attach(Promise.resolve(lastshot.onOpenFile((p) => void openFile(p))));
+    // Files opened with Lastshot: the main window's trimmer.
+    if (primary) attach(Promise.resolve(lastshot.onOpenFile((p) => void openFile(p))));
     attach(
       Promise.resolve(
         lastshot.onFilesDropped((paths) => {
+          if (!primary) return;
           if (tabRef.current === "editor") {
             if (paths.length) sendToEditor(paths);
             return;
@@ -460,7 +527,7 @@ export default function App() {
         }),
       ),
     );
-    void lastshot.takePendingOpen().then((p) => p && void openFile(p)).catch(() => undefined);
+    if (primary) void lastshot.takePendingOpen().then((p) => p && void openFile(p)).catch(() => undefined);
     attach(
       lastshot.onShrinkProgress((p) =>
         setShareProgress((m) => (m.has(p.path) ? new Map(m).set(p.path, p.progress) : m)),
@@ -468,6 +535,7 @@ export default function App() {
     );
     attach(
       lastshot.onSnipDone((d) => {
+        if (!primary) return;
         if (d.copied && d.path) {
           pushToast("ok", "Screenshot copied", `Paste it with Ctrl+V. Also saved as ${d.path.split("\\").pop()}.`);
         } else if (d.copied) {
@@ -479,7 +547,7 @@ export default function App() {
     );
     attach(
       Promise.resolve(
-        lastshot.onHotkey((accel) => pushToast("info", `${accel} triggered`)),
+        lastshot.onHotkey((accel) => primary && pushToast("info", `${accel} triggered`)),
       ),
     );
 
@@ -487,7 +555,7 @@ export default function App() {
       disposed = true;
       offs.forEach((off) => off());
     };
-  }, [pushToast]);
+  }, [pushToast, primary, sendToEditor]);
 
   // ------------------------------------------------------------- actions
   const handleSave = useCallback(
@@ -605,10 +673,12 @@ export default function App() {
     [pushToast],
   );
 
-  const openSettingsAt = useCallback((section: string) => {
-    setSettingsFocus(section);
-    setTab("settings");
-  }, []);
+  const openSettingsAt = useCallback(
+    (section: string) => {
+      if (goTab("settings", { section })) setSettingsFocus(section);
+    },
+    [goTab],
+  );
 
   // Tick the recording timer on Home.
   const recordingNow = !!barState?.recording && !barState.recording.paused;
@@ -830,10 +900,10 @@ export default function App() {
   // needs it is on (auto-switch, privacy gate, auto-save on exit) or while
   // Settings (where game profiles live) is open. With the defaults, gaming sessions do zero focus
   // queries in the background.
+  // Other windows poll only to show the focused game in their Settings tab;
+  // the actions below run in the main window alone.
   const needsForegroundPoll =
-    settings.autoSwitchProfiles ||
-    settings.privacyPauseWhenUnfocused ||
-    settings.autosaveOnGameExit ||
+    (primary && (settings.autoSwitchProfiles || settings.privacyPauseWhenUnfocused || settings.autosaveOnGameExit)) ||
     tab === "settings";
   const applyProfileRef = useRef(applyProfile);
   applyProfileRef.current = applyProfile;
@@ -865,6 +935,7 @@ export default function App() {
         if (game && prev && game.exe === prev.exe && game.title === prev.title) return prev;
         return game;
       });
+      if (!primary) return;
       const exe = game?.exe ?? "";
 
       // Auto-save when the focused app leaves (game exit). Independent of
@@ -964,7 +1035,7 @@ export default function App() {
       cancelled = true;
       window.clearInterval(iv);
     };
-  }, [needsForegroundPoll, pushToast]);
+  }, [needsForegroundPoll, pushToast, primary]);
 
   // Adaptive capture (ECO): polled only while ECO is enabled. When it is off
   // there is no background battery/RAM polling at all, which keeps the deck
@@ -975,7 +1046,8 @@ export default function App() {
   }
   const ecoAppliedBuffer = useRef<number | null>(null);
   useEffect(() => {
-    if (!settings.adaptiveEco) {
+    // The main window drives ECO; others never touch the buffer.
+    if (!settings.adaptiveEco || !primary) {
       if (ecoAppliedBuffer.current !== null) {
         ecoAppliedBuffer.current = null;
         void lastshot.setBufferSeconds(settingsRef.current.bufferSeconds);
@@ -1043,7 +1115,7 @@ export default function App() {
       cancelled = true;
       window.clearInterval(iv);
     };
-  }, [settings.adaptiveEco, pushToast]);
+  }, [settings.adaptiveEco, pushToast, primary]);
 
   const checkForUpdates = useCallback(async () => {
     if (!native) {
@@ -1852,7 +1924,8 @@ export default function App() {
     const keep = (p: Promise<() => void>) => void p.then((u) => (alive ? offs.push(u) : u()));
     void popFrames.list().then((l) => alive && setFrameCount(l.length));
     keep(popFrames.onChange((l) => setFrameCount(l.length)));
-    keep(popFrames.onPanel(() => setFramesOpen(true)));
+    // "Show the Pop-outs panel" (tray, a frame's bar) opens it in the main window.
+    if (primary) keep(popFrames.onPanel(() => setFramesOpen(true)));
     const paste = (e: ClipboardEvent) => {
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
@@ -1890,54 +1963,93 @@ export default function App() {
       window.removeEventListener("paste", paste);
       offs.forEach((u) => u());
     };
-  }, [native, pushToast]);
+  }, [native, pushToast, primary]);
+
+  // ------------------------------------------------ app-wide shortcuts
+  const scaleBy = (step: number) => {
+    const cur = settingsRef.current.uiScale ?? 1;
+    let i = UI_SCALES.findIndex((v) => v >= cur - 0.001);
+    if (i < 0) i = UI_SCALES.length - 1;
+    const exact = Math.abs(UI_SCALES[i] - cur) < 0.001;
+    const next = step === 0 ? 1 : UI_SCALES[Math.max(0, Math.min(UI_SCALES.length - 1, step > 0 ? (exact ? i + 1 : i) : i - 1))];
+    if (Math.abs(next - cur) < 0.001) return;
+    void patchSettings({ uiScale: next });
+    pushToast("info", `Interface size ${Math.round(next * 100)}%`, step === 0 ? undefined : "Ctrl+0 goes back to 100%.");
+  };
+  const tabKeys = Array.from({ length: 9 }, (_, i) => ({
+    id: `tab-${i + 1}`,
+    keys: `Ctrl+${i + 1}`,
+    label: i === 8 ? "Last tab in this window" : `Tab ${i + 1} in this window`,
+    group: "Tabs",
+    inText: true,
+    when: () => i === 8 || i < myTabsRef.current.length,
+    run: () => {
+      const list = myTabsRef.current;
+      const t = i === 8 ? list[list.length - 1] : list[i];
+      if (t) goTab(t);
+    },
+  }));
+  useShortcuts("global", [
+    ...tabKeys,
+    { id: "next-tab", keys: "Ctrl+Tab | Ctrl+PageDown", label: "Next tab", group: "Tabs", inText: true, run: () => goTab(cycleTab(myTabsRef.current, tabRef.current, 1)) },
+    { id: "prev-tab", keys: "Ctrl+Shift+Tab | Ctrl+PageUp", label: "Previous tab", group: "Tabs", inText: true, run: () => goTab(cycleTab(myTabsRef.current, tabRef.current, -1)) },
+    ...(native
+      ? [
+          {
+            id: "tab-new-window",
+            keys: "Ctrl+Shift+N",
+            label: "Move this tab to a new window",
+            group: "Tabs",
+            when: () => myTabsRef.current.length > 1,
+            run: () => void shell.moveTab(tabRef.current, "new").catch((e) => pushToast("err", "Could not move the tab", String(e))),
+          },
+          {
+            id: "tab-dock",
+            keys: "Ctrl+Shift+M",
+            label: "Move this tab to the main window",
+            group: "Tabs",
+            when: () => !primary,
+            run: () => void shell.moveTab(tabRef.current, MAIN).catch((e) => pushToast("err", "Could not move the tab", String(e))),
+          },
+          {
+            id: "close-window",
+            keys: "",
+            label: "Close this window (its tabs go back to the main window)",
+            group: "Tabs",
+            when: () => !primary,
+            run: () => void shell.closeWindow(),
+          },
+        ]
+      : []),
+    ...TAB_IDS.map((t) => ({ id: `go-${t}`, keys: "", label: `Go to ${TAB_NAMES[t]}`, group: "Tabs", run: () => goTab(t) })),
+    { id: "cheat-sheet", keys: "F1 | ?", label: "Keyboard shortcuts", group: "Help", run: () => setOverlay((o) => (o ? null : "keys")) },
+    { id: "commands", keys: "Ctrl+K | Ctrl+Shift+P", label: "Find a command", group: "Help", inText: true, run: () => setOverlay((o) => (o ? null : "commands")) },
+    { id: "ui-bigger", keys: "Ctrl+= | Ctrl++ | Ctrl+Shift+=", label: "Bigger interface", group: "View", run: () => scaleBy(1) },
+    { id: "ui-smaller", keys: "Ctrl+- | Ctrl+Shift+-", label: "Smaller interface", group: "View", run: () => scaleBy(-1) },
+    { id: "ui-reset", keys: "Ctrl+0", label: "Interface at 100%", group: "View", run: () => scaleBy(0) },
+    { id: "screenshot", keys: "", label: "Take a screenshot", group: "Capture", run: () => takeScreenshot() },
+    ...(native ? [{ id: "frames-panel", keys: "", label: "Pop-out frames panel", group: "View", run: () => setFramesOpen((o) => !o) }] : []),
+  ]);
+  // The user's keys (main.tsx keeps them current from the app too).
+  useEffect(() => setShortcutOverrides(settings.shortcuts), [settings.shortcuts]);
 
   return (
     <div className="relative flex h-screen w-screen flex-col overflow-hidden bg-app text-ink">
-      <TitleBar armed={armed} native={native} version={APP_VERSION} />
+      <TitleBar armed={armed} native={native} version={APP_VERSION} onCloseWindow={primary ? undefined : () => void shell.closeWindow()} />
 
       {/* Top Desktop Navigation Bar */}
       <nav className="flex h-11 shrink-0 items-center justify-between border-b border-line bg-surface px-5 select-none">
-        <div className="flex items-center gap-1">
-          {[
-            { id: "home" as const, label: "Home" },
-            { id: "clips" as const, label: "Clips", count: clips.length },
-            { id: "editor" as const, label: "Editor" },
-            { id: "studio" as const, label: "Studio" },
-            { id: "audio" as const, label: "Audio" },
-            { id: "settings" as const, label: "Settings" },
-          ].map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => setTab(item.id)}
-              className={cn(
-                "flex items-center gap-2 rounded-lg px-3.5 py-1.5 text-[12px] font-semibold transition-all",
-                tab === item.id
-                  ? "border border-accent/40 bg-accent/15 text-accent-fg shadow-sm"
-                  : "text-ink-3 hover:bg-surface-2 hover:text-ink",
-              )}
-            >
-              <span>{item.label}</span>
-              {(popped as string[]).includes(item.id) && (
-                <svg viewBox="0 0 16 16" className="h-3 w-3 fill-none stroke-current opacity-70" strokeWidth="1.6" aria-label="in its own window">
-                  <path d="M9 2h5v5M14 2 8 8M12 9.5V13a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h3.5" />
-                </svg>
-              )}
-              {item.count !== undefined && (
-                <span
-                  className={cn(
-                    "rounded-full px-1.5 py-0.5 font-mono text-[10px]",
-                    tab === item.id
-                      ? "bg-accent/25 text-accent-fg"
-                      : "bg-surface-2 text-ink-3",
-                  )}
-                >
-                  {item.count}
-                </span>
-              )}
-            </button>
-          ))}
+        <div className="flex h-full min-w-0 flex-1 items-center">
+          <TabStrip
+            tabs={myTabs}
+            active={tab}
+            label={myLabel()}
+            windows={layout.windows}
+            counts={{ clips: clips.length }}
+            onSelect={(t) => goTab(t)}
+            onNote={(title, body) => pushToast("info", title, body)}
+            native={native}
+          />
         </div>
 
         <div className="flex items-center gap-2.5 font-mono text-[11px]">
@@ -1956,19 +2068,6 @@ export default function App() {
               </svg>
               Pop-outs
               {frameCount > 0 && <span className="rounded-full bg-accent/25 px-1.5 font-mono text-[10px] text-accent-fg">{frameCount}</span>}
-            </button>
-          )}
-          {isPopView(tab) && !popped.includes(tab) && native && (
-            <button
-              type="button"
-              onClick={() => void popout.open(tab).catch((e) => pushToast("err", "Could not open the window", String(e)))}
-              title="Open this tab in a window of its own"
-              className="flex items-center gap-1.5 rounded-md border border-line bg-surface px-2.5 py-1 font-sans text-[12px] text-ink-3 transition-colors hover:border-accent hover:text-ink"
-            >
-              <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 fill-none stroke-current" strokeWidth="1.5">
-                <path d="M9 2h5v5M14 2 8 8M12 9.5V13a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h3.5" />
-              </svg>
-              Pop out
             </button>
           )}
           {foreground && (
@@ -2012,33 +2111,9 @@ export default function App() {
         className="relative z-10 flex-1 overflow-y-auto"
         style={activeClip ? { overflowY: "hidden" } : undefined}
       >
-        {isPopView(tab) && popped.includes(tab) ? (
-          /* ======================================== TAB IN ITS OWN WINDOW */
-          <div className="flex h-full min-h-[420px] items-center justify-center p-5">
-            <div className="panel max-w-[460px] rounded-xl p-6 text-center">
-              <div className="text-[14px] font-semibold text-ink">
-                {POP_NAMES[tab]} is open in its own window
-              </div>
-              <p className="mt-1 text-[12px] text-ink-3">Closing that window brings it back here.</p>
-              <div className="mt-4 flex justify-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => void popout.open(tab)}
-                  className="rounded-md border border-line bg-surface-2 px-3 py-1.5 text-[12px] font-medium text-ink hover:border-accent"
-                >
-                  Show it
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void popout.close(tab)}
-                  className="rounded-md bg-accent px-3 py-1.5 text-[12px] font-semibold text-white hover:bg-accent-hover"
-                >
-                  Bring back
-                </button>
-              </div>
-            </div>
-          </div>
-        ) : tab === "home" ? (
+        {!me && !primary ? (
+          /* A new window, before its tabs arrive. */
+          <div className="h-full" />        ) : tab === "home" ? (
           /* ================================================== HOME VIEW */
           <div className="mx-auto max-w-[1440px] p-5 space-y-5">
             <HomeDashboard
@@ -2063,7 +2138,7 @@ export default function App() {
               onScreenshot={takeScreenshot}
               onOpenSettings={openSettingsAt}
               onControlBar={(m) => void patchSettings({ controlBar: m })}
-              onOpenClips={() => setTab("clips")}
+              onOpenClips={() => goTab("clips")}
             />
 
             {/* Split Section: Recent Replays (Left) & Live Pipeline Summary (Right) */}
@@ -2079,7 +2154,7 @@ export default function App() {
                   </div>
                   <button
                     type="button"
-                    onClick={() => setTab("clips")}
+                    onClick={() => goTab("clips")}
                     className="text-[12px] font-semibold text-accent-fg hover:text-accent-fg transition-colors"
                   >
                     View All Clips →
@@ -2195,7 +2270,7 @@ export default function App() {
                 {saveDisk && (
                   <button
                     type="button"
-                    onClick={() => setTab("clips")}
+                    onClick={() => goTab("clips")}
                     title="See which folders take the space"
                     className="mt-3 block w-full rounded-lg border border-line bg-surface-3 px-3.5 py-2.5 text-left hover:border-accent/50"
                   >
@@ -2234,7 +2309,7 @@ export default function App() {
           </div>
         ) : tab === "clips" ? (
           /* ================================================== CLIPS LIBRARY VIEW */
-          <div className="mx-auto grid max-w-[1600px] gap-4 p-5 lg:grid-cols-[250px_minmax(0,1fr)]">
+          <div className="mx-auto grid h-full max-w-[1600px] gap-4 p-5 lg:grid-cols-[250px_minmax(0,1fr)]">
             <div className="hidden lg:block">
               <div className="sticky top-0">
                 <FolderSidebar
@@ -2252,7 +2327,8 @@ export default function App() {
                 />
               </div>
             </div>
-            <section className="min-w-0 space-y-3.5">
+            {/* The explorer fills what the header leaves (the page scrolls only below its minimum). */}
+            <section className="flex min-h-0 min-w-0 flex-col gap-3.5">
               {/* Library Primary Header */}
               <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line pb-3.5">
                 <div className="flex items-center gap-2.5">
@@ -2693,6 +2769,8 @@ export default function App() {
       </div>
 
       <FramesPanel open={framesOpen} onClose={() => setFramesOpen(false)} onToast={pushToast} />
+
+      {overlay && <ShortcutsOverlay mode={overlay} onClose={() => setOverlay(null)} onEdit={() => openSettingsAt("shortcuts")} />}
 
       {/* Trimmer Modal */}
       {activeClip && (

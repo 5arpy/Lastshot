@@ -1216,7 +1216,7 @@ function ClipsExplorer(props: Props) {
       tabIndex={0}
       onKeyDown={onKeyDown}
       onMouseUp={onMouseUp}
-      className="flex min-h-0 flex-col gap-2 outline-none"
+      className="flex min-h-0 flex-1 flex-col gap-2 outline-none"
       data-testid="clips-explorer"
       aria-label="Clips explorer"
     >
@@ -1497,7 +1497,7 @@ function ClipsExplorer(props: Props) {
         </div>
       )}
 
-      <div className="flex min-h-0 gap-2">
+      <div className="flex min-h-[260px] flex-1 gap-2">
         <div
           ref={scrollRef}
           onScroll={onScroll}
@@ -1512,7 +1512,7 @@ function ClipsExplorer(props: Props) {
           aria-multiselectable
           aria-label="Files"
           className={cn(
-            "relative h-[calc(100vh-250px)] min-h-[320px] min-w-0 flex-1 overflow-y-auto rounded-lg border bg-surface-2/40",
+            "relative min-h-[260px] min-w-0 flex-1 overflow-y-auto rounded-lg border bg-surface-2/40",
             dropOn === currentDir ? "border-accent" : "border-line",
           )}
         >

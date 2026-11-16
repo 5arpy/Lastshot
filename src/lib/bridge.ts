@@ -90,8 +90,11 @@ export function currentWindowLabel(): string | null {
 export async function showCurrentWindow(): Promise<void> {
   const w = window.__TAURI__?.window?.getCurrentWindow();
   if (!w) return;
-  await w.show();
-  await w.setFocus();
+  // Shown and brought to the front by the app, never with an injected key
+  // press (tao's setFocus fallback sends a fake Alt).
+  await window.__TAURI__!.core.invoke("shell_focus_self").catch(async () => {
+    await w.show();
+  });
 }
 
 function tauri(): TauriGlobal {
@@ -257,6 +260,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   screenshotCopy: true,
   recordingDir: "",
   streamerMode: false,
+  shortcuts: {},
+  uiScale: 1,
 };
 
 // Browser preview stand-in for screen recording.
@@ -1192,6 +1197,10 @@ export const lastshot = {
     if (isTauri()) return listen<EngineStats>(CHANNELS.stats, handler);
     const off = simEngine.onStats(handler);
     return Promise.resolve(off);
+  },
+  /** The settings changed (in any window). */
+  onSettings(handler: Handler<AppSettings>) {
+    return listen<AppSettings>("lastshot://settings", handler);
   },
   onClipSaved(handler: Handler<ClipSavedPayload>) {
     return listen<ClipSavedPayload>(CHANNELS.clipSaved, handler);

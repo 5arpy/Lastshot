@@ -419,8 +419,14 @@ function ClipsExplorer(props: Props) {
     if (i < 0 || !el) return;
     const row = Math.floor(i / perRow);
     const top = row * pitch;
-    if (top < el.scrollTop) el.scrollTop = top;
-    else if (top + pitch + 16 > el.scrollTop + el.clientHeight) el.scrollTop = top + pitch + 16 - el.clientHeight;
+    const fit = () => {
+      if (top < el.scrollTop) el.scrollTop = top;
+      else if (top + pitch + 16 > el.scrollTop + el.clientHeight) el.scrollTop = top + pitch + 16 - el.clientHeight;
+    };
+    fit();
+    // Selecting can show the status line under the list, which makes it
+    // shorter: check again once that layout is in.
+    requestAnimationFrame(fit);
   };
 
   // ------------------------------------------------------------ selection

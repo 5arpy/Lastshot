@@ -24,8 +24,23 @@ function cloneItem<I extends Item>(i: I, patch: Partial<I>): I {
   return { ...i, ...patch };
 }
 
-/** Removes `a..b` from one track's items (overwrite), splitting what straddles it. */
-export function clearRange<I extends Item>(items: I[], track: string, a: number, b: number): I[] {
+/** A new link id per old one, shared by every piece cut in one edit. */
+function relinker(): (link: string | undefined) => string | undefined {
+  const map = new Map<string, string>();
+  return (link) => {
+    if (!link) return link;
+    if (!map.has(link)) map.set(link, newId("l"));
+    return map.get(link);
+  };
+}
+
+/**
+ * Removes `a..b` from one track's items (overwrite), splitting what straddles
+ * it. A right-hand piece cut off an item gets a new id and, like splitAt, a
+ * new link (pass one `relink` for every track of an edit so linked pieces
+ * stay together).
+ */
+export function clearRange<I extends Item>(items: I[], track: string, a: number, b: number, relink = relinker()): I[] {
   if (b - a <= EPS) return items;
   const out: I[] = [];
   for (const i of items) {
@@ -38,15 +53,16 @@ export function clearRange<I extends Item>(items: I[], track: string, a: number,
       out.push(i);
       continue;
     }
-    if (i.start < a - EPS && a - i.start >= MIN_LEN) out.push(cloneItem(i, { duration: round(a - i.start) } as Partial<I>));
+    const left = i.start < a - EPS && a - i.start >= MIN_LEN;
+    if (left) out.push(cloneItem(i, { duration: round(a - i.start) } as Partial<I>));
     if (e > b + EPS && e - b >= MIN_LEN) {
-      const left = i.start < a - EPS;
       out.push(
         cloneItem(i, {
           id: left ? newId() : i.id,
           start: round(b),
           srcIn: round(i.srcIn + (b - i.start)),
           duration: round(e - b),
+          link: left ? relink(i.link) : i.link,
         } as Partial<I>),
       );
     }
@@ -74,16 +90,65 @@ function shiftAfter<I extends Item>(items: I[], track: string, from: number, dt:
   );
 }
 
-/** Splits items of `track` that straddle `t` (used before an insert). */
-function cutAt<I extends Item>(items: I[], track: string, t: number): I[] {
-  const out: I[] = [];
-  for (const i of items) {
-    if (i.track === track && t > i.start + EPS && t < end(i) - EPS) {
-      out.push(cloneItem(i, { duration: round(t - i.start) } as Partial<I>));
-      out.push(cloneItem(i, { id: newId(), start: round(t), srcIn: round(i.srcIn + (t - i.start)), duration: round(end(i) - t) } as Partial<I>));
-    } else out.push(i);
+/**
+ * Moves items by their own amount (`delta`), track by track in time order.
+ * An item never lands on the one before it (nor before 0): it stops there,
+ * so the no-overlap rule holds whatever the amounts.
+ */
+function shiftBy<I extends Item>(items: I[], delta: Map<string, number>): I[] {
+  if (!delta.size) return items;
+  const byId = new Map(items.map((i) => [i.id, i]));
+  const tracks = new Set([...delta.keys()].map((id) => byId.get(id)?.track).filter((t): t is string => !!t));
+  const to = new Map<string, number>();
+  for (const tr of tracks) {
+    const on = items.filter((i) => i.track === tr).sort((a, b) => a.start - b.start);
+    let prev = 0;
+    for (const i of on) {
+      const d = delta.get(i.id) ?? 0;
+      const s = Math.abs(d) > EPS ? Math.max(prev, i.start + d) : i.start;
+      if (Math.abs(s - i.start) > EPS) to.set(i.id, round(s));
+      prev = Math.max(prev, s + i.duration);
+    }
   }
-  return out;
+  return to.size ? items.map((i) => (to.has(i.id) ? cloneItem(i, { start: to.get(i.id)! } as Partial<I>) : i)) : items;
+}
+
+/** Items linked to any of `ids` (not those themselves). */
+function partners<I extends Item>(items: I[], ids: Iterable<string>): I[] {
+  const set = new Set(ids);
+  const links = new Set(items.filter((i) => set.has(i.id) && i.link).map((i) => i.link));
+  return links.size ? items.filter((i) => !set.has(i.id) && i.link && links.has(i.link)) : [];
+}
+
+/**
+ * Packs the magnetic track back to back. What belongs to a clip that moves
+ * goes with it: its linked items, and items on other unlocked tracks that
+ * start over it (titles, pictures and sound laid on top).
+ */
+function packMagnet<I extends Item>(tl: Timeline<I>, items: I[], magnet: string): I[] {
+  const packed = compact(items, magnet);
+  const delta = new Map<string, number>();
+  const before = new Map(items.map((i) => [i.id, i]));
+  for (const i of packed) {
+    const d = i.start - before.get(i.id)!.start;
+    if (i.track === magnet && Math.abs(d) > EPS) delta.set(i.id, d);
+  }
+  if (!delta.size) return packed;
+  const main = items.filter((i) => i.track === magnet);
+  for (const m of main) {
+    const d = delta.get(m.id);
+    if (d === undefined) continue;
+    for (const x of partners(items, [m.id])) if (!isLocked(tl, x.track) && x.track !== magnet) delta.set(x.id, d);
+  }
+  for (const x of items) {
+    if (x.track === magnet || delta.has(x.id) || isLocked(tl, x.track) || x.link) continue;
+    const host = main.find((m) => x.start >= m.start - EPS && x.start < end(m) - EPS);
+    const d = host && delta.get(host.id);
+    if (d !== undefined) delta.set(x.id, d);
+  }
+  // The main track is already packed; move the rest.
+  for (const m of main) delta.delete(m.id);
+  return shiftBy(packed, delta);
 }
 
 /**
@@ -110,22 +175,25 @@ export function place<I extends Item>(tl: Timeline<I>, placed: I[], mode: PlaceM
     }
   }
   if (mode === "insert") {
-    const byTrack = new Map<string, { at: number; span: number }>();
-    for (const p of fixed) {
-      const cur = byTrack.get(p.track);
-      const at = Math.min(cur?.at ?? Infinity, p.start);
-      const last = Math.max(cur ? cur.at + cur.span : -Infinity, end(p));
-      byTrack.set(p.track, { at, span: last - at });
-    }
-    for (const [track, { at, span }] of byTrack) {
-      items = cutAt(items, track, at);
-      items = shiftAfter(items, track, at, span);
-    }
-  } else {
-    for (const p of fixed) items = clearRange(items, p.track, p.start, end(p));
+    // A hole from the earliest placed start, as long as the placed span, on
+    // every unlocked track (sync lock): linked sound and the titles over the
+    // clips after it stay with them. What straddles the hole on the tracks
+    // that receive items is cut (with its linked pieces).
+    const at = Math.min(...fixed.map((p) => p.start));
+    const span = Math.max(...fixed.map((p) => end(p))) - at;
+    const targets = new Set(fixed.map((p) => p.track));
+    const straddle = items.filter((i) => targets.has(i.track) && at > i.start + EPS && at < end(i) - EPS).map((i) => i.id);
+    if (straddle.length) items = splitAt({ ...tl, items }, at, straddle).tl.items;
+    const delta = new Map<string, number>();
+    for (const i of items) if (!isLocked(tl, i.track) && i.start >= at - EPS) delta.set(i.id, span);
+    items = shiftBy(items, delta);
   }
+  // Overwrite: clear under the placed items. After an insert this only
+  // removes slivers too short to split off.
+  const relink = relinker();
+  for (const p of fixed) items = clearRange(items, p.track, p.start, end(p), relink);
   items = [...items, ...fixed];
-  if (opts.magnet) items = compact(items, opts.magnet);
+  if (opts.magnet) items = packMagnet(tl, items, opts.magnet);
   return { ...tl, items };
 }
 
@@ -215,7 +283,7 @@ export function trimItem<I extends Item>(tl: Timeline<I>, id: string, edge: "lef
     }
   }
   let out = { ...tl, items };
-  if (opts.magnet) out = { ...out, items: compact(out.items, opts.magnet) };
+  if (opts.magnet) out = { ...out, items: packMagnet(tl, out.items, opts.magnet) };
   return out;
 }
 
@@ -299,7 +367,13 @@ export function splitAt<I extends Item>(tl: Timeline<I>, t: number, ids?: Iterab
   return { tl: created.length ? { ...tl, items } : tl, created };
 }
 
-/** Deletes items; with ripple the gaps they leave close on their tracks. */
+/**
+ * Deletes items. With ripple, what came after each deleted item on its track
+ * moves left by exactly the deleted length (never further: an earlier gap
+ * stays), and items linked to what moves move by the same amount so sound
+ * stays in sync. Linked items deleted together close up once, by the
+ * shortest of them.
+ */
 export function removeItems<I extends Item>(tl: Timeline<I>, ids: Iterable<string>, ripple = false, opts: EditOpts = {}): Timeline<I> {
   const set = new Set(ids);
   const gone = tl.items.filter((i) => set.has(i.id) && !isLocked(tl, i.track));
@@ -307,15 +381,23 @@ export function removeItems<I extends Item>(tl: Timeline<I>, ids: Iterable<strin
   const goneIds = new Set(gone.map((g) => g.id));
   let items = tl.items.filter((i) => !goneIds.has(i.id));
   if (ripple) {
-    // Close each removed span on its track, last first so earlier ones stay put.
-    for (const g of [...gone].sort((a, b) => b.start - a.start)) {
-      const g2 = gapAt({ ...tl, items }, g.track, g.start + EPS * 10);
-      if (!g2) continue;
-      items = shiftAfter(items, g.track, g2.end, -(g2.end - g2.start));
+    const groups = new Map<string, I[]>();
+    for (const g of gone) {
+      const k = g.link ?? g.id;
+      groups.set(k, [...(groups.get(k) ?? []), g]);
+    }
+    // Last first, so earlier holes are measured on unmoved items.
+    const order = [...groups.values()].sort((a, b) => Math.max(...b.map((x) => x.start)) - Math.max(...a.map((x) => x.start)));
+    for (const grp of order) {
+      const dt = Math.min(...grp.map((g) => g.duration));
+      const delta = new Map<string, number>();
+      for (const g of grp) for (const i of items) if (i.track === g.track && i.start >= end(g) - EPS) delta.set(i.id, -dt);
+      for (const x of partners(items, [...delta.keys()])) if (!isLocked(tl, x.track) && !delta.has(x.id)) delta.set(x.id, -dt);
+      items = shiftBy(items, delta);
     }
   }
   let out = { ...tl, items };
-  if (opts.magnet) out = { ...out, items: compact(out.items, opts.magnet) };
+  if (opts.magnet) out = { ...out, items: packMagnet(tl, out.items, opts.magnet) };
   return out;
 }
 
@@ -344,7 +426,10 @@ export function closeAllGaps<I extends Item>(tl: Timeline<I>, track?: string): T
 export function rippleTrimToPlayhead<I extends Item>(tl: Timeline<I>, t: number, side: "left" | "right", ids?: Iterable<string> | null): Timeline<I> {
   const want = ids ? withLinked(tl, ids) : null;
   let out = tl;
-  const hits = tl.items.filter((i) => (!want || want.has(i.id)) && !isLocked(tl, i.track) && t > i.start + EPS && t < end(i) - EPS);
+  // What stays must be at least MIN_LEN long.
+  const hits = tl.items.filter(
+    (i) => (!want || want.has(i.id)) && !isLocked(tl, i.track) && t > i.start + EPS && t < end(i) - EPS && (side === "left" ? end(i) - t : t - i.start) >= MIN_LEN - EPS,
+  );
   for (const h of hits) {
     const cur = out.items.find((i) => i.id === h.id);
     if (!cur) continue;
@@ -476,17 +561,35 @@ export function extractRange<I extends Item>(tl: Timeline<I>, a: number, b: numb
   const lo = Math.max(0, Math.min(a, b));
   const hi = Math.max(a, b);
   if (hi - lo < MIN_LEN) return tl;
-  let out = splitAt(splitAt(tl, lo).tl, hi).tl;
-  const locked = new Set(out.tracks.filter((t) => t.locked).map((t) => t.id));
-  if (keep) {
-    const items = out.items
-      .filter((i) => locked.has(i.track) || (i.start >= lo - EPS && end(i) <= hi + EPS))
-      .map((i) => (locked.has(i.track) ? i : cloneItem(i, { start: round(i.start - lo) } as Partial<I>)));
-    return { ...out, items, inPoint: null, outPoint: null, markers: out.markers.filter((m) => m.t >= lo && m.t <= hi).map((m) => ({ ...m, t: round(m.t - lo) })) };
+  const cut = hi - lo;
+  const relink = relinker();
+  const items: I[] = [];
+  for (const i of tl.items) {
+    if (isLocked(tl, i.track)) {
+      items.push(i);
+      continue;
+    }
+    const s = i.start;
+    const e = end(i);
+    if (keep) {
+      // Only the part inside the range, moved to 0; slivers go.
+      const x = Math.max(s, lo);
+      const y = Math.min(e, hi);
+      if (y - x >= MIN_LEN) items.push(cloneItem(i, { start: round(x - lo), srcIn: round(i.srcIn + (x - s)), duration: round(y - x) } as Partial<I>));
+      continue;
+    }
+    if (e <= lo + EPS) items.push(i);
+    else if (s >= hi - EPS) items.push(cloneItem(i, { start: round(s - cut) } as Partial<I>));
+    else {
+      // The part before the range stays; the part after it closes up. A
+      // piece shorter than the shortest item goes rather than overlap.
+      const head = lo - s >= MIN_LEN;
+      if (head) items.push(cloneItem(i, { duration: round(lo - s) } as Partial<I>));
+      if (e - hi >= MIN_LEN) items.push(cloneItem(i, { id: head ? newId() : i.id, start: round(lo), srcIn: round(i.srcIn + (hi - s)), duration: round(e - hi), link: head ? relink(i.link) : i.link } as Partial<I>));
+    }
   }
-  const items = out.items
-    .filter((i) => locked.has(i.track) || !(i.start >= lo - EPS && end(i) <= hi + EPS))
-    .map((i) => (!locked.has(i.track) && i.start >= hi - EPS ? cloneItem(i, { start: round(i.start - (hi - lo)) } as Partial<I>) : i));
-  out = { ...out, items, inPoint: null, outPoint: null, markers: out.markers.filter((m) => m.t < lo || m.t > hi).map((m) => (m.t > hi ? { ...m, t: round(m.t - (hi - lo)) } : m)) };
-  return out;
+  const markers = keep
+    ? tl.markers.filter((m) => m.t >= lo && m.t <= hi).map((m) => ({ ...m, t: round(m.t - lo) }))
+    : tl.markers.filter((m) => m.t < lo || m.t > hi).map((m) => (m.t > hi ? { ...m, t: round(m.t - cut) } : m));
+  return { ...tl, items, inPoint: null, outPoint: null, markers };
 }

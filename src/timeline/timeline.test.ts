@@ -301,8 +301,6 @@ describe("history", () => {
     h.push(4);
     h.push(5);
     expect(h.past.length).toBe(3);
-    h.cancel();
-    expect(h.past.length).toBe(2);
   });
 });
 

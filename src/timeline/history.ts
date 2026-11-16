@@ -21,11 +21,6 @@ export class History<T> {
     this.future = [];
   }
 
-  /** Drops the last push (a drag that ended up changing nothing). */
-  cancel(): void {
-    this.past.pop();
-  }
-
   undo(current: T): T | undefined {
     const s = this.past.pop();
     if (!s) return undefined;

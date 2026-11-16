@@ -438,6 +438,9 @@ pub fn run() {
             frames::frame_raise,
             frames::frame_close,
             frames::frame_close_all,
+            frames::frame_closed,
+            frames::frame_reopen,
+            frames::frame_cursor,
             frames::frame_click_through_all,
             frames::frame_hide_all,
             frames::frame_layout,
@@ -507,9 +510,11 @@ fn invoke_handler(
     }
 }
 
-/// Before Lastshot quits: detach the cables (Pro), stop the extension module,
-/// undo the Audio guard's temporary mutes, release Voicemeeter.
+/// Before Lastshot quits: save the pop-out frames now, detach the cables
+/// (Pro), stop the extension module, undo the Audio guard's temporary mutes,
+/// release Voicemeeter.
 pub(crate) fn quit_cleanup(app: &tauri::AppHandle) {
+    frames::flush();
     #[cfg(feature = "pro-cables")]
     cables::shutdown(app);
     #[cfg(feature = "pro")]

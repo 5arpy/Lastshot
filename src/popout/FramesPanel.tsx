@@ -8,8 +8,25 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import pro from "lastshot-pro";
 import { assetUrl, lastshot } from "../lib/bridge";
+import NumberField from "../components/NumberField";
 import { cn } from "../utils/cn";
-import { frames, popOutPicturePath, viewFlags, type Frame, type FrameCmd } from "./frames";
+import ShowOverPicker from "./ShowOverPicker";
+import { openApps } from "./showOver";
+import { frames, pickEcho, popOutMany, popOutPicturePath, viewFlags, type ClosedFrame, type Frame, type FrameCmd } from "./frames";
+
+/** What the panel's view buttons can do for image and clip frames. */
+const MEDIA_CMDS: FrameCmd[] = ["zoomOut", "zoomIn", "fit", "actual", "flipH", "flipV", "gray", "grid"];
+
+/** "3 min ago" for the Recently closed list. */
+export function ago(ms: number, now = Date.now()): string {
+  const m = Math.max(0, Math.round((now - ms) / 60000));
+  if (m < 1) return "just now";
+  if (m < 60) return `${m} min ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h} h ago`;
+  const d = Math.round(h / 24);
+  return d === 1 ? "yesterday" : `${d} days ago`;
+}
 
 /** Ctrl+Alt+Shift+X style accelerator from a key press (null: keep waiting). */
 export function accelFromKey(e: KeyboardEvent): string | null {
@@ -46,33 +63,43 @@ export default function FramesPanel({
   onToast: (tone: "ok" | "warn" | "info", title: string, body?: string) => void;
 }) {
   const [list, setList] = useState<Frame[]>([]);
+  const [closed, setClosed] = useState<ClosedFrame[]>([]);
   const [hotkey, setHotkey] = useState("");
   const [recording, setRecording] = useState(false);
-  // Apps with a window, for "Only over" (refreshed when the panel opens).
-  const [apps, setApps] = useState<string[]>([]);
+  const [notice, setNotice] = useState("");
+  const [askAll, setAskAll] = useState(false);
+  // Apps with a window, for "Show over" (refreshed when the panel opens).
+  const [apps, setApps] = useState<{ exe: string; title: string }[]>([]);
   useEffect(() => {
     if (!open) return;
     void lastshot
       .listWindows()
-      .then((w) => {
-        const seen = new Map<string, string>();
-        for (const x of w) if (x.exe && !/^lastshot/i.test(x.exe)) seen.set(x.exe.toLowerCase(), x.exe);
-        setApps([...seen.values()].sort((a, b) => (/blender/i.test(a) ? -1 : /blender/i.test(b) ? 1 : a.localeCompare(b))));
-      })
+      .then((w) => setApps(openApps(w)))
       .catch(() => undefined);
   }, [open]);
+  // Apps picked on any frame stay offered, also while they are closed.
+  const known = [...new Map(list.flatMap((f) => f.showOver ?? []).map((a) => [a.toLowerCase(), a] as const)).values()];
 
   useEffect(() => {
-    let off: (() => void) | undefined;
+    const offs: Array<() => void> = [];
     let alive = true;
+    const keep = (p: Promise<() => void>) => void p.then((u) => (alive ? offs.push(u) : u()));
     void frames.list().then((l) => alive && setList(l));
     void frames.getHotkey().then((k) => alive && setHotkey(k)).catch(() => undefined);
-    void frames.onChange((l) => setList(l)).then((u) => (alive ? (off = u) : u()));
+    keep(frames.onChange((l) => setList(l)));
+    // The tray's "Close all frames" kept boards with pictures open.
+    keep(frames.onNotice((m) => setNotice(m)));
     return () => {
       alive = false;
-      off?.();
+      offs.forEach((u) => u());
     };
   }, []);
+
+  // Recently closed frames (the trash), while the panel is open.
+  const loadClosed = useCallback(() => void frames.closed().then(setClosed, () => undefined), []);
+  useEffect(() => {
+    if (open) loadClosed();
+  }, [open, list, loadClosed]);
 
   useEffect(() => {
     if (!recording) return;
@@ -107,12 +134,36 @@ export default function FramesPanel({
       multiple: true,
       filters: [{ name: "Pictures", extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp"] }],
     }).catch(() => null);
-    const paths = Array.isArray(p) ? p : p ? [p] : [];
-    for (const path of paths) await popOutPicturePath(String(path)).catch(fail);
+    const paths = (Array.isArray(p) ? p : p ? [p] : []).map(String);
+    await popOutMany(
+      paths,
+      popOutPicturePath,
+      (n) => window.confirm(`Pop out ${n} pictures? Each opens a frame of its own.`),
+      (m) => onToast("warn", "Pop-out", m),
+    );
   };
 
   const allThrough = list.length > 0 && list.every((f) => f.clickThrough);
   const allHidden = list.length > 0 && list.every((f) => f.hidden);
+  const holding = list.filter((f) => (f.items ?? 0) > 0);
+  const closeAll = (force: boolean) => {
+    setAskAll(false);
+    void frames
+      .closeAll(force)
+      .then((r) => {
+        // Something reported its pictures only now: ask about the rest.
+        if (r.kept) setAskAll(true);
+      })
+      .catch(fail);
+  };
+  const reopen = (c: ClosedFrame) =>
+    void frames
+      .reopen(c.key)
+      .then(loadClosed)
+      .catch((e) => {
+        fail(e);
+        loadClosed();
+      });
 
   if (!open) return null;
   return (
@@ -161,7 +212,13 @@ export default function FramesPanel({
           <button type="button" className={btn} disabled={!list.length} onClick={() => void frames.hideAll(!allHidden).catch(fail)}>
             {allHidden ? "Show all" : "Hide all"}
           </button>
-          <button type="button" className={cn(btn, "hover:border-red-500/60 hover:text-red-400")} disabled={!list.length} onClick={() => void frames.closeAll().catch(fail)}>
+          <button
+            type="button"
+            data-testid="frames-close-all"
+            className={cn(btn, "hover:border-red-500/60 hover:text-red-400")}
+            disabled={!list.length}
+            onClick={() => (holding.length ? setAskAll(true) : closeAll(false))}
+          >
             Close all
           </button>
           <span className="ml-auto flex items-center gap-1.5 text-[11px] text-ink-3" title="Turns click-through on or off for every frame, from any app">
@@ -184,6 +241,29 @@ export default function FramesPanel({
           </span>
         </div>
 
+        {askAll && (
+          <div className="flex flex-wrap items-center gap-2 border-b border-line bg-red-500/10 px-4 py-2.5 text-[11.5px] text-ink-2" data-testid="frames-close-all-ask">
+            <span className="min-w-0 flex-1">
+              Close all {list.length} frames? {holding.length === 1 ? "One holds pictures; it goes" : `${holding.length || "Some"} hold pictures; they go`} to
+              Recently closed below for 7 days.
+            </span>
+            <button type="button" className={btn} onClick={() => setAskAll(false)}>
+              Cancel
+            </button>
+            <button type="button" data-testid="frames-close-all-yes" className={cn(btn, "border-red-500/60 text-red-400")} onClick={() => closeAll(true)}>
+              Close all
+            </button>
+          </div>
+        )}
+        {notice && (
+          <div className="flex items-center gap-2 border-b border-line bg-amber-500/10 px-4 py-2 text-[11.5px] text-ink-2" data-testid="frames-notice">
+            <span className="min-w-0 flex-1">{notice}</span>
+            <button type="button" className="text-ink-4 hover:text-ink" title="Dismiss" onClick={() => setNotice("")}>
+              ✕
+            </button>
+          </div>
+        )}
+
         <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
           {!list.length && (
             <div className="rounded-lg border border-dashed border-line-3 px-4 py-6 text-center text-[12px] leading-relaxed text-ink-3">
@@ -192,13 +272,38 @@ export default function FramesPanel({
             </div>
           )}
           {list.map((f) => (
-            <FrameRow key={f.id} f={f} upd={upd} cmd={cmd} fail={fail} apps={apps} />
+            <FrameRow key={f.id} f={f} upd={upd} cmd={cmd} fail={fail} apps={apps} known={known} />
           ))}
+
+          {closed.length > 0 && (
+            <section className="mt-3" data-testid="frames-closed">
+              <div className="mb-1 px-1 text-[11px] font-semibold uppercase tracking-wide text-ink-4" title="Closed frames that held pictures are kept for 7 days">
+                Recently closed
+              </div>
+              {closed.map((c) => (
+                <div key={c.key} className="mb-1 flex items-center gap-2 rounded-md border border-line bg-surface px-2.5 py-1.5" data-testid="frames-closed-row">
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-[12px] text-ink-2" title={c.title}>
+                      {c.title}
+                    </div>
+                    <div className="text-[10.5px] text-ink-4">
+                      {c.pictures} picture{c.pictures === 1 ? "" : "s"} · closed {ago(c.closedMs)}
+                    </div>
+                  </div>
+                  <button type="button" className={btn} data-testid="frames-reopen" onClick={() => reopen(c)}>
+                    Reopen
+                  </button>
+                </div>
+              ))}
+              <p className="px-1 text-[10.5px] text-ink-4">Kept for 7 days after closing.</p>
+            </section>
+          )}
         </div>
 
         <footer className="border-t border-line px-4 py-2.5 text-[11px] leading-relaxed text-ink-4">
-          On a frame: drag the top bar to move, the edges to resize (Shift: any shape), the wheel to zoom, Shift+wheel for opacity. Frames
-          never take the keyboard from the app you work in.
+          On a frame: drag the top bar to move, the edges to resize (Shift: any shape), the wheel to zoom, Shift+wheel for opacity. Picture
+          and clip frames never take the keyboard from the app you work in; frames made for typing in (a reference board) take it once
+          you click them.
         </footer>
       </aside>
     </div>
@@ -211,8 +316,11 @@ function FrameRow({
   cmd,
   fail,
   apps,
+  known,
 }: {
-  apps: string[];
+  apps: { exe: string; title: string }[];
+  /** Apps picked on any frame (they stay offered while closed). */
+  known: string[];
   f: Frame;
   upd: (f: Frame, p: Parameters<typeof frames.update>[1]) => void;
   cmd: (f: Frame, c: FrameCmd) => void;
@@ -220,11 +328,29 @@ function FrameRow({
 }) {
   const flags = viewFlags(f);
   const [full, setFull] = useState(false);
+  const [asking, setAsking] = useState(false);
   const thumb = f.kind === "image" && f.src ? assetUrl(f.src) : "";
-  // Slider: show the value at once, send at most every 50 ms.
+  // Slider: show the value at once, send at most every 40 ms. Values that
+  // come back from the app right after a local change are older echoes.
   const [op, setOp] = useState(Math.round(f.opacity * 100));
   const opTimer = useRef(0);
-  useEffect(() => setOp(Math.round(f.opacity * 100)), [f.opacity]);
+  const opAt = useRef(0);
+  useEffect(() => setOp((local) => pickEcho(local, Math.round(f.opacity * 100), opAt.current, Date.now())), [f.opacity]);
+  const setOpacity = (v: number, wait: number) => {
+    opAt.current = Date.now();
+    setOp(v);
+    window.clearTimeout(opTimer.current);
+    opTimer.current = window.setTimeout(() => upd(f, { opacity: v / 100 }), wait);
+  };
+  // The view buttons this kind of frame handles (a Pro board names its own).
+  const cmds = f.kind === "image" || f.kind === "video" ? MEDIA_CMDS : (pro.frameCommands?.[f.kind] ?? []);
+  const has = (c: FrameCmd) => cmds.includes(c);
+  const items = f.items ?? 0;
+  const close = (force: boolean) =>
+    void frames
+      .close(f.id, force)
+      .then((ok) => setAsking(!ok))
+      .catch(fail);
   return (
     <div className={cn("mb-2 rounded-lg border bg-surface p-2.5", f.hidden ? "border-line opacity-70" : "border-line-2")}>
       <div className="flex items-center gap-2">
@@ -248,13 +374,27 @@ function FrameRow({
         </div>
         <button
           type="button"
+          data-testid="frame-row-close"
           className="grid h-7 w-7 place-items-center rounded-md text-ink-3 hover:bg-red-500/15 hover:text-red-400"
           title="Close this frame"
-          onClick={() => void frames.close(f.id).catch(fail)}
+          onClick={() => close(false)}
         >
           ✕
         </button>
       </div>
+      {asking && (
+        <div className="mt-2 flex flex-wrap items-center gap-1.5 rounded-md bg-red-500/10 px-2 py-1.5 text-[11px] text-ink-2" data-testid="frame-row-ask">
+          <span className="min-w-0 flex-1">
+            Close it{items ? ` with its ${items} picture${items === 1 ? "" : "s"}` : ""}? It stays in Recently closed for 7 days.
+          </span>
+          <button type="button" className={btn} onClick={() => setAsking(false)}>
+            Keep
+          </button>
+          <button type="button" data-testid="frame-row-ask-yes" className={cn(btn, "border-red-500/60 text-red-400")} onClick={() => close(true)}>
+            Close
+          </button>
+        </div>
+      )}
 
       <label className="mt-2 flex items-center gap-2 text-[11px] text-ink-3">
         <span className="w-12">Opacity</span>
@@ -263,16 +403,24 @@ function FrameRow({
           min={5}
           max={100}
           value={op}
-          onChange={(e) => {
-            const v = Number(e.target.value);
-            setOp(v);
-            window.clearTimeout(opTimer.current);
-            opTimer.current = window.setTimeout(() => upd(f, { opacity: v / 100 }), 40);
-          }}
+          onChange={(e) => setOpacity(Number(e.target.value), 40)}
           className="h-1 flex-1 accent-[var(--color-accent,#5d72db)]"
           aria-label={`Opacity of ${f.title}`}
         />
-        <span className="w-9 text-right font-mono text-[10.5px] text-ink-2">{op}%</span>
+        {/* Any value: type it (Enter or leaving the field sets it), or arrows / wheel. */}
+        <NumberField
+          value={op}
+          min={5}
+          max={100}
+          step={1}
+          digits={0}
+          onChange={(v) => setOpacity(Math.round(v), 0)}
+          aria-label={`Opacity of ${f.title}, percent`}
+          title="Type any opacity from 5 to 100 %"
+          testid="frame-row-opacity"
+          className="w-9 rounded border border-transparent bg-transparent px-0.5 text-right font-mono text-[10.5px] text-ink-2 hover:border-line focus:border-line focus:bg-surface-2 focus:outline-none"
+        />
+        <span className="-ml-1.5 font-mono text-[10.5px] text-ink-3">%</span>
       </label>
 
       <div className="mt-2 flex flex-wrap items-center gap-1">
@@ -295,49 +443,51 @@ function FrameRow({
         </button>
       </div>
 
-      <label className="mt-1.5 flex items-center gap-2 text-[11px] text-ink-3" title="Show this frame only while that app (or Lastshot) is in front. Frames hide while another app is full screen on their screen (a game, a video); pick the app here to keep the frame over it.">
-        <span className="w-12 shrink-0">Show over</span>
-        <select
-          value={f.onlyWith}
-          onChange={(e) => upd(f, { onlyWith: e.target.value })}
-          className="h-6 min-w-0 flex-1 rounded border border-line bg-surface px-1 text-[11px] text-ink"
-        >
-          <option value="">every app (not over full screen)</option>
-          {[...new Set([...(f.onlyWith ? [f.onlyWith] : []), ...apps])].map((a) => (
-            <option key={a} value={a}>
-              only {a.replace(/\.exe$/i, "")}
-            </option>
-          ))}
-        </select>
-      </label>
+      <ShowOverPicker value={f.showOver ?? []} known={known} open={apps} frameTitle={f.title} onChange={(l) => upd(f, { showOver: l })} />
 
-      {(f.kind === "image" || f.kind === "video") && (
-        <div className="mt-1.5 flex flex-wrap items-center gap-1">
-          <button type="button" className={chip(false)} onClick={() => cmd(f, "zoomOut")} title="Zoom out">
-            −
-          </button>
-          <button type="button" className={chip(false)} onClick={() => cmd(f, "zoomIn")} title="Zoom in">
-            +
-          </button>
-          <button type="button" className={chip(false)} onClick={() => cmd(f, "fit")} title="Fit the picture in the frame">
-            Fit
-          </button>
-          <button type="button" className={chip(false)} onClick={() => cmd(f, "actual")} title="100 %: one picture pixel per screen pixel">
-            1:1
-          </button>
+      {cmds.length > 0 && (
+        <div className="mt-1.5 flex flex-wrap items-center gap-1" data-testid="frame-row-view">
+          {has("zoomOut") && (
+            <button type="button" className={chip(false)} onClick={() => cmd(f, "zoomOut")} title="Zoom out">
+              −
+            </button>
+          )}
+          {has("zoomIn") && (
+            <button type="button" className={chip(false)} onClick={() => cmd(f, "zoomIn")} title="Zoom in">
+              +
+            </button>
+          )}
+          {has("fit") && (
+            <button type="button" className={chip(false)} onClick={() => cmd(f, "fit")} title={f.kind === "board" ? "Fit everything in the frame" : "Fit the picture in the frame"}>
+              Fit
+            </button>
+          )}
+          {has("actual") && (
+            <button type="button" className={chip(false)} onClick={() => cmd(f, "actual")} title="100 %: one picture pixel per screen pixel">
+              1:1
+            </button>
+          )}
           <span className="mx-0.5 h-4 w-px bg-line" />
-          <button type="button" className={chip(flags.flipH)} onClick={() => cmd(f, "flipH")} title="Mirror left↔right">
-            Flip ↔
-          </button>
-          <button type="button" className={chip(flags.flipV)} onClick={() => cmd(f, "flipV")} title="Flip upside down">
-            Flip ↕
-          </button>
-          <button type="button" className={chip(flags.gray)} onClick={() => cmd(f, "gray")} title="Grayscale">
-            Gray
-          </button>
-          <button type="button" className={chip(flags.grid)} onClick={() => cmd(f, "grid")} title="Grid over the picture">
-            Grid
-          </button>
+          {has("flipH") && (
+            <button type="button" className={chip(flags.flipH)} onClick={() => cmd(f, "flipH")} title={f.kind === "board" ? "Mirror the selection, or every picture" : "Mirror left↔right"}>
+              Flip ↔
+            </button>
+          )}
+          {has("flipV") && (
+            <button type="button" className={chip(flags.flipV)} onClick={() => cmd(f, "flipV")} title="Flip upside down">
+              Flip ↕
+            </button>
+          )}
+          {has("gray") && (
+            <button type="button" className={chip(flags.gray)} onClick={() => cmd(f, "gray")} title={f.kind === "board" ? "Grey the selection, or every picture" : "Grayscale"}>
+              Gray
+            </button>
+          )}
+          {has("grid") && (
+            <button type="button" className={chip(flags.grid)} onClick={() => cmd(f, "grid")} title="Grid over the picture">
+              Grid
+            </button>
+          )}
         </div>
       )}
     </div>

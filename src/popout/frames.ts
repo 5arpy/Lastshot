@@ -23,11 +23,28 @@ export interface Frame {
   onTop: boolean;
   clickThrough: boolean;
   hidden: boolean;
-  /** Only shown while this app (exe name) or Lastshot is in front; "" = always. */
-  onlyWith: string;
+  /** Only shown while one of these apps (exe names) or Lastshot is in front;
+   *  empty = over every app (but not over a full-screen one). */
+  showOver: string[];
+  /** The frame's own view (zoom, settings, a board's pictures). Only
+   *  `frames.list()` has it; change events leave it out (null). */
   view: unknown;
   owned: boolean;
   createdMs: number;
+  /** How many things the user put in it (a board's pictures); null = never reported. */
+  items?: number | null;
+  /** Short view flags for the Pop-outs panel ("gray", "grid", "flipH", "flipV"). */
+  badges?: string[];
+}
+
+/** A recently closed frame that owned files (kept 7 days). */
+export interface ClosedFrame {
+  key: string;
+  id: string;
+  kind: FrameKind;
+  title: string;
+  closedMs: number;
+  pictures: number;
 }
 
 export interface FramePatch {
@@ -37,7 +54,9 @@ export interface FramePatch {
   hidden?: boolean;
   view?: unknown;
   title?: string;
-  onlyWith?: string;
+  showOver?: string[];
+  items?: number;
+  badges?: string[];
 }
 
 export interface OpenFrame {
@@ -58,6 +77,8 @@ export interface Layout {
   frames: [string, number, number, number, number][];
   me: [number, number, number, number] | null;
   scale: number;
+  /** The cursor, physical px. */
+  cursor: [number, number] | null;
 }
 
 /** What an image/video frame remembers (stored in `Frame.view`). */
@@ -72,6 +93,9 @@ export interface FrameViewState {
 
 export const EVT_FRAMES = "lastshot://frames";
 export const EVT_PANEL = "lastshot://frames-panel";
+export const EVT_NOTICE = "lastshot://frames-notice";
+/** To one frame: Alt+F4 was pressed and the frame holds things, so it asks. */
+export const EVT_ASK_CLOSE = "lastshot://frame-ask-close";
 export const LABEL_PREFIX = "frame-";
 /** The Pop-outs panel drives a frame's view: `{ id, cmd }`. */
 export const EVT_CMD = "lastshot://frame-cmd";
@@ -95,8 +119,15 @@ export const frames = {
     invoke<void>("frame_set_rect", { id, x: Math.round(x), y: Math.round(y), w: Math.max(1, Math.round(w)), h: Math.max(1, Math.round(h)) }),
   fullscreen: (id: string, on?: boolean) => invoke<boolean>("frame_fullscreen", { id, on }),
   raise: (id: string) => invoke<void>("frame_raise", { id }),
-  close: (id: string) => invoke<void>("frame_close", { id }),
-  closeAll: () => invoke<void>("frame_close_all"),
+  /** False (and still open) when the frame holds things and `force` is not set: ask, then force. */
+  close: (id: string, force?: boolean) => invoke<boolean>("frame_close", { id, force }),
+  /** Without `force`, frames that hold things stay open (`kept`). */
+  closeAll: (force?: boolean) => invoke<{ closed: number; kept: number }>("frame_close_all", { force }),
+  /** Recently closed frames that owned files, newest first. */
+  closed: () => (inApp() ? invoke<ClosedFrame[]>("frame_closed") : Promise.resolve([] as ClosedFrame[])),
+  reopen: (key: string) => invoke<Frame>("frame_reopen", { key }),
+  /** The cursor in physical screen px. */
+  cursor: () => invoke<[number, number]>("frame_cursor"),
   clickThroughAll: (on?: boolean) => invoke<boolean>("frame_click_through_all", { on }),
   hideAll: (hidden?: boolean) => invoke<boolean>("frame_hide_all", { hidden }),
   layout: (id: string) => invoke<Layout>("frame_layout", { id }),
@@ -127,7 +158,53 @@ export const frames = {
     if (!t) return Promise.resolve(() => undefined);
     return t.event.listen<unknown>(EVT_PANEL, () => handler());
   },
+  onNotice(handler: (msg: string) => void): Promise<() => void> {
+    const t = window.__TAURI__;
+    if (!t) return Promise.resolve(() => undefined);
+    return t.event.listen<string>(EVT_NOTICE, (e) => handler(String(e.payload ?? "")));
+  },
+  /** Alt+F4 on this frame window while it holds things. */
+  onAskClose(handler: () => void): Promise<() => void> {
+    const t = window.__TAURI__;
+    if (!t) return Promise.resolve(() => undefined);
+    return t.event.listen<unknown>(EVT_ASK_CLOSE, () => handler());
+  },
 };
+
+// ---------------------------------------------------------------- saving before a close
+
+const flushers = new Set<() => Promise<unknown> | void>();
+
+/** A frame body's "save now" (its view waits a moment before saving). */
+export function onFlush(f: () => Promise<unknown> | void): () => void {
+  flushers.add(f);
+  return () => void flushers.delete(f);
+}
+
+/** Saves every pending view change of this window now. */
+export async function flushAll(): Promise<void> {
+  await Promise.all([...flushers].map((f) => Promise.resolve().then(f).catch(() => undefined)));
+}
+
+/** Saves, then closes; false when the frame holds things and must ask first. */
+export async function closeFrame(id: string, force = false): Promise<boolean> {
+  await flushAll();
+  return frames.close(id, force);
+}
+
+// ---------------------------------------------------------------- echoes
+
+/** How long a local change wins over values coming back from the app. */
+export const ECHO_MS = 600;
+
+/**
+ * A slider sends its value, and the change comes back to every window a
+ * moment later. Values that arrive within `ECHO_MS` of the latest local
+ * change are older echoes (or the same value): the local value stays.
+ */
+export function pickEcho<T>(local: T, remote: T, localAt: number, now: number, ms = ECHO_MS): T {
+  return now - localAt < ms ? local : remote;
+}
 
 /** The frame id of this window (`frame-<id>`), or `?frame=<id>` in a browser. */
 export function frameIdOf(label: string | null, search: string): string | null {
@@ -183,6 +260,49 @@ export async function popOutCanvas(
   return frames.open({ kind: "image", data, title, width: c.width, height: c.height, view, x: at?.x, y: at?.y });
 }
 
+/** The badges for an image/video frame's view (see `viewFlags`). */
+export function badgesOf(st: FrameViewState): string[] {
+  const b: string[] = [];
+  if ((st.s?.adjust?.grayscale ?? 0) >= 0.5) b.push("gray");
+  if (st.s?.grid && st.s.grid.kind !== "off") b.push("grid");
+  if (st.v?.flipH) b.push("flipH");
+  if (st.v?.flipV) b.push("flipV");
+  return b;
+}
+
+/** More pictures than this at once ask before opening that many windows. */
+export const MANY_FRAMES = 8;
+
+/**
+ * Pops out several pictures (files or paths). Above `MANY_FRAMES` it asks
+ * first (`ask` returns false: nothing opens). Every failure is reported
+ * through `onError`; returns how many opened.
+ */
+export async function popOutMany<T>(
+  items: T[],
+  open: (item: T) => Promise<unknown>,
+  ask: (n: number) => boolean | Promise<boolean>,
+  onError: (msg: string) => void,
+): Promise<number> {
+  if (!items.length) return 0;
+  if (items.length > MANY_FRAMES && !(await ask(items.length))) return 0;
+  let ok = 0;
+  const errors: string[] = [];
+  for (const it of items) {
+    try {
+      await open(it);
+      ok++;
+    } catch (e) {
+      errors.push(e instanceof Error ? e.message : String(e));
+    }
+  }
+  if (errors.length) {
+    const first = errors[0];
+    onError(errors.length === 1 ? first : `${errors.length} of ${items.length} pictures did not open. First: ${first}`);
+  }
+  return ok;
+}
+
 /** Pops out a picture file that is already on disk (a drop from Explorer). */
 export function popOutPicturePath(path: string): Promise<Frame> {
   return frames.open({ kind: "image", path });
@@ -192,6 +312,10 @@ export const PICTURE_FILE = /\.(png|jpe?g|gif|webp|bmp)$/i;
 
 /** Settings that show what the panel's toggles mean for this frame. */
 export function viewFlags(f: Frame): { gray: boolean; grid: boolean; flipH: boolean; flipV: boolean; zoom: number | null } {
+  if (f.badges) {
+    const b = new Set(f.badges);
+    return { gray: b.has("gray"), grid: b.has("grid"), flipH: b.has("flipH"), flipV: b.has("flipV"), zoom: null };
+  }
   const st = (f.view ?? {}) as FrameViewState;
   return {
     gray: (st.s?.adjust?.grayscale ?? 0) >= 0.5,

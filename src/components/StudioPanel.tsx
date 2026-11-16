@@ -8,6 +8,7 @@ import { clockTime } from "./ControlBar";
 import { cn } from "../utils/cn";
 import SourcePicker, { sourceLabel } from "./SourcePicker";
 import AppAudioPicker from "./AppAudioPicker";
+import PresetOrCustom from "./PresetOrCustom";
 
 /**
  * Studio: recording with layers on top, OBS-style. Pictures, text, a webcam,
@@ -593,13 +594,19 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
             </label>
             <label className="block space-y-1">
               <span className="text-ink-3">Frame rate</span>
-              <select value={settings.targetFps} onChange={(e) => onPatch({ targetFps: Number(e.target.value) })} className="w-full rounded-md border border-line bg-surface-2 px-2 py-1 text-ink">
-                {[30, 60, 120].map((f) => (
-                  <option key={f} value={f}>
-                    {f} fps
-                  </option>
-                ))}
-              </select>
+              <PresetOrCustom
+                wide
+                value={settings.targetFps}
+                presets={[30, 60, 120].map((f) => ({ value: f, label: `${f} fps` }))}
+                min={24}
+                max={240}
+                step={1}
+                unit="fps"
+                onChange={(v) => onPatch({ targetFps: v })}
+                aria-label="Frame rate"
+                className="min-w-0 flex-1 rounded-md border border-line bg-surface-2 px-2 py-1 text-ink"
+                fieldClassName="w-14 rounded-md border border-line bg-surface-2 px-2 py-1 text-right font-mono text-ink"
+              />
             </label>
             <label className="flex items-center gap-2" title={rec ? "Stop the recording to change this" : undefined}>
               <input type="checkbox" checked={settings.captureCursor !== false} disabled={!!rec} onChange={(e) => onPatch({ captureCursor: e.target.checked })} /> Mouse pointer

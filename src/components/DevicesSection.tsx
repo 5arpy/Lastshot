@@ -26,6 +26,7 @@ import {
   type SnapshotMeta,
 } from "../lib/devices";
 import { cn } from "../utils/cn";
+import PresetOrCustom from "./PresetOrCustom";
 
 /**
  * Audio → Devices: Lastshot in place of Windows' sound settings. Default
@@ -436,13 +437,20 @@ function DuckBox({ s, onSave }: { s: GuardSettings; onSave: (s: GuardSettings, o
           </label>
           <label className="flex items-center gap-2" title="How long after you stop talking the apps come back">
             Back after
-            <select value={d.releaseMs} onChange={(e) => set({ releaseMs: Number(e.target.value) })} className="rounded border border-line bg-surface-2 px-1.5 py-0.5 text-ink">
-              {[300, 500, 800, 1200, 2000, 3000].map((ms) => (
-                <option key={ms} value={ms}>
-                  {ms / 1000} s
-                </option>
-              ))}
-            </select>
+            <PresetOrCustom
+              value={d.releaseMs}
+              presets={[300, 500, 800, 1200, 2000, 3000].map((ms) => ({ value: ms, label: `${ms / 1000} s` }))}
+              min={0.1}
+              max={5}
+              step={0.1}
+              scale={1000}
+              digits={1}
+              unit="s"
+              onChange={(ms) => set({ releaseMs: ms })}
+              aria-label="Back after"
+              className="rounded border border-line bg-surface-2 px-1.5 py-0.5 text-ink"
+              fieldClassName="w-12 rounded border border-line bg-surface-2 px-1.5 py-0.5 text-right font-mono text-ink"
+            />
           </label>
           <span className="text-[11px] text-ink-4">Apps set to “Never lower” (Apps tab) are left alone. Lastshot reads the mic level, it doesn't record it.</span>
         </div>

@@ -16,8 +16,23 @@ import { Btn, Icon } from "../viewer/ui";
 import { actualView, fitView, flipScreenH, flipScreenV, zoomAt, type View } from "../viewer/math";
 import { naturalSize } from "../viewer/render";
 import { assetUrl } from "../lib/bridge";
+import NumberField from "../components/NumberField";
 import { cn } from "../utils/cn";
-import { frames, isPictureType, popOutPicture, type Frame, type FrameCmd, type FrameViewState, type Layout } from "./frames";
+import {
+  badgesOf,
+  closeFrame,
+  frames,
+  isPictureType,
+  MANY_FRAMES,
+  onFlush,
+  pickEcho,
+  popOutMany,
+  popOutPicture,
+  type Frame,
+  type FrameCmd,
+  type FrameViewState,
+  type Layout,
+} from "./frames";
 import { dragRect, snapRect, snapTargets, type Edge, type R } from "./snap";
 
 const SNAP_PX = 10;
@@ -33,16 +48,27 @@ export const FI = {
   panel: "M2 3h12v10H2zM2 6h12M5 9h6",
 };
 
+/** A yes/no question shown inside the frame window (frames have no dialogs). */
+export interface Ask {
+  text: string;
+  yes: string;
+  onYes: () => void;
+}
+
 export default function FrameWindow({ id }: { id: string }) {
   const [frame, setFrame] = useState<Frame | null>(null);
   const [gone, setGone] = useState(false);
   const [status, setStatus] = useState("");
+  const [ask, setAsk] = useState<Ask | null>(null);
   const statusTimer = useRef(0);
   const say = useCallback((msg: string) => {
     setStatus(msg);
     window.clearTimeout(statusTimer.current);
-    statusTimer.current = window.setTimeout(() => setStatus(""), 2200);
+    statusTimer.current = window.setTimeout(() => setStatus(""), msg.length > 60 ? 5000 : 2200);
   }, []);
+  // When the opacity was last changed here: older values echoed back by the
+  // app do not move the slider back.
+  const opacityAt = useRef(0);
 
   // A see-through window: no page background.
   useEffect(() => {
@@ -58,7 +84,12 @@ export default function FrameWindow({ id }: { id: string }) {
       const files = Array.from(e.dataTransfer?.files ?? []);
       if (!files.length) return;
       e.preventDefault();
-      for (const f of files) if (isPictureType(f.type)) void popOutPicture(f).catch(() => undefined);
+      const pics = files.filter((f) => isPictureType(f.type));
+      if (!pics.length) return say("Only pictures (PNG, JPG, GIF, WebP, BMP) pop out as frames");
+      const open = () => void popOutMany(pics, (f) => popOutPicture(f), () => true, say);
+      if (pics.length > MANY_FRAMES)
+        setAsk({ text: `Pop out ${pics.length} pictures? Each opens a frame of its own.`, yes: `Open ${pics.length}`, onYes: open });
+      else open();
     };
     window.addEventListener("dragover", over);
     window.addEventListener("drop", drop);
@@ -66,7 +97,7 @@ export default function FrameWindow({ id }: { id: string }) {
       window.removeEventListener("dragover", over);
       window.removeEventListener("drop", drop);
     };
-  }, []);
+  }, [say]);
 
   useEffect(() => {
     let off: (() => void) | undefined;
@@ -79,8 +110,13 @@ export default function FrameWindow({ id }: { id: string }) {
     });
     void frames
       .onChange((l) => {
+        // Change events carry no views: only update a frame that has loaded
+        // its own (a board must never start from an empty view).
         const f = l.find((x) => x.id === id);
-        if (f) setFrame((old) => (old ? { ...f, view: old.view } : f));
+        if (f)
+          setFrame((old) =>
+            old ? { ...f, view: old.view, opacity: pickEcho(old.opacity, f.opacity, opacityAt.current, Date.now()) } : old,
+          );
       })
       .then((u) => (alive ? (off = u) : u()));
     return () => {
@@ -95,7 +131,61 @@ export default function FrameWindow({ id }: { id: string }) {
 
   if (gone) return <div className="grid h-screen place-items-center bg-black/70 text-[12px] text-white/70">This frame is closed.</div>;
   if (!frame) return null;
-  return <FrameChrome frame={frame} setFrame={setFrame} status={status} say={say} />;
+  return (
+    <>
+      <FrameChrome
+        frame={frame}
+        setFrame={setFrame}
+        status={status}
+        say={say}
+        setAsk={setAsk}
+        markOpacity={() => (opacityAt.current = Date.now())}
+      />
+      {ask && <AskBox ask={ask} onDone={() => setAsk(null)} />}
+    </>
+  );
+}
+
+function AskBox({ ask, onDone }: { ask: Ask; onDone: () => void }) {
+  useEffect(() => {
+    const k = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" && e.key !== "Enter") return;
+      e.preventDefault();
+      e.stopPropagation();
+      onDone();
+      if (e.key === "Enter") ask.onYes();
+    };
+    window.addEventListener("keydown", k, true);
+    return () => window.removeEventListener("keydown", k, true);
+  }, [ask, onDone]);
+  return (
+    <div
+      className="absolute inset-0 z-[60] grid place-items-center bg-black/55 p-3"
+      data-testid="frame-ask"
+      onPointerDown={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+    >
+      <div className="max-w-[340px] rounded-lg border border-white/15 bg-[#14161c] p-3 text-[12px] text-white/85 shadow-2xl">
+        <p className="leading-relaxed">{ask.text}</p>
+        <div className="mt-3 flex justify-end gap-1.5">
+          <button type="button" className="rounded px-2.5 py-1 text-white/70 hover:bg-white/10 hover:text-white" onClick={onDone}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            data-testid="frame-ask-yes"
+            className="rounded bg-red-500/80 px-2.5 py-1 font-semibold text-white hover:bg-red-500"
+            onClick={() => {
+              onDone();
+              ask.onYes();
+            }}
+          >
+            {ask.yes}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function FrameChrome({
@@ -103,13 +193,24 @@ function FrameChrome({
   setFrame,
   status,
   say,
+  setAsk,
+  markOpacity,
 }: {
   frame: Frame;
   setFrame: (f: Frame) => void;
   status: string;
   say: (m: string) => void;
+  setAsk: (a: Ask | null) => void;
+  markOpacity: () => void;
 }) {
   const id = frame.id;
+  // Picture and clip frames never take the keyboard (the app you trace in
+  // keeps it); a board does once clicked, so only boards have keys.
+  const takesKeys = frame.kind === "board";
+  // The click-through shortcut, as set in the Pop-outs panel.
+  const [hotkey, setHotkey] = useState("");
+  const loadHotkey = useCallback(() => void frames.getHotkey().then(setHotkey, () => undefined), []);
+  useEffect(loadHotkey, [loadHotkey]);
   const [full, setFull] = useState(false);
   const [awake, setAwake] = useState(true);
   const [overBar, setOverBar] = useState(false);
@@ -128,64 +229,129 @@ function FrameChrome({
 
   const patch = useCallback(
     (p: Partial<Pick<Frame, "opacity" | "onTop" | "clickThrough" | "hidden">>) => {
+      if (p.opacity !== undefined) markOpacity();
       setFrame({ ...frame, ...p });
       void frames.update(id, p).catch((e) => say(String(e)));
     },
-    [frame, id, say, setFrame],
+    [frame, id, markOpacity, say, setFrame],
   );
 
   const toggleFull = useCallback(() => {
     void frames.fullscreen(id).then(setFull);
   }, [id]);
-  const close = useCallback(() => void frames.close(id), [id]);
+  // A frame holding things (a board's pictures) asks first; what it owned
+  // goes to "Recently closed" in the Pop-outs panel for 7 days.
+  const items = frame.items ?? 0;
+  const askClose = useCallback(() => {
+    const what = items ? ` with its ${items} picture${items === 1 ? "" : "s"}` : "";
+    setAsk({
+      text: `Close “${frame.title}”${what}? You can reopen it for 7 days from Recently closed in Lastshot's Pop-outs panel.`,
+      yes: "Close",
+      onYes: () => void closeFrame(id, true).catch((e) => say(String(e))),
+    });
+  }, [frame.title, id, items, say, setAsk]);
+  const close = useCallback(() => {
+    void closeFrame(id)
+      .then((closed) => {
+        if (!closed) askClose();
+      })
+      .catch((e) => say(String(e)));
+  }, [askClose, id, say]);
+  useEffect(() => {
+    let off: (() => void) | undefined;
+    let alive = true;
+    void frames.onAskClose(askClose).then((u) => (alive ? (off = u) : u()));
+    return () => {
+      alive = false;
+      off?.();
+    };
+  }, [askClose]);
 
   // ---------------------------------------------------------------- moving / resizing
-  const drag = useRef<{ edge: Edge; sx: number; sy: number; start: R; layout: Layout; aspect: number } | null>(null);
-  const pending = useRef<R | null>(null);
+  // The frame follows the cursor's physical position (asked from the app), so
+  // a move onto a monitor with other scaling does not jump.
+  const drag = useRef<{ edge: Edge; pointer: number; cx: number; cy: number; start: R; layout: Layout; aspect: number } | null>(null);
+  const dragToken = useRef(0);
+  const mods = useRef({ shift: false, alt: false });
   const raf = useRef(0);
-  const flush = useCallback(() => {
-    raf.current = 0;
-    const r = pending.current;
-    if (r) void frames.setRect(id, r.x, r.y, r.w, r.h);
+  const stepping = useRef(false);
+  const again = useRef(false);
+  const step = useCallback(async () => {
+    if (stepping.current) {
+      again.current = true;
+      return;
+    }
+    stepping.current = true;
+    try {
+      do {
+        again.current = false;
+        const d = drag.current;
+        if (!d) break;
+        const c = await frames.cursor().catch(() => null);
+        if (!c || drag.current !== d) break;
+        let r = dragRect(d.start, d.edge, c[0] - d.cx, c[1] - d.cy, { aspect: mods.current.shift ? null : d.aspect });
+        if (!mods.current.alt) {
+          const others = d.layout.frames.map(([, x, y, w, h]) => ({ x, y, w, h }));
+          r = snapRect(r, d.edge, snapTargets(d.layout.screens, others), SNAP_PX * (d.layout.scale || 1));
+        }
+        await frames.setRect(id, r.x, r.y, r.w, r.h).catch(() => undefined);
+      } while (again.current);
+    } finally {
+      stepping.current = false;
+    }
   }, [id]);
+  const endDrag = useCallback((e?: React.PointerEvent) => {
+    if (e && drag.current && e.pointerId !== drag.current.pointer) return;
+    dragToken.current++;
+    drag.current = null;
+    if (e && e.type !== "lostpointercapture") {
+      const el = e.currentTarget as HTMLElement;
+      if (el.hasPointerCapture?.(e.pointerId)) el.releasePointerCapture(e.pointerId);
+    }
+  }, []);
   const startDrag = useCallback(
     (edge: Edge) => (e: React.PointerEvent) => {
       if (e.button !== 0 || full) return;
       e.preventDefault();
       e.stopPropagation();
       const el = e.currentTarget as HTMLElement;
-      el.setPointerCapture(e.pointerId);
-      const sx = e.screenX;
-      const sy = e.screenY;
-      void frames.layout(id).then((layout) => {
-        const dpr = layout.scale || window.devicePixelRatio || 1;
-        const me = layout.me ?? [frame.x, frame.y, frame.w, frame.h];
-        const start = { x: me[0], y: me[1], w: me[2], h: me[3] };
-        drag.current = { edge, sx: sx * dpr, sy: sy * dpr, start, layout, aspect: start.w / Math.max(1, start.h) };
-      });
+      const pointer = e.pointerId;
+      el.setPointerCapture(pointer);
+      const token = ++dragToken.current;
+      mods.current = { shift: e.shiftKey, alt: e.altKey };
+      // Where the cursor is inside the window (CSS px). The window does not
+      // move before the drag starts, so this gives the physical start point.
+      const ox = e.clientX;
+      const oy = e.clientY;
+      void frames.layout(id).then(
+        (layout) => {
+          // A quick click may be over already: never start a drag after the button is up.
+          if (token !== dragToken.current || !el.hasPointerCapture(pointer)) return;
+          const scale = layout.scale || window.devicePixelRatio || 1;
+          const me = layout.me ?? [frame.x, frame.y, frame.w, frame.h];
+          const start = { x: me[0], y: me[1], w: me[2], h: me[3] };
+          drag.current = { edge, pointer, cx: me[0] + ox * scale, cy: me[1] + oy * scale, start, layout, aspect: start.w / Math.max(1, start.h) };
+        },
+        () => undefined,
+      );
     },
-    [frame, full, id],
+    [frame.x, frame.y, frame.w, frame.h, full, id],
   );
   const onDragMove = useCallback(
     (e: React.PointerEvent) => {
       const d = drag.current;
-      if (!d) return;
-      const dpr = d.layout.scale || window.devicePixelRatio || 1;
-      const dx = e.screenX * dpr - d.sx;
-      const dy = e.screenY * dpr - d.sy;
-      let r = dragRect(d.start, d.edge, dx, dy, { aspect: e.shiftKey ? null : d.aspect });
-      if (!e.altKey) {
-        const others = d.layout.frames.map(([, x, y, w, h]) => ({ x, y, w, h }));
-        r = snapRect(r, d.edge, snapTargets(d.layout.screens, others), SNAP_PX * dpr);
-      }
-      pending.current = r;
-      if (!raf.current) raf.current = requestAnimationFrame(flush);
+      if (!d || e.pointerId !== d.pointer) return;
+      // The button came up where we did not hear about it.
+      if (e.buttons === 0) return endDrag(e);
+      mods.current = { shift: e.shiftKey, alt: e.altKey };
+      if (!raf.current)
+        raf.current = requestAnimationFrame(() => {
+          raf.current = 0;
+          void step();
+        });
     },
-    [flush],
+    [endDrag, step],
   );
-  const endDrag = useCallback(() => {
-    drag.current = null;
-  }, []);
   const handle = (edge: Edge, cls: string) => (
     <div
       key={edge}
@@ -193,13 +359,17 @@ function FrameChrome({
       onPointerMove={onDragMove}
       onPointerUp={endDrag}
       onPointerCancel={endDrag}
+      onLostPointerCapture={endDrag}
       style={{ cursor: `${edge}-resize` }}
       className={cn("absolute z-40", cls)}
     />
   );
 
   // ---------------------------------------------------------------- keys and wheel
+  // Only frames that take the keyboard (boards) have keys; the bar's
+  // tooltips name them there.
   useEffect(() => {
+    if (!takesKeys) return;
     const key = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
@@ -218,7 +388,8 @@ function FrameChrome({
     };
     window.addEventListener("keydown", key, true);
     return () => window.removeEventListener("keydown", key, true);
-  }, [close, frame.onTop, full, id, patch, toggleFull]);
+  }, [close, frame.onTop, full, id, patch, takesKeys, toggleFull]);
+  const k = (key: string) => (takesKeys ? ` (${key})` : "");
 
   const opacityRef = useRef(frame.opacity);
   opacityRef.current = frame.opacity;
@@ -276,7 +447,10 @@ function FrameChrome({
 
       {/* Move bar. */}
       <div
-        onPointerEnter={() => setOverBar(true)}
+        onPointerEnter={() => {
+          setOverBar(true);
+          loadHotkey();
+        }}
         onPointerLeave={() => setOverBar(false)}
         className={cn(
           "absolute inset-x-0 top-0 z-50 transition-opacity duration-150",
@@ -290,6 +464,7 @@ function FrameChrome({
             onPointerMove={onDragMove}
             onPointerUp={endDrag}
             onPointerCancel={endDrag}
+            onLostPointerCapture={endDrag}
             onDoubleClick={toggleFull}
             title="Drag to move (snaps to screen edges and other frames; hold Alt to stop snapping). Double-click: full screen."
             className="flex h-full min-w-0 flex-1 cursor-move items-center gap-1.5 px-1.5"
@@ -315,19 +490,45 @@ function FrameChrome({
               className="h-1 w-20 accent-[#7d8ff0]"
               aria-label="Opacity"
             />
-            <span className="w-8 text-right font-mono text-[10px] text-white/70">{Math.round(frame.opacity * 100)}%</span>
+            {takesKeys ? (
+              // A frame that takes the keyboard: type any value (Enter sets it).
+              <>
+                <NumberField
+                  value={Math.round(frame.opacity * 100)}
+                  min={5}
+                  max={100}
+                  step={1}
+                  digits={0}
+                  onChange={(v) => patch({ opacity: Math.round(v) / 100 })}
+                  aria-label="Opacity, percent"
+                  title="Type any opacity from 5 to 100 %"
+                  testid="frame-opacity"
+                  className="w-7 rounded border border-transparent bg-transparent px-0.5 text-right font-mono text-[10px] text-white/80 hover:border-white/20 focus:border-white/30 focus:bg-black/40 focus:outline-none"
+                />
+                <span className="-ml-1 font-mono text-[10px] text-white/60">%</span>
+              </>
+            ) : (
+              // Picture and clip frames never take the keyboard: exact values are typed in the Pop-outs panel.
+              <span className="w-8 text-right font-mono text-[10px] text-white/70" title="Type an exact value in Lastshot's Pop-outs panel">
+                {Math.round(frame.opacity * 100)}%
+              </span>
+            )}
           </label>
-          <Btn title="Always on top" on={frame.onTop} onClick={() => patch({ onTop: !frame.onTop })}>
+          <Btn title={`Always on top${k("T")}`} on={frame.onTop} onClick={() => patch({ onTop: !frame.onTop })}>
             <Icon d={FI.pin} />
           </Btn>
           <Btn
-            title="Click-through: clicks go to the app below and this frame cannot be clicked. Turn it off from the Pop-outs panel in Lastshot, the tray menu, or Ctrl+Alt+Shift+X."
+            title={`Click-through${k("X")}: clicks go to the app below and this frame cannot be clicked. Turn it off from the Pop-outs panel in Lastshot, the tray menu${hotkey ? `, or ${hotkey}` : ""}.`}
             on={frame.clickThrough}
             onClick={() => patch({ clickThrough: true })}
           >
             <Icon d={FI.through} />
           </Btn>
-          <Btn title={full ? "Leave full screen (double-click the bar)" : "Full screen (or double-click the bar)"} on={full} onClick={toggleFull}>
+          <Btn
+            title={full ? `Leave full screen (double-click the bar${takesKeys ? " or Esc" : ""})` : `Full screen${k("F")}, or double-click the bar`}
+            on={full}
+            onClick={toggleFull}
+          >
             <Icon d={FI.full} />
           </Btn>
           <Btn title="Show the Pop-outs panel in Lastshot" onClick={() => void frames.showPanel()}>
@@ -336,7 +537,7 @@ function FrameChrome({
           <Btn title="Hide (bring it back from the Pop-outs panel or the tray)" onClick={() => patch({ hidden: true })}>
             <Icon d={FI.hide} />
           </Btn>
-          <Btn title="Close" onClick={close} className="hover:bg-red-500/70">
+          <Btn title={`Close${k("Ctrl+W")}`} onClick={close} className="hover:bg-red-500/70">
             <Icon d={FI.close} />
           </Btn>
         </div>
@@ -373,14 +574,36 @@ function MediaBody({ frame, say, onFullscreen }: { frame: Frame; say: (m: string
   const [error, setError] = useState("");
   const state = useRef<FrameViewState>({ ...saved, s: settings });
   const saveTimer = useRef(0);
+  const dirty = useRef(false);
+  // Saves the view (and the panel's badges) now, if anything waits.
+  const saveNow = useCallback(() => {
+    window.clearTimeout(saveTimer.current);
+    if (!dirty.current) return Promise.resolve();
+    dirty.current = false;
+    return frames.update(frame.id, { view: state.current, badges: badgesOf(state.current) }).catch(() => undefined);
+  }, [frame.id]);
   const save = useCallback(
     (p: Partial<FrameViewState>) => {
       state.current = { ...state.current, ...p };
+      dirty.current = true;
       window.clearTimeout(saveTimer.current);
-      saveTimer.current = window.setTimeout(() => void frames.update(frame.id, { view: state.current }).catch(() => undefined), 700);
+      saveTimer.current = window.setTimeout(() => void saveNow(), 700);
     },
-    [frame.id],
+    [saveNow],
   );
+  // Before the frame closes or the page goes away, nothing waits.
+  useEffect(() => {
+    const off = onFlush(saveNow);
+    const gone = () => void saveNow();
+    window.addEventListener("pagehide", gone);
+    window.addEventListener("beforeunload", gone);
+    return () => {
+      off();
+      window.removeEventListener("pagehide", gone);
+      window.removeEventListener("beforeunload", gone);
+      void saveNow();
+    };
+  }, [saveNow]);
   const url = useMemo(() => assetUrl(frame.src) || frame.src, [frame.src]);
 
   // The Pop-outs panel in the main window drives the view (a click-through

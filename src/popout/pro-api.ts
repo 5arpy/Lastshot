@@ -7,7 +7,7 @@
  * and builds fine when `src/pro/` is missing. Both export a `ProModule`.
  */
 import type { ComponentType } from "react";
-import type { Frame } from "./frames";
+import type { Frame, FrameCmd } from "./frames";
 
 export interface FrameBodyProps {
   frame: Frame;
@@ -35,6 +35,8 @@ export interface ProModule {
   FrameBody: ComponentType<FrameBodyProps> | null;
   /** Extra buttons in the Pop-outs panel ("New reference board", …). */
   panelActions: ProAction[];
+  /** The Pop-outs panel's view buttons a Pro frame kind handles (by kind). */
+  frameCommands?: Partial<Record<string, FrameCmd[]>>;
   /** Extra sections at the end of the Audio tab, in this order. */
   audioSections: ComponentType<AudioSectionProps>[];
 }

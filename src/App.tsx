@@ -6,7 +6,10 @@ import FolderSidebar, { matchesFolder } from "./components/FolderSidebar";
 import ClipTrimmerModal from "./components/ClipTrimmerModal";
 import ClipsExplorer from "./components/ClipsExplorer";
 import FramesPanel from "./popout/FramesPanel";
-import { PICTURE_FILE, frames as popFrames, isPictureType, popOutClip, popOutPicture, popOutPicturePath } from "./popout/frames";
+import { PICTURE_FILE, frames as popFrames, isPictureType, popOutClip, popOutMany, popOutPicture, popOutPicturePath } from "./popout/frames";
+
+/** Many dropped pictures would open that many windows: ask first. */
+const askManyFrames = (n: number) => window.confirm(`Pop out ${n} pictures? Each opens a frame of its own.`);
 import type { Loc as ExplorerLoc } from "./lib/explorer";
 import { isInside as pathInside, samePath as pathSame } from "./lib/explorer";
 import PipelinePanel from "./components/PipelinePanel";
@@ -448,7 +451,7 @@ export default function App() {
           // Pictures dropped anywhere else pop out as frames.
           const pics = paths.filter((p) => PICTURE_FILE.test(p));
           if (pics.length) {
-            for (const p of pics) void popOutPicturePath(p).catch((e) => pushToast("err", "Could not pop out the picture", String(e)));
+            void popOutMany(pics, popOutPicturePath, askManyFrames, (m) => pushToast("err", "Could not pop out the picture", m));
             return;
           }
           const video = paths.find((p) => /\.(mp4|mov|m4v)$/i.test(p));
@@ -1854,7 +1857,7 @@ export default function App() {
         pushToast("warn", "Not a picture", "Drop PNG, JPG, GIF, WebP or BMP pictures to pop them out. Open videos from Clips or with Open with Lastshot.");
         return;
       }
-      for (const f of pics) void popOutPicture(f).catch((err) => pushToast("err", "Could not pop out the picture", String(err)));
+      void popOutMany(pics, (f) => popOutPicture(f), askManyFrames, (m) => pushToast("err", "Could not pop out the picture", m));
     };
     window.addEventListener("dragover", over);
     window.addEventListener("drop", drop);

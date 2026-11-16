@@ -4,6 +4,7 @@
 //! Tauri v2 application setup: tray icon, global shortcuts, the stats
 //! heartbeat and the IPC surface.
 
+pub mod audio_routing;
 pub mod clipmeta;
 pub mod files;
 pub mod commands;
@@ -89,6 +90,10 @@ pub fn run() {
             std::thread::spawn(paths::cleanup_share_temp);
 
             build_tray(&handle)?;
+
+            // Audio tab: remembered "this app plays on that output" choices
+            // are set again whenever the app starts.
+            audio_routing::start_watcher(&handle);
 
             if let Some(path) = files::video_arg(&std::env::args().collect::<Vec<_>>()) {
                 files::request_open(&handle, path);
@@ -337,6 +342,14 @@ pub fn run() {
             studio::sync_layers,
             snip::snip_cancel,
             snip::open_screenshots_folder,
+            audio_routing::vm_status,
+            audio_routing::vm_levels,
+            audio_routing::vm_set,
+            audio_routing::vm_launch,
+            audio_routing::list_render_devices,
+            audio_routing::list_audio_apps,
+            audio_routing::get_app_output,
+            audio_routing::set_app_output,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Lastshot")
@@ -345,6 +358,9 @@ pub fn run() {
                 if let Some(state) = app.try_state::<AppState>() {
                     state.engine.stop();
                 }
+            }
+            if let tauri::RunEvent::Exit = event {
+                audio_routing::voicemeeter::shutdown();
             }
         });
 }
@@ -485,6 +501,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 if let Some(state) = app.try_state::<AppState>() {
                     state.engine.stop();
                 }
+                audio_routing::voicemeeter::shutdown();
                 std::process::exit(0);
             }
             _ => {}

@@ -92,6 +92,10 @@ features = [
     "Win32_Graphics_Direct3D_Fxc",
     # COM callbacks (per-app sound activation).
     "implement",
+    # Audio tab: Voicemeeter's Remote DLL (loaded from its install folder)
+    # and its install path in the registry.
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
 ]
 
 [target.'cfg(windows)'.dependencies]

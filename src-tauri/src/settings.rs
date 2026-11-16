@@ -168,6 +168,10 @@ pub struct Settings {
     /// Hides folder paths in the window (for streaming / screen sharing).
     #[serde(default)]
     pub streamer_mode: bool,
+    /// Audio tab: apps sent to their own output device, set again whenever
+    /// the app starts.
+    #[serde(default)]
+    pub app_outputs: Vec<crate::audio_routing::AppOutputRule>,
 }
 
 fn default_share_mb() -> f32 {
@@ -298,6 +302,7 @@ impl Default for Settings {
             screenshot_copy: true,
             recording_dir: String::new(),
             streamer_mode: false,
+            app_outputs: Vec::new(),
         }
     }
 }

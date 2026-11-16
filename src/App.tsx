@@ -38,6 +38,7 @@ import type { CaptureSource,
   UpdateProgress,
 } from "./lib/types";
 import { cn } from "./utils/cn";
+import AudioPanel from "./components/AudioPanel";
 import { screenshotsDir, setStreamerMode, shownPath } from "./lib/pathDisplay";
 
 const APP_VERSION = "1.9.0";
@@ -121,7 +122,7 @@ export default function App() {
   const [clips, setClips] = useState<ClipMetadata[]>([]);
   const [loadingClips, setLoadingClips] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [tab, setTab] = useState<"home" | "clips" | "editor" | "studio" | "settings">("home");
+  const [tab, setTab] = useState<"home" | "clips" | "editor" | "studio" | "audio" | "settings">("home");
   // Files handed to the Editor (drag & drop on its tab, "Open in Editor").
   const [editorIncoming, setEditorIncoming] = useState<{ paths: string[]; seq: number } | null>(null);
   const tabRef = useRef(tab);
@@ -1746,6 +1747,7 @@ export default function App() {
             { id: "clips" as const, label: "Clips", count: clips.length },
             { id: "editor" as const, label: "Editor" },
             { id: "studio" as const, label: "Studio" },
+            { id: "audio" as const, label: "Audio" },
             { id: "settings" as const, label: "Settings" },
           ].map((item) => (
             <button
@@ -2452,6 +2454,11 @@ export default function App() {
               onToast={pushToast}
               onRendered={(c) => setClips((prev) => [c, ...prev.filter((x) => x.path !== c.path)])}
             />
+          </div>
+        ) : tab === "audio" ? (
+          /* ================================================== AUDIO */
+          <div className="mx-auto max-w-[1440px] p-5">
+            <AudioPanel active={tab === "audio"} onToast={pushToast} />
           </div>
         ) : tab === "studio" ? (
           /* ================================================== STUDIO */

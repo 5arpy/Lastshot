@@ -54,6 +54,24 @@ export const fs = {
 type WebviewBridge = { postMessageWithAdditionalObjects?: (msg: string, objs: unknown) => void };
 
 /**
+ * Tauri's own IPC also reads every web message and logs "JSON error: …" for
+ * ours (it is not an IPC call). Hide exactly that line for a moment after
+ * each drop message, so real errors stay visible. Exported for tests.
+ */
+let muteUntil = 0;
+let filtering = false;
+export function muteIpcNoise(now = Date.now(), con: Pick<Console, "error"> = console): void {
+  muteUntil = now + 2000;
+  if (filtering) return;
+  filtering = true;
+  const real = con.error.bind(con);
+  con.error = (...args: unknown[]) => {
+    if (Date.now() < muteUntil && args.length === 1 && typeof args[0] === "string" && args[0].startsWith("JSON error:")) return;
+    real(...args);
+  };
+}
+
+/**
  * The real paths of files and folders dropped on the page (an HTML `File`
  * has none). Empty when the window cannot tell (a browser, an old WebView2).
  */
@@ -83,6 +101,7 @@ export function droppedPaths(dt: DataTransfer | null): Promise<DroppedItem[]> {
         off = u;
         if (done) u();
         try {
+          muteIpcNoise();
           wv.postMessageWithAdditionalObjects?.(DROP_MESSAGE + id, files);
         } catch {
           window.clearTimeout(timer);

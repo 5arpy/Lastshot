@@ -533,24 +533,73 @@ fn open_drawing(app: &AppHandle, rect: (i32, i32, u32, u32, String)) -> tauri::R
     Ok(())
 }
 
-/// Keeps a helper window (control bar, snip overlay) out of Alt+Tab and the
-/// taskbar, so switching away from Lastshot never lands on it.
+/// Keeps a helper window (control bar, snip overlay, frames) out of Alt+Tab
+/// and the taskbar, so switching away from Lastshot never lands on it.
+///
+/// tao gives every window without an owner WS_EX_APPWINDOW and writes the
+/// whole extended style again whenever the window is shown, hidden, put on
+/// top or made click-through, which used to undo a one-off change: a shown
+/// helper window (or a frame, which never had it) was an Alt+Tab target that
+/// cannot be seen or take the focus, so the first Alt+Tab seemed to do
+/// nothing. A window subclass now keeps WS_EX_TOOLWINDOW on and
+/// WS_EX_APPWINDOW off through every later style change.
 pub fn hide_from_alt_tab(win: &tauri::WebviewWindow) {
     #[cfg(windows)]
     if let Ok(hwnd) = win.hwnd() {
-        use windows::Win32::Foundation::HWND;
-        use windows::Win32::UI::WindowsAndMessaging::{
-            GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
-        };
-        let h = HWND(hwnd.0 as _);
-        unsafe {
-            let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
-            let next = (ex | WS_EX_TOOLWINDOW.0 as isize) & !(WS_EX_APPWINDOW.0 as isize);
-            SetWindowLongPtrW(h, GWL_EXSTYLE, next);
+        let h = hwnd.0 as isize;
+        let apply = move || unsafe { alt_tab::keep_tool_window(h) };
+        // A subclass must be set on the window's own thread.
+        if win.run_on_main_thread(apply).is_err() {
+            unsafe { alt_tab::keep_tool_window(h) };
         }
     }
     #[cfg(not(windows))]
     let _ = win;
+}
+
+#[cfg(windows)]
+pub(crate) mod alt_tab {
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, STYLESTRUCT, WM_STYLECHANGING, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    };
+
+    const SUBCLASS_ID: usize = 0x4C53_5457; // "LSTW"
+
+    /// The extended style a helper window must keep.
+    pub fn tool_style(ex: u32) -> u32 {
+        (ex | WS_EX_TOOLWINDOW.0) & !WS_EX_APPWINDOW.0
+    }
+
+    unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM, _id: usize, _data: usize) -> LRESULT {
+        if msg == WM_STYLECHANGING && wparam.0 as i32 == GWL_EXSTYLE.0 && lparam.0 != 0 {
+            let ss = &mut *(lparam.0 as *mut STYLESTRUCT);
+            ss.styleNew = tool_style(ss.styleNew);
+        }
+        DefSubclassProc(hwnd, msg, wparam, lparam)
+    }
+
+    /// # Safety
+    /// `h` must be a window of this process; call on its thread.
+    pub unsafe fn keep_tool_window(h: isize) {
+        let hwnd = HWND(h as _);
+        let _ = SetWindowSubclass(hwnd, Some(proc), SUBCLASS_ID, 0);
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        let want = tool_style(ex);
+        if want != ex {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, want as isize);
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn tool_windows_never_keep_the_app_window_bit() {
+            assert_eq!(super::tool_style(0x0004_0000 | 0x0800_0000), 0x0000_0080 | 0x0800_0000);
+            assert_eq!(super::tool_style(0x80), 0x80);
+        }
+    }
 }
 
 /// Hotkey / tray: start when idle, stop when recording.

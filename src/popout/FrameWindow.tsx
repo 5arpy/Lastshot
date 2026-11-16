@@ -34,6 +34,7 @@ import {
   type Layout,
 } from "./frames";
 import { dragRect, snapRect, snapTargets, type Edge, type R } from "./snap";
+import { postToEditor } from "../editor/inbox";
 
 const SNAP_PX = 10;
 const HIDE_MS = 1600;
@@ -736,10 +737,8 @@ function MediaBody({ frame, say, onFullscreen }: { frame: Frame; say: (m: string
   );
 }
 
-/** Hands a clip to the main window's editor (as if opened with Lastshot). */
+/** Hands a clip to the editor (the app-wide queue; the main window shows it). */
 async function openInEditor(path: string) {
-  const t = (window as unknown as { __TAURI__?: { event: { emitTo: (to: string, e: string, p: unknown) => Promise<void> }; core: { invoke: (c: string) => Promise<unknown> } } }).__TAURI__;
-  if (!t) return;
-  await t.core.invoke("show_main_window").catch(() => undefined);
-  await t.event.emitTo("main", "lastshot://open-file", path).catch(() => undefined);
+  postToEditor([path], { mode: "open" });
+  await window.__TAURI__?.core.invoke("show_main_window").catch(() => undefined);
 }

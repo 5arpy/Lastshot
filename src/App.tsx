@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import HomeDashboard from "./components/HomeDashboard";
-import EditorView, { type EditorIncoming } from "./editor/EditorView";
+import EditorView from "./editor/EditorView";
+import { hasEditorRequests, onEditorRequest, postToEditor } from "./editor/inbox";
 import StudioPanel from "./components/StudioPanel";
 import FolderSidebar, { matchesFolder } from "./components/FolderSidebar";
 import ClipsExplorer from "./components/ClipsExplorer";
@@ -140,14 +141,27 @@ export default function App() {
   const [framesOpen, setFramesOpen] = useState(false);
   const [frameCount, setFrameCount] = useState(0);
   const poppedRef = useRef<PopView[]>([]);
-  // Files handed to the Editor (drag & drop on its tab, "Open in Editor").
-  const [editorIncoming, setEditorIncoming] = useState<EditorIncoming | null>(null);
   const tabRef = useRef(tab);
   tabRef.current = tab;
-  const sendToEditor = useCallback((paths: string[], opts?: { mode?: "open" | "add"; flushMs?: number }) => {
-    setEditorIncoming((p) => ({ paths, seq: (p?.seq ?? 0) + 1, ...opts }));
-    setTab("editor");
+  // Files handed to the Editor (drag & drop on its tab, "Open in Editor",
+  // snips and frames): an app-wide queue the editor on screen takes once.
+  const showEditor = useCallback(() => {
+    if (poppedRef.current.includes("editor")) void popout.open("editor").catch(() => undefined);
+    else setTab("editor");
   }, []);
+  const sendToEditor = useCallback(
+    (paths: string[], opts?: { mode?: "open" | "add"; flushMs?: number }) => {
+      postToEditor(paths, opts);
+      showEditor();
+    },
+    [showEditor],
+  );
+  useEffect(() => {
+    if (hasEditorRequests()) showEditor();
+    return onEditorRequest(() => {
+      if (hasEditorRequests()) showEditor();
+    });
+  }, [showEditor]);
   /** Settings section to scroll to when the Settings tab opens. */
   const [settingsFocus, setSettingsFocus] = useState<string | null>(null);
   const [barState, setBarState] = useState<BarState | null>(null);
@@ -2451,7 +2465,6 @@ export default function App() {
           <div className="h-full min-h-[640px]">
             <EditorView
               clips={clips}
-              incoming={editorIncoming}
               onToast={pushToast}
               onRendered={(c) => setClips((prev) => [c, ...prev.filter((x) => x.path !== c.path)])}
               onClipsChanged={() => void refreshClips()}

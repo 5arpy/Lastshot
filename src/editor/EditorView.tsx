@@ -39,6 +39,7 @@ import { ItemContent, TrackHeader, itemTone, type FxEdit } from "./ItemContent";
 import { editorKeymap, runShortcut, tip, type EditorActions, type Shortcut } from "./keys";
 import MediaBin, { DRAG_TYPE } from "./MediaBin";
 import { media } from "./media";
+import { type EditorRequest, onEditorRequest, takeEditorRequests } from "./inbox";
 import { Player } from "./player";
 import Preview, { type SafeZone } from "./Preview";
 import {
@@ -80,17 +81,8 @@ import { Btn, Ico, I, Menu, type MenuItem, Sep, usePersist } from "./ui";
 
 type Tone = "ok" | "warn" | "err" | "info";
 
-export interface EditorIncoming {
-  paths: string[];
-  seq: number;
-  /** "open": a clip becomes its own project; "add": goes onto this one. */
-  mode?: "open" | "add";
-  flushMs?: number;
-}
-
 export interface EditorProps {
   clips: ClipMetadata[];
-  incoming: EditorIncoming | null;
   onToast: (tone: Tone, title: string, body?: string) => void;
   onRendered: (c: ClipMetadata) => void;
   /** Files in the library changed (saved, renamed, deleted). */
@@ -110,14 +102,31 @@ const SHAPE_SECONDS = 4;
 
 type Ask = { title: string; body?: string; ok: string; danger?: boolean; field?: string; run: (v: string) => void };
 
+/**
+ * The open project and its undo history, kept while the editor is not on
+ * screen (switching tabs unmounts it) so coming back finds both as they were.
+ */
+const session: { p: EdProject | null; hist: History<EdProject> } = { p: null, hist: new History<EdProject>() };
+
+/** The kept project, unless another window saved a newer version of it meanwhile. */
+function resume(): EdProject {
+  const list = loadProjects();
+  const kept = session.p;
+  const stored = kept ? list.find((x) => x.id === kept.id) : undefined;
+  if (kept && ((stored && stored.updated <= kept.updated) || (!stored && isEmpty(kept)))) return kept;
+  session.hist.clear();
+  return lastOpen(list);
+}
+
 export default function EditorView(props: EditorProps) {
   const { onToast } = props;
   const shareMb = props.shareLimitMb ?? 10;
   // ------------------------------------------------------------ project + history
-  const [p, setP] = useState<EdProject>(() => lastOpen(loadProjects()));
+  const [p, setP] = useState<EdProject>(resume);
   const pRef = useRef(p);
   pRef.current = p;
-  const hist = useRef(new History<EdProject>());
+  session.p = p;
+  const hist = useRef(session.hist);
   const [, setHv] = useState(0);
   const gesture = useRef<{ before: EdProject; label: string } | null>(null);
 
@@ -134,10 +143,7 @@ export default function EditorView(props: EditorProps) {
       case "end": {
         const g = gesture.current;
         gesture.current = null;
-        if (g && g.before.tl !== next.tl) {
-          hist.current.push(g.before, g.label || label);
-          setHv((x) => x + 1);
-        } else if (g && g.before !== next) {
+        if (g && g.before !== next) {
           hist.current.push(g.before, g.label || label);
           setHv((x) => x + 1);
         }
@@ -385,19 +391,26 @@ export default function EditorView(props: EditorProps) {
     else requestAnimationFrame(fit);
   };
 
-  // Files sent from the rest of the app (Open in editor, drops on the tab).
-  const lastSeq = useRef(0);
+  // Files sent from the rest of the app (Open in editor, drops on the tab,
+  // snips, frames): an app-wide queue; the editor on screen takes each once.
+  const handleRequest = async (r: EditorRequest) => {
+    flushMsRef.current = r.flushMs;
+    const single = r.paths.length === 1 && !IMAGE_RE.test(r.paths[0]) && !AUDIO_RE.test(r.paths[0]);
+    const mode = r.mode ?? (single ? "open" : "add");
+    if (mode === "open" && single) await openClip(r.paths[0]);
+    else await addPaths(r.paths, { track: null, t: projectLength(pRef.current), below: false, insert: false });
+  };
+  const handleRef = useRef(handleRequest);
+  handleRef.current = handleRequest;
   useEffect(() => {
-    const inc = props.incoming;
-    if (!inc || inc.seq === lastSeq.current) return;
-    lastSeq.current = inc.seq;
-    flushMsRef.current = inc.flushMs;
-    const single = inc.paths.length === 1 && !IMAGE_RE.test(inc.paths[0]) && !AUDIO_RE.test(inc.paths[0]);
-    const mode = inc.mode ?? (single ? "open" : "add");
-    if (mode === "open" && single) void openClip(inc.paths[0]);
-    else void addPaths(inc.paths, { track: null, t: projectLength(pRef.current), below: false, insert: false });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.incoming]);
+    if (props.active === false) return;
+    let chain = Promise.resolve();
+    const take = () => {
+      for (const r of takeEditorRequests()) chain = chain.then(() => handleRef.current(r)).catch(() => undefined);
+    };
+    take();
+    return onEditorRequest(take);
+  }, [props.active]);
 
   const importFiles = async () => {
     if (!isTauri()) return onToast("info", "Add files works in the installed app", "In this preview, drag clips from the Library list.");

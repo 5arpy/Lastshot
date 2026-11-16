@@ -11,6 +11,7 @@ import { drawShape } from "../annotate/draw";
 import StyleControls, { TOOLS } from "../annotate/StyleControls";
 import { type Shape, type Style, type Tool, DEFAULT_STYLE, PALETTE, align, flip, moveBy, reorder, rotateBy, shapeId } from "../annotate/shapes";
 import { History } from "../timeline/history";
+import { postToEditor } from "../editor/inbox";
 
 /**
  * Full-screen snipping overlay. It runs in its own borderless window that
@@ -334,9 +335,9 @@ export default function SnipOverlay() {
             s?.screenshotFormat === "jpg" ? c.toDataURL("image/jpeg", (s.screenshotQuality ?? 90) / 100) : undefined;
           const done = await lastshot.snipFinish(png, true, save || toEditor, jpg);
           if (toEditor && done.path) {
-            const t = (window as unknown as { __TAURI__: { core: { invoke: (c: string) => Promise<unknown> }; event: { emitTo: (to: string, e: string, p: unknown) => Promise<void> } } }).__TAURI__;
-            await t.core.invoke("show_main_window").catch(() => undefined);
-            await t.event.emitTo("main", "lastshot://open-file", done.path).catch(() => undefined);
+            // The editor queue waits for the main window if it is not up yet.
+            postToEditor([done.path], { mode: "open" });
+            await window.__TAURI__?.core.invoke("show_main_window").catch(() => undefined);
           }
         } else {
           const a = document.createElement("a");

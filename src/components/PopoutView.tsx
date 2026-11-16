@@ -102,7 +102,6 @@ function EditorHost({ onToast }: { onToast: (tone: Tone, title: string, body?: s
     <div className="h-full min-h-[560px]">
       <EditorView
         clips={clips}
-        incoming={null}
         onToast={onToast}
         onRendered={(c) => setClips((prev) => [c, ...prev.filter((x) => x.path !== c.path)])}
         onClipsChanged={() =>

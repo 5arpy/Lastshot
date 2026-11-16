@@ -79,19 +79,36 @@ pub async fn audio_formats() -> Result<Vec<String>, String> {
 /// `duration` seconds and writes `dest` (.wav, .m4a or .mp3). Returns the path.
 #[tauri::command]
 pub async fn export_audio(items: Vec<AudioItem>, duration: f64, dest: String) -> Result<String, String> {
-    let d = PathBuf::from(&dest);
-    if !d.is_absolute() {
-        return Err("Pick where to save the sound.".into());
-    }
-    if let Some(dir) = d.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
+    let d = check_sound_dest(&dest)?;
     let out = d.clone();
     tauri::async_runtime::spawn_blocking(move || compose::export_audio(&items, duration, &out, &mut |_| {}))
         .await
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
     Ok(d.to_string_lossy().to_string())
+}
+
+/// A sound file the save dialog gave: an absolute path with a sound
+/// extension in a folder that exists (nothing is created).
+pub fn check_sound_dest(dest: &str) -> Result<PathBuf, String> {
+    let d = PathBuf::from(dest);
+    if !d.is_absolute() {
+        return Err("Pick where to save the sound.".into());
+    }
+    let ext = d.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    if !matches!(ext.as_str(), "wav" | "m4a" | "mp3") {
+        return Err(format!("Lastshot cannot write .{ext} sound files (use wav, m4a or mp3)."));
+    }
+    if !d.parent().is_some_and(|p| p.is_dir()) {
+        return Err("That folder does not exist.".into());
+    }
+    Ok(d)
+}
+
+/// Scheme, host and port of a URL ("http://tauri.localhost").
+pub fn origin_of(url: &str) -> Option<String> {
+    let o = tauri::Url::parse(url).ok()?.origin();
+    o.is_tuple().then(|| o.ascii_serialization())
 }
 
 /// `{"lastshotDrop": "<id>"}` -> the id.
@@ -126,6 +143,16 @@ pub fn install_drop_bridge(win: &tauri::WebviewWindow) {
             let Ok(core) = wv.controller().CoreWebView2() else { return };
             let handler = WebMessageReceivedEventHandler::create(Box::new(move |_, args| {
                 let Some(args) = args else { return Ok(()) };
+                // Only from the app's own pages (not a page it navigated to).
+                let mut src = PWSTR::null();
+                if args.Source(&mut src).is_err() || src.is_null() {
+                    return Ok(());
+                }
+                let from = origin_of(&take_pwstr(src));
+                let ours = w.url().ok().and_then(|u| origin_of(u.as_str()));
+                if from.is_none() || from != ours {
+                    return Ok(());
+                }
                 let mut raw = PWSTR::null();
                 if args.TryGetWebMessageAsString(&mut raw).is_err() || raw.is_null() {
                     return Ok(());
@@ -193,6 +220,58 @@ mod tests {
         assert_eq!(drop_id(r#"["lastshotDrop"]"#), None);
     }
 
+    #[test]
+    fn drops_only_from_the_apps_origin() {
+        assert_eq!(origin_of("http://tauri.localhost/index.html?x=1").as_deref(), Some("http://tauri.localhost"));
+        assert_eq!(origin_of("http://localhost:1420/").as_deref(), Some("http://localhost:1420"));
+        assert_ne!(origin_of("https://example.com/"), origin_of("http://tauri.localhost/"));
+        assert_eq!(origin_of("about:blank"), None);
+        assert_eq!(origin_of("not a url"), None);
+    }
+
+    #[test]
+    fn sound_goes_only_where_the_dialog_could_put_it() {
+        let dir = std::env::temp_dir();
+        let ok = dir.join("lastshot-sound-test.wav");
+        assert!(check_sound_dest(&ok.to_string_lossy()).is_ok());
+        assert!(check_sound_dest(&dir.join("x.exe").to_string_lossy()).is_err());
+        assert!(check_sound_dest(&dir.join("no-such-folder-lastshot").join("a.wav").to_string_lossy()).is_err());
+        assert!(check_sound_dest("relative.wav").is_err());
+    }
+
+    /// A tone file (48 kHz stereo WAV) to mix from.
+    fn tone_wav(path: &std::path::Path, seconds: f64, hz: f32) {
+        struct Tone {
+            i: usize,
+            n: usize,
+            hz: f32,
+        }
+        impl compose::PieceSource for Tone {
+            fn next(&mut self) -> crate::media::recorder::RResult<Option<Vec<[f32; 2]>>> {
+                if self.i >= self.n {
+                    return Ok(None);
+                }
+                let m = (self.n - self.i).min(4800);
+                let out = (self.i..self.i + m)
+                    .map(|i| {
+                        let v = 0.3 * (2.0 * std::f32::consts::PI * self.hz * i as f32 / 48_000.0).sin();
+                        [v, v]
+                    })
+                    .collect();
+                self.i += m;
+                Ok(Some(out))
+            }
+        }
+        let item: AudioItem = serde_json::from_value(serde_json::json!({"path": "", "start": 0, "duration": seconds})).unwrap();
+        let n = (seconds * 48_000.0) as usize;
+        let mut m = compose::MixStream::new(
+            std::slice::from_ref(&item),
+            seconds,
+            Box::new(move |_| Ok(Box::new(Tone { i: 0, n, hz }) as Box<dyn compose::PieceSource>)),
+        );
+        compose::write_wav(&mut m, path, &mut |_| ()).unwrap();
+    }
+
     /// Writes a short tone to wav / m4a / mp3 in a temp folder (needs Media
     /// Foundation): `cargo test --lib editor_media -- --ignored --nocapture`.
     #[test]
@@ -204,13 +283,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         // A tone file to mix from: 1 s of 440 Hz.
         let src = dir.join("tone.wav");
-        let mut m = compose::Mix::new(1.0);
-        for i in 0..m.frames() {
-            let v = 0.3 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 48_000.0).sin();
-            m.samples[i * 2] = v;
-            m.samples[i * 2 + 1] = v;
-        }
-        compose::write_wav(&m, &src).unwrap();
+        tone_wav(&src, 1.0, 440.0);
         let item: AudioItem = serde_json::from_value(serde_json::json!({
             "path": src, "start": 0.25, "duration": 0.75, "srcIn": 0, "volume": 1,
             "fadeIn": 0.1, "fadeOut": 0.1, "pan": 0.3, "eq": [3, 0, -3], "gate": -50
@@ -262,13 +335,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("lastshot-render-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let tone = dir.join("tone.wav");
-        let mut m = compose::Mix::new(3.0);
-        for i in 0..m.frames() {
-            let v = 0.3 * (2.0 * std::f32::consts::PI * 330.0 * i as f32 / 48_000.0).sin();
-            m.samples[i * 2] = v;
-            m.samples[i * 2 + 1] = v;
-        }
-        compose::write_wav(&m, &tone).unwrap();
+        tone_wav(&tone, 3.0, 330.0);
         let s = |p: &std::path::Path| p.to_string_lossy().to_string();
 
         // A: a still with sound.

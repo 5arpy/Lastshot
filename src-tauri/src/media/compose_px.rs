@@ -457,10 +457,22 @@ pub fn region_box(x: f64, y: f64, w: f64, h: f64, fw: usize, fh: usize) -> Optio
 
 /// Pixelates a box of an NV12 frame like the preview: `round(w / block)`
 /// cells across, each filled with its average.
+/// Strongest blur / biggest pixel block, as the editor's slider allows.
+pub const MAX_STRENGTH: f64 = 60.0;
+
+/// A region strength kept to 2..=MAX_STRENGTH (16 when it is not a number).
+pub fn strength(v: f64) -> f64 {
+    if v.is_finite() {
+        v.clamp(2.0, MAX_STRENGTH)
+    } else {
+        16.0
+    }
+}
+
 pub fn pixelate(frame: &mut [u8], fw: usize, fh: usize, bx: (usize, usize, usize, usize), block: f64) {
     let (x0, y0, x1, y1) = bx;
     let (bw, bh) = ((x1 - x0) as f64, (y1 - y0) as f64);
-    let block = block.max(2.0);
+    let block = strength(block);
     let tw = ((bw / block).round() as usize).max(1);
     let th = ((bh / block).round() as usize).max(1);
     let (yp, uvp) = frame.split_at_mut(fw * fh);
@@ -514,7 +526,7 @@ pub fn box_radius(sigma: f64) -> usize {
 /// Gaussian-like blur (three box passes each way) of a box of an NV12
 /// frame; `sigma` in luma pixels. Pixels around the box feed the blur.
 pub fn blur(frame: &mut [u8], fw: usize, fh: usize, bx: (usize, usize, usize, usize), sigma: f64, scratch: &mut Vec<f32>) {
-    let sigma = sigma.max(1.0);
+    let sigma = strength(sigma);
     let (yp, uvp) = frame.split_at_mut(fw * fh);
     blur_plane(yp, fw, fw, fh, 1, 0, bx, box_radius(sigma), scratch);
     let cb = (bx.0 / 2, bx.1 / 2, bx.2.div_ceil(2).min(fw / 2), bx.3.div_ceil(2).min(fh / 2));

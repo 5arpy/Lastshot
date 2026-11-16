@@ -9,7 +9,8 @@
 //! picture active at that moment is drawn bottom track first onto a black
 //! NV12 canvas (`compose_px`), the boxes are blurred or pixelated, overlays
 //! are blended on top, and the frame goes to the H.264 encoder. Audio is
-//! mixed first into 48 kHz stereo and written alongside.
+//! mixed into 48 kHz stereo a short window at a time (`MixStream`), as the
+//! encoder needs it, so a long project never holds its whole sound in RAM.
 
 use std::path::{Path, PathBuf};
 
@@ -21,7 +22,7 @@ use super::recorder::{RecorderError, RResult, HNS_PER_SECOND};
 
 /// Output audio format.
 pub const MIX_RATE: u32 = 48_000;
-/// Longest project the mixer takes (the mix lives in RAM: ~11 MB a minute).
+/// Longest project the mixer takes.
 pub const MAX_SECONDS: f64 = 3.0 * 3600.0;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -239,6 +240,9 @@ impl Project {
         self.video.retain(|v| ok(v.start, v.duration));
         self.overlays.retain(|v| ok(v.start, v.duration));
         self.regions.retain(|v| ok(v.start, v.duration) && v.w > 0.0 && v.h > 0.0);
+        for r in &mut self.regions {
+            r.strength = compose_px::strength(r.strength);
+        }
         self.audio.retain(|v| ok(v.start, v.duration));
         let d = self.duration();
         if d < 0.1 {
@@ -412,40 +416,17 @@ pub fn fit(src_w: u32, src_h: u32, w: u32, h: u32) -> (u32, u32) {
 
 // ------------------------------------------------------------------ audio
 
-/// Interleaved stereo f32 mix of the whole timeline.
+/// A window of the mix: interleaved stereo f32.
 pub struct Mix {
     pub samples: Vec<f32>,
 }
 
 impl Mix {
-    pub fn new(seconds: f64) -> Mix {
-        Mix { samples: vec![0.0; (seconds * MIX_RATE as f64).ceil() as usize * 2] }
-    }
-
-    /// Adds stereo frames (`MIX_RATE`) starting at timeline second `at`,
-    /// with the item's volume and fades. `offset` = seconds into the item.
-    pub fn add(&mut self, at: f64, item: &AudioItem, offset: f64, frames: &[[f32; 2]]) {
-        let first = ((at + offset) * MIX_RATE as f64).round() as i64;
-        for (i, f) in frames.iter().enumerate() {
-            let pos = first + i as i64;
-            if pos < 0 {
-                continue;
-            }
-            let idx = pos as usize * 2;
-            if idx + 1 >= self.samples.len() {
-                break;
-            }
-            let t = offset + i as f64 / MIX_RATE as f64;
-            let g = gain(item, t);
-            self.samples[idx] += f[0] * g;
-            self.samples[idx + 1] += f[1] * g;
-        }
-    }
-
-    /// 16-bit PCM bytes of frames `from..to`, soft-limited.
+    /// 16-bit PCM bytes of frames `from..to` of this window, soft-limited.
     pub fn pcm16(&self, from: usize, to: usize) -> Vec<u8> {
         let to = to.min(self.samples.len() / 2);
-        let mut out = Vec::with_capacity((to.saturating_sub(from)) * 4);
+        let from = from.min(to);
+        let mut out = Vec::with_capacity((to - from) * 4);
         for s in &self.samples[from * 2..to * 2] {
             let v = s.clamp(-1.0, 1.0);
             out.extend_from_slice(&((v * 32767.0) as i16).to_le_bytes());
@@ -455,6 +436,96 @@ impl Mix {
 
     pub fn frames(&self) -> usize {
         self.samples.len() / 2
+    }
+}
+
+/// One sound piece, decoded as the mix needs it: stereo frames at
+/// `MIX_RATE` with pan, EQ and gate applied, cut to the piece's length.
+/// `Ok(None)` at its end.
+pub trait PieceSource {
+    fn next(&mut self) -> RResult<Option<Vec<[f32; 2]>>>;
+}
+
+/// Opens a piece's decoder (when the mix reaches the piece).
+pub type OpenPiece<'a> = Box<dyn FnMut(&AudioItem) -> RResult<Box<dyn PieceSource>> + 'a>;
+
+struct Live {
+    item: AudioItem,
+    src: Box<dyn PieceSource>,
+    /// Timeline frame of the piece's first frame.
+    first: usize,
+    /// Decoded frames not used yet; `buf[0]` is piece frame `buf_at`.
+    buf: Vec<[f32; 2]>,
+    buf_at: usize,
+    done: bool,
+}
+
+/// The timeline's sound, mixed a window at a time: only the pieces playing
+/// in the window are open, each with a small buffer, so memory stays flat
+/// however long the project is.
+pub struct MixStream<'a> {
+    items: Vec<AudioItem>,
+    open: OpenPiece<'a>,
+    live: Vec<Live>,
+    next_item: usize,
+    pos: usize,
+    total: usize,
+}
+
+impl<'a> MixStream<'a> {
+    pub fn new(items: &[AudioItem], seconds: f64, open: OpenPiece<'a>) -> MixStream<'a> {
+        let mut items = items.to_vec();
+        items.sort_by(|a, b| a.start.total_cmp(&b.start));
+        MixStream { items, open, live: Vec::new(), next_item: 0, pos: 0, total: (seconds * MIX_RATE as f64).ceil() as usize }
+    }
+
+    /// Frames in the whole mix.
+    pub fn frames(&self) -> usize {
+        self.total
+    }
+
+    /// Frames handed out so far.
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
+
+    /// The next frames, up to timeline frame `to`.
+    pub fn take(&mut self, to: usize) -> RResult<Mix> {
+        let to = to.min(self.total).max(self.pos);
+        let (from, n) = (self.pos, to - self.pos);
+        let mut out = vec![0.0f32; n * 2];
+        let frame_of = |s: f64| (s.max(0.0) * MIX_RATE as f64).round() as usize;
+        while self.next_item < self.items.len() && frame_of(self.items[self.next_item].start) < to {
+            let item = self.items[self.next_item].clone();
+            self.next_item += 1;
+            let src = (self.open)(&item)
+                .map_err(|e| RecorderError::Other(format!("Sound of {}: {e}", item.path.display())))?;
+            self.live.push(Live { first: frame_of(item.start), item, src, buf: Vec::new(), buf_at: 0, done: false });
+        }
+        for l in &mut self.live {
+            // Piece frames this window covers.
+            let k0 = from.saturating_sub(l.first);
+            let k1 = to.saturating_sub(l.first);
+            while !l.done && l.buf_at + l.buf.len() < k1 {
+                match l.src.next().map_err(|e| RecorderError::Other(format!("Sound of {}: {e}", l.item.path.display())))? {
+                    Some(f) => l.buf.extend_from_slice(&f),
+                    None => l.done = true,
+                }
+            }
+            for k in k0.max(l.buf_at)..k1.min(l.buf_at + l.buf.len()) {
+                let f = l.buf[k - l.buf_at];
+                let g = gain(&l.item, k as f64 / MIX_RATE as f64);
+                let i = (l.first + k - from) * 2;
+                out[i] += f[0] * g;
+                out[i + 1] += f[1] * g;
+            }
+            let used = k1.saturating_sub(l.buf_at).min(l.buf.len());
+            l.buf.drain(..used);
+            l.buf_at += used;
+        }
+        self.live.retain(|l| !(l.done && l.buf.is_empty()));
+        self.pos = to;
+        Ok(Mix { samples: out })
     }
 }
 
@@ -579,7 +650,7 @@ pub fn export_audio(items: &[AudioItem], duration: f64, dest: &Path, progress: &
 }
 
 /// Writes the mix as a 16-bit PCM WAV file.
-pub fn write_wav(mix: &Mix, dest: &Path) -> RResult<()> {
+pub fn write_wav(mix: &mut MixStream, dest: &Path, progress: &mut dyn FnMut(f32)) -> RResult<()> {
     use std::io::Write;
     let io = |e: std::io::Error| RecorderError::Io(e.to_string());
     let frames = mix.frames();
@@ -589,10 +660,10 @@ pub fn write_wav(mix: &Mix, dest: &Path) -> RResult<()> {
     let mut f = std::io::BufWriter::new(std::fs::File::create(dest).map_err(io)?);
     f.write_all(&compose_fx::wav_header(frames as u32, MIX_RATE, 2)).map_err(io)?;
     let step = MIX_RATE as usize;
-    let mut at = 0;
-    while at < frames {
-        f.write_all(&mix.pcm16(at, at + step)).map_err(io)?;
-        at += step;
+    while mix.pos() < frames {
+        let w = mix.take(mix.pos() + step)?;
+        f.write_all(&w.pcm16(0, w.frames())).map_err(io)?;
+        progress(mix.pos() as f32 / frames.max(1) as f32);
     }
     f.flush().map_err(io)
 }
@@ -761,61 +832,96 @@ mod imp {
         Ok(Some((r, idx, rate, ch)))
     }
 
-    /// Decodes one audio piece into the mix.
-    unsafe fn mix_in(mix: &mut Mix, item: &AudioItem) -> RResult<()> {
-        let Some((r, idx, rate, ch)) = pcm_reader(&item.path)? else { return Ok(()) };
-        seek(&r, item.src_in)?;
-        let start_hns = (item.src_in * HNS_PER_SECOND as f64) as i64;
-        let end_hns = ((item.src_in + item.duration) * HNS_PER_SECOND as f64) as i64;
-        let mut rs = Resampler::new(rate);
-        let mut fx = Fx::new(item.pan, item.eq, item.gate, MIX_RATE as f64);
-        let mut written = 0usize; // output frames added so far
-        let mut started = false;
-        loop {
-            let mut flags = 0u32;
-            let mut ts = 0i64;
-            let mut sample: Option<IMFSample> = None;
-            r.ReadSample(idx, 0, None, Some(&mut flags), Some(&mut ts), Some(&mut sample))
-                .map_err(err)?;
-            if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
-                break;
-            }
-            let Some(sample) = sample else { continue };
-            if ts >= end_hns {
-                break;
-            }
-            let mut bytes = sample_bytes(&sample)?;
-            // Drop what lies before the in-point (seeking lands on a packet edge).
-            if !started {
-                started = true;
-                if ts < start_hns {
-                    let skip = ((start_hns - ts) as f64 / HNS_PER_SECOND as f64 * rate as f64) as usize * ch * 2;
-                    bytes.drain(..skip.min(bytes.len()));
-                }
-            }
-            let mut out = rs.push(&to_stereo(&bytes, ch));
-            let at = written as f64 / MIX_RATE as f64;
-            let keep = ((item.duration - at) * MIX_RATE as f64).max(0.0) as usize;
-            out.truncate(keep);
-            fx.process(&mut out);
-            mix.add(item.start, item, at, &out);
-            written += out.len();
-            if written as f64 >= item.duration * MIX_RATE as f64 {
-                break;
-            }
-        }
-        Ok(())
+    /// One piece's decoder for the mix.
+    struct MfPiece {
+        r: IMFSourceReader,
+        idx: u32,
+        ch: usize,
+        rate: u32,
+        rs: Resampler,
+        fx: Fx,
+        start_hns: i64,
+        end_hns: i64,
+        /// Output frames the piece has, and has given so far.
+        len: usize,
+        written: usize,
+        started: bool,
     }
 
-    /// Every piece mixed into one `duration`-second track.
-    fn build_mix(items: &[AudioItem], duration: f64, progress: &mut dyn FnMut(f32)) -> RResult<Mix> {
-        let mut m = Mix::new(duration);
-        for (i, a) in items.iter().enumerate() {
-            unsafe { mix_in(&mut m, a) }
-                .map_err(|e| RecorderError::Other(format!("Sound of {}: {e}", a.path.display())))?;
-            progress((i + 1) as f32 / items.len() as f32);
+    impl PieceSource for MfPiece {
+        fn next(&mut self) -> RResult<Option<Vec<[f32; 2]>>> {
+            unsafe {
+                loop {
+                    if self.written >= self.len {
+                        return Ok(None);
+                    }
+                    let mut flags = 0u32;
+                    let mut ts = 0i64;
+                    let mut sample: Option<IMFSample> = None;
+                    self.r
+                        .ReadSample(self.idx, 0, None, Some(&mut flags), Some(&mut ts), Some(&mut sample))
+                        .map_err(err)?;
+                    if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
+                        return Ok(None);
+                    }
+                    let Some(sample) = sample else { continue };
+                    if ts >= self.end_hns {
+                        return Ok(None);
+                    }
+                    let mut bytes = sample_bytes(&sample)?;
+                    // Drop what lies before the in-point (seeking lands on a packet edge).
+                    if !self.started {
+                        self.started = true;
+                        if ts < self.start_hns {
+                            let skip = ((self.start_hns - ts) as f64 / HNS_PER_SECOND as f64 * self.rate as f64) as usize
+                                * self.ch
+                                * 2;
+                            bytes.drain(..skip.min(bytes.len()));
+                        }
+                    }
+                    let mut out = self.rs.push(&to_stereo(&bytes, self.ch));
+                    out.truncate(self.len - self.written);
+                    if out.is_empty() {
+                        continue;
+                    }
+                    self.fx.process(&mut out);
+                    self.written += out.len();
+                    return Ok(Some(out));
+                }
+            }
         }
-        Ok(m)
+    }
+
+    /// A piece's decoder, or a silent one for a file without sound.
+    fn open_piece(item: &AudioItem) -> RResult<Box<dyn PieceSource>> {
+        struct Silent;
+        impl PieceSource for Silent {
+            fn next(&mut self) -> RResult<Option<Vec<[f32; 2]>>> {
+                Ok(None)
+            }
+        }
+        unsafe {
+            let Some((r, idx, rate, ch)) = pcm_reader(&item.path)? else { return Ok(Box::new(Silent)) };
+            seek(&r, item.src_in)?;
+            Ok(Box::new(MfPiece {
+                r,
+                idx,
+                ch,
+                rate,
+                rs: Resampler::new(rate),
+                fx: Fx::new(item.pan, item.eq, item.gate, MIX_RATE as f64),
+                start_hns: (item.src_in * HNS_PER_SECOND as f64) as i64,
+                end_hns: ((item.src_in + item.duration) * HNS_PER_SECOND as f64) as i64,
+                len: (item.duration * MIX_RATE as f64) as usize,
+                written: 0,
+                started: false,
+            }))
+        }
+    }
+
+    /// Every piece, mixed a window at a time into one `duration`-second track.
+    fn mix_stream(items: &[AudioItem], duration: f64) -> MixStream<'static> {
+        MixStream::new(items, duration, Box::new(open_piece))
     }
 
     // -------------------------------------------------------------- peaks
@@ -1114,15 +1220,15 @@ mod imp {
         let _mf = Mf::enter()?;
         // Check the encoder before the (slow) mix.
         let mp3 = if ext == "mp3" { Some(unsafe { mp3_type() }?) } else { None };
-        let mix = build_mix(items, duration, &mut |x| progress(x * 0.8))?;
+        let mut mix = mix_stream(items, duration);
         let r = match ext {
-            "wav" => write_wav(&mix, dest),
+            "wav" => write_wav(&mut mix, dest, progress),
             _ => unsafe {
                 let (container, out) = match mp3 {
                     Some(t) => (MFTranscodeContainerType_MP3, t),
                     None => (MFTranscodeContainerType_MPEG4, aac_type(192_000)?),
                 };
-                write_sound(&mix, dest, &container, &out, &mut |x| progress(0.8 + x * 0.2))
+                write_sound(&mut mix, dest, &container, &out, progress)
             },
         };
         if r.is_err() {
@@ -1133,7 +1239,7 @@ mod imp {
     }
 
     unsafe fn write_sound(
-        mix: &Mix,
+        mix: &mut MixStream,
         dest: &Path,
         container: &windows::core::GUID,
         out_type: &IMFMediaType,
@@ -1148,12 +1254,9 @@ mod imp {
         writer.SetInputMediaType(s, &pcm_type()?, None).map_err(err)?;
         writer.BeginWriting().map_err(err)?;
         let chunk = (MIX_RATE / 2) as usize;
-        let mut at = 0;
-        while at < mix.frames() {
-            let to = (at + chunk).min(mix.frames());
-            write_audio(&writer, s, mix, at, to)?;
-            at = to;
-            progress(at as f32 / mix.frames().max(1) as f32);
+        while mix.pos() < mix.frames() {
+            write_audio(&writer, s, mix, mix.pos() + chunk)?;
+            progress(mix.pos() as f32 / mix.frames().max(1) as f32);
         }
         writer.Finalize().map_err(err)
     }
@@ -1304,21 +1407,16 @@ mod imp {
     /// Renders; returns the video bitrate used.
     pub(super) fn render(p: &Project, dest: &Path, progress: &mut dyn FnMut(f32)) -> RResult<u32> {
         let _mf = Mf::enter()?;
-        // Sound first: every piece mixed into one track.
+        // The sound is mixed as the encoder goes (a fresh mix per attempt).
         let duration = p.duration();
-        let mix = if p.audio.is_empty() {
-            None
-        } else {
-            Some(build_mix(&p.audio, duration, &mut |x| progress(0.1 * x))?)
-        };
-        let mut sub = |x: f32| progress(0.1 + x * 0.9);
-        let r = unsafe { encode(p, dest, mix.as_ref(), true, &mut sub) };
+        let mix = || (!p.audio.is_empty()).then(|| mix_stream(&p.audio, duration));
+        let r = unsafe { encode(p, dest, mix().as_mut(), true, progress) };
         match r {
             Ok(bps) => Ok(bps),
             Err(e) => {
                 log::warn!("[lastshot] hardware render failed ({e}); retrying in software");
                 let _ = std::fs::remove_file(dest);
-                unsafe { encode(p, dest, mix.as_ref(), false, &mut sub) }
+                unsafe { encode(p, dest, mix().as_mut(), false, progress) }
             }
         }
     }
@@ -1326,7 +1424,7 @@ mod imp {
     unsafe fn encode(
         p: &Project,
         dest: &Path,
-        mix: Option<&Mix>,
+        mut mix: Option<&mut MixStream>,
         hardware: bool,
         progress: &mut dyn FnMut(f32),
     ) -> RResult<u32> {
@@ -1404,7 +1502,6 @@ mod imp {
         let mut sources: Vec<Option<Source>> = p.video.iter().map(|_| None).collect();
         let mut frame = black_frame(w, h);
         let mut scratch: Vec<f32> = Vec::new();
-        let mut audio_sent = 0usize;
         let chunk = (MIX_RATE / 2) as usize;
         let mut last_pct = -1i64;
 
@@ -1479,12 +1576,10 @@ mod imp {
             writer.WriteSample(v_out, &sample).map_err(err)?;
 
             // Keep the sound about half a second ahead of the picture.
-            if let (Some(a), Some(m)) = (a_out, mix) {
+            if let (Some(a), Some(m)) = (a_out, mix.as_deref_mut()) {
                 let want = (((t + 0.5) * MIX_RATE as f64) as usize).min(m.frames());
-                while audio_sent < want {
-                    let to = (audio_sent + chunk).min(m.frames());
-                    write_audio(&writer, a, m, audio_sent, to)?;
-                    audio_sent = to;
+                while m.pos() < want {
+                    write_audio(&writer, a, m, (m.pos() + chunk).min(want))?;
                 }
             }
             let pct = k * 100 / total_frames;
@@ -1494,10 +1589,8 @@ mod imp {
             }
         }
         if let (Some(a), Some(m)) = (a_out, mix) {
-            while audio_sent < m.frames() {
-                let to = (audio_sent + chunk).min(m.frames());
-                write_audio(&writer, a, m, audio_sent, to)?;
-                audio_sent = to;
+            while m.pos() < m.frames() {
+                write_audio(&writer, a, m, m.pos() + chunk)?;
             }
         }
         drop(sources);
@@ -1505,8 +1598,12 @@ mod imp {
         Ok(video_bps)
     }
 
-    unsafe fn write_audio(writer: &IMFSinkWriter, stream: u32, m: &Mix, from: usize, to: usize) -> RResult<()> {
-        let bytes = m.pcm16(from, to);
+    /// Mixes the next frames (up to `to`) and hands them to the writer.
+    unsafe fn write_audio(writer: &IMFSinkWriter, stream: u32, m: &mut MixStream, to: usize) -> RResult<()> {
+        let from = m.pos();
+        let w = m.take(to)?;
+        let to = m.pos();
+        let bytes = w.pcm16(0, w.frames());
         if bytes.is_empty() {
             return Ok(());
         }
@@ -1598,19 +1695,69 @@ mod tests {
         assert_eq!(same.push(&[[1.0, 1.0]; 10]).len(), 9);
     }
 
+    /// A piece of constant frames, handed out in uneven blocks.
+    struct Fake {
+        left: usize,
+        v: [f32; 2],
+        block: usize,
+    }
+    impl PieceSource for Fake {
+        fn next(&mut self) -> RResult<Option<Vec<[f32; 2]>>> {
+            if self.left == 0 {
+                return Ok(None);
+            }
+            let n = self.block.min(self.left);
+            self.left -= n;
+            Ok(Some(vec![self.v; n]))
+        }
+    }
+    fn fake(open_count: &std::cell::Cell<usize>) -> OpenPiece<'_> {
+        Box::new(move |it: &AudioItem| {
+            open_count.set(open_count.get() + 1);
+            Ok(Box::new(Fake { left: (it.duration * MIX_RATE as f64) as usize, v: [0.25, 0.5], block: 777 }) as Box<dyn PieceSource>)
+        })
+    }
+
     #[test]
     fn mix_adds_at_the_right_place() {
-        let mut m = Mix::new(2.0);
-        let a = item(1.0, 1.0, 0.0, 0.0);
-        let mut at = a.clone();
-        at.start = 1.0;
-        m.add(at.start, &at, 0.0, &[[0.25, 0.5]; 10]);
-        let i = MIX_RATE as usize * 2;
-        assert_eq!(m.samples[i], 0.25);
-        assert_eq!(m.samples[i + 1], 0.5);
-        assert_eq!(m.samples[i - 2], 0.0);
-        let pcm = m.pcm16(MIX_RATE as usize, MIX_RATE as usize + 1);
+        let opened = std::cell::Cell::new(0);
+        let mut a = item(1.0, 1.0, 0.0, 0.0);
+        a.start = 1.0;
+        let mut m = MixStream::new(&[a], 2.0, fake(&opened));
+        let r = MIX_RATE as usize;
+        // Nothing is opened before the piece starts.
+        let w = m.take(r / 2).unwrap();
+        assert_eq!(opened.get(), 0);
+        assert!(w.samples.iter().all(|&x| x == 0.0));
+        // Odd window sizes: every frame lands once, in its place.
+        let mut all = w.samples;
+        while m.pos() < m.frames() {
+            let to = m.pos() + 1234;
+            all.extend(m.take(to).unwrap().samples);
+        }
+        assert_eq!(all.len(), 2 * r * 2);
+        assert_eq!(opened.get(), 1);
+        assert_eq!((all[r * 2], all[r * 2 + 1]), (0.25, 0.5));
+        assert_eq!(all[r * 2 - 2], 0.0);
+        assert_eq!(all[(2 * r - 1) * 2], 0.25);
+        let pcm = Mix { samples: all[r * 2..r * 2 + 2].to_vec() }.pcm16(0, 1);
         assert_eq!(i16::from_le_bytes([pcm[0], pcm[1]]), (0.25 * 32767.0) as i16);
+    }
+
+    #[test]
+    fn mix_sums_overlapping_pieces_with_fades_and_closes_finished_ones() {
+        let opened = std::cell::Cell::new(0);
+        let a = item(1.0, 1.0, 0.0, 0.0);
+        let mut b = item(2.0, 1.0, 0.5, 0.0);
+        b.start = 0.5;
+        let mut m = MixStream::new(&[b, a], 3.0, fake(&opened));
+        let r = MIX_RATE as usize;
+        let w = m.take(r).unwrap();
+        // 0.75 s: a (0.25) + b at 0.25 s into its 0.5 s fade-in (2.0 * 0.5 * 0.25).
+        let i = (r * 3 / 4) * 2;
+        assert!((w.samples[i] - (0.25 + 0.25)).abs() < 1e-3, "{}", w.samples[i]);
+        m.take(3 * r).unwrap();
+        assert!(m.live.is_empty());
     }
 
     #[test]
@@ -1667,6 +1814,11 @@ mod tests {
         assert_eq!(p.duration(), 9.0);
         p.audio.clear();
         assert_eq!(p.duration(), 5.0);
+        // Region strength is kept to the editor's range.
+        p.regions = serde_json::from_str(r#"[{"kind":"blur","start":0,"duration":1,"x":0,"y":0,"w":1,"h":1,"strength":1e9}]"#).unwrap();
+        p.validate().unwrap();
+        assert_eq!(p.regions[0].strength, compose_px::MAX_STRENGTH);
+        p.regions.clear();
         p.video.clear();
         assert!(p.validate().is_err());
     }
@@ -1716,17 +1868,18 @@ mod tests {
 
     #[test]
     fn wav_file_round_trip() {
-        let mut m = Mix::new(0.5);
-        m.samples[0] = 0.5;
-        m.samples[1] = -0.5;
+        let opened = std::cell::Cell::new(0);
+        let a = item(1.0, 0.25, 0.0, 0.0);
+        let mut m = MixStream::new(&[a], 0.5, fake(&opened));
         let dir = std::env::temp_dir().join(format!("lastshot-wav-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("t.wav");
-        write_wav(&m, &f).unwrap();
+        write_wav(&mut m, &f, &mut |_| ()).unwrap();
         let bytes = std::fs::read(&f).unwrap();
         assert_eq!(bytes.len(), 44 + 24_000 * 4);
-        assert_eq!(i16::from_le_bytes([bytes[44], bytes[45]]), 16383);
-        assert_eq!(i16::from_le_bytes([bytes[46], bytes[47]]), -16383);
+        assert_eq!(i16::from_le_bytes([bytes[44], bytes[45]]), (0.25 * 32767.0) as i16);
+        assert_eq!(i16::from_le_bytes([bytes[46], bytes[47]]), (0.5 * 32767.0) as i16);
+        assert_eq!(i16::from_le_bytes([bytes[44 + 20_000 * 4], bytes[45 + 20_000 * 4]]), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -84,6 +84,8 @@ features = [
     "Win32_UI_Shell",
     # Item ids for native file drags out of the Clips explorer.
     "Win32_UI_Shell_Common",
+    # Mouse button state: a drag out starts only while a button is held.
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell_PropertiesSystem",
     # Window/app capture (Windows.Graphics.Capture) and the GPU compositor.
     "Foundation",

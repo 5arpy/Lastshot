@@ -674,6 +674,13 @@ pub mod drag {
     }
 
     pub unsafe fn run(hwnd: isize, files: &[PathBuf]) -> windows::core::Result<()> {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
+        // The page asks a moment after its drag began. If the button is
+        // already up, a shell drag would drop at once wherever the pointer
+        // is: do nothing instead.
+        if GetAsyncKeyState(VK_LBUTTON.0 as i32) >= 0 && GetAsyncKeyState(VK_RBUTTON.0 as i32) >= 0 {
+            return Ok(());
+        }
         let data = data_object(files)?;
         let _ = SHDoDragDrop(HWND(hwnd as _), &data, None::<&IDropSource>, DROPEFFECT_COPY | DROPEFFECT_LINK)?;
         Ok(())

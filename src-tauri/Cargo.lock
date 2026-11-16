@@ -2096,6 +2096,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-plugin-process",
  "tauri-plugin-single-instance",
+ "tauri-winrt-notification",
  "thiserror 2.0.20",
  "tokio",
  "webview2-com",

@@ -131,6 +131,8 @@ pub fn on_shortcut(app: &AppHandle, shortcut: &Shortcut, state: ShortcutState) {
         crate::snip::begin(app.clone());
     } else if parse(&record_key).map(|s| &s == shortcut).unwrap_or(false) {
         crate::recording::toggle(app.clone());
+    } else if crate::audio_guard::is_mic_hotkey(app, shortcut) {
+        crate::audio_guard::toggle_mic(app);
     }
 }
 

@@ -13,6 +13,7 @@ import {
 import { lastshot } from "../lib/bridge";
 import { cableOutputIds, type CablesView } from "../lib/cables";
 import CablesSection from "./CablesSection";
+import DevicesSection from "./DevicesSection";
 import { cn } from "../utils/cn";
 
 /**
@@ -338,6 +339,8 @@ export default function AudioPanel({ active = true, onToast }: { active?: boolea
           </section>
         </>
       )}
+
+      <DevicesSection live={live} onToast={onToast} />
 
       <CablesSection live={live} onToast={onToast} onView={setCablesView} />
 

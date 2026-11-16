@@ -1270,6 +1270,7 @@ pub fn hide_main_window(app: AppHandle) -> Result<(), String> {
 pub fn quit_app(app: tauri::AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     state.engine.stop();
     crate::cables::shutdown(&app);
+    crate::audio_guard::shutdown(&app);
     crate::audio_routing::voicemeeter::shutdown();
     std::process::exit(0);
 }

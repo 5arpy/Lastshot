@@ -17,7 +17,13 @@ const DEVINTERFACE_AUDIO_CAPTURE: &str = "#{2eef81be-33fa-4800-9670-1cd474972c3f
 
 /// `{0.0.0.00000000}.{guid}` → the form the policy factory takes.
 pub fn pack_device_id(id: &str) -> String {
-    format!("{MMDEVAPI_TOKEN}{id}{DEVINTERFACE_AUDIO_RENDER}")
+    pack_device_id_flow(id, true)
+}
+
+/// Same for an output (`render`) or a microphone.
+pub fn pack_device_id_flow(id: &str, render: bool) -> String {
+    let suffix = if render { DEVINTERFACE_AUDIO_RENDER } else { DEVINTERFACE_AUDIO_CAPTURE };
+    format!("{MMDEVAPI_TOKEN}{id}{suffix}")
 }
 
 /// The policy factory's form → the plain endpoint id (as IMMDevice::GetId).
@@ -70,6 +76,12 @@ mod imp {
         Ok(None)
     }
     pub fn set_output(_pid: u32, _id: Option<&str>) -> Result<(), String> {
+        Err("Windows only".into())
+    }
+    pub fn get_app_device(_pid: u32, _render: bool) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+    pub fn set_app_device(_pid: u32, _render: bool, _id: Option<&str>) -> Result<(), String> {
         Err("Windows only".into())
     }
     pub fn processes() -> Vec<(u32, String)> {
@@ -241,7 +253,7 @@ mod imp {
             *vt.add(i)
         }
 
-        fn set(&self, pid: u32, role: ERole, id: Option<&HSTRING>) -> Result<(), String> {
+        fn set(&self, pid: u32, flow: EDataFlow, role: ERole, id: Option<&HSTRING>) -> Result<(), String> {
             type SetFn = unsafe extern "system" fn(*mut c_void, u32, EDataFlow, ERole, *mut c_void) -> HRESULT;
             unsafe {
                 let f: SetFn = std::mem::transmute(self.slot(SLOT_SET));
@@ -249,16 +261,16 @@ mod imp {
                     Some(h) => std::mem::transmute_copy(h),
                     None => std::ptr::null_mut(),
                 };
-                f(self.0, pid, eRender, role, raw).ok().map_err(|e| e.to_string())
+                f(self.0, pid, flow, role, raw).ok().map_err(|e| e.to_string())
             }
         }
 
-        fn get(&self, pid: u32, role: ERole) -> Result<String, String> {
+        fn get(&self, pid: u32, flow: EDataFlow, role: ERole) -> Result<String, String> {
             type GetFn = unsafe extern "system" fn(*mut c_void, u32, EDataFlow, ERole, *mut *mut c_void) -> HRESULT;
             unsafe {
                 let f: GetFn = std::mem::transmute(self.slot(SLOT_GET));
                 let mut out: *mut c_void = std::ptr::null_mut();
-                f(self.0, pid, eRender, role, &mut out).ok().map_err(|e| e.to_string())?;
+                f(self.0, pid, flow, role, &mut out).ok().map_err(|e| e.to_string())?;
                 // Take ownership so the string is freed.
                 let h: HSTRING = std::mem::transmute(out);
                 Ok(h.to_string_lossy())
@@ -268,19 +280,30 @@ mod imp {
 
     /// The app's own output (plain endpoint id), or None for "Windows default".
     pub fn get_output(pid: u32) -> Result<Option<String>, String> {
+        get_app_device(pid, true)
+    }
+
+    /// The app's own output (`render`) or microphone, None = Windows default.
+    pub fn get_app_device(pid: u32, render: bool) -> Result<Option<String>, String> {
         let f = Factory::new()?;
-        let s = f.get(pid, eMultimedia)?;
+        let s = f.get(pid, if render { eRender } else { eCapture }, eMultimedia)?;
         let id = unpack_device_id(&s);
         Ok((!id.is_empty()).then_some(id))
     }
 
+    /// Sets (Some) or clears (None) the app's own output or microphone.
+    pub fn set_app_device(pid: u32, render: bool, id: Option<&str>) -> Result<(), String> {
+        let f = Factory::new()?;
+        let flow = if render { eRender } else { eCapture };
+        let h = id.map(|i| HSTRING::from(pack_device_id_flow(i, render)));
+        f.set(pid, flow, eMultimedia, h.as_ref())?;
+        f.set(pid, flow, eConsole, h.as_ref())?;
+        Ok(())
+    }
+
     /// Sets (Some) or clears (None) the app's own output device.
     pub fn set_output(pid: u32, id: Option<&str>) -> Result<(), String> {
-        let f = Factory::new()?;
-        let h = id.map(|i| HSTRING::from(pack_device_id(i)));
-        f.set(pid, eMultimedia, h.as_ref())?;
-        f.set(pid, eConsole, h.as_ref())?;
-        Ok(())
+        set_app_device(pid, true, id)
     }
 }
 
@@ -297,6 +320,10 @@ mod tests {
             r"\\?\SWD#MMDEVAPI#{0.0.0.00000000}.{5e3c1b7a-1111-2222-3333-444455556666}#{e6327cad-dcec-4949-ae8a-991e976a79d2}"
         );
         assert_eq!(unpack_device_id(&packed), id);
+        let mic = "{0.0.1.00000000}.{5e3c1b7a-1111-2222-3333-444455556666}";
+        let packed_mic = pack_device_id_flow(mic, false);
+        assert!(packed_mic.ends_with("#{2eef81be-33fa-4800-9670-1cd474972c3f}"));
+        assert_eq!(unpack_device_id(&packed_mic), mic);
         assert_eq!(unpack_device_id(id), id);
         assert_eq!(unpack_device_id(""), "");
         assert_eq!(

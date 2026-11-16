@@ -178,6 +178,9 @@ pub struct Settings {
     /// Audio tab → Cables.
     #[serde(default)]
     pub cables: crate::cables::CableSettings,
+    /// Audio tab → Devices: the Audio guard (off until turned on).
+    #[serde(default)]
+    pub audio_guard: crate::audio_guard::GuardSettings,
 }
 
 /// A popped-out tab's window size and position.
@@ -322,6 +325,7 @@ impl Default for Settings {
             app_outputs: Vec::new(),
             popout_places: Vec::new(),
             cables: Default::default(),
+            audio_guard: Default::default(),
         }
     }
 }

@@ -4,6 +4,7 @@
 //! Tauri v2 application setup: tray icon, global shortcuts, the stats
 //! heartbeat and the IPC surface.
 
+pub mod audio_guard;
 pub mod audio_routing;
 pub mod cables;
 pub mod clipmeta;
@@ -103,6 +104,8 @@ pub fn run() {
 
             // Audio tab → Cables: Lastshot's own virtual cables.
             cables::init(&handle);
+            // Audio tab → Devices: the Audio guard (idle until turned on).
+            audio_guard::init(&handle);
 
             if let Some(path) = files::video_arg(&std::env::args().collect::<Vec<_>>()) {
                 files::request_open(&handle, path);
@@ -374,6 +377,27 @@ pub fn run() {
             cables::cables_list_inputs,
             cables::cables_list_outputs,
             cables::cables_install_support,
+            audio_guard::guard_status,
+            audio_guard::guard_set_settings,
+            audio_guard::guard_set_default,
+            audio_guard::guard_apps,
+            audio_guard::guard_set_app_input,
+            audio_guard::guard_set_app_volume,
+            audio_guard::guard_set_app_options,
+            audio_guard::guard_solo,
+            audio_guard::guard_answer,
+            audio_guard::guard_levels,
+            audio_guard::guard_mic_mute,
+            audio_guard::guard_log,
+            audio_guard::guard_export_log,
+            audio_guard::guard_snapshots,
+            audio_guard::guard_snapshot_take,
+            audio_guard::guard_snapshot_preview,
+            audio_guard::guard_snapshot_restore,
+            audio_guard::guard_snapshot_delete,
+            audio_guard::guard_snapshot_rename,
+            audio_guard::guard_snapshot_export,
+            audio_guard::guard_snapshot_import,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Lastshot")
@@ -385,6 +409,7 @@ pub fn run() {
             }
             if let tauri::RunEvent::Exit = event {
                 cables::shutdown(app);
+                audio_guard::shutdown(app);
                 audio_routing::voicemeeter::shutdown();
             }
         });
@@ -527,6 +552,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                     state.engine.stop();
                 }
                 cables::shutdown(app);
+                audio_guard::shutdown(app);
                 audio_routing::voicemeeter::shutdown();
                 std::process::exit(0);
             }

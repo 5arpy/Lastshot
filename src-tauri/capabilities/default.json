@@ -8,7 +8,8 @@
     "bar",
     "annot",
     "scene",
-    "pop-*"
+    "pop-*",
+    "frame-*"
   ],
   "permissions": [
     "core:default",

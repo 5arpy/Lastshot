@@ -15,7 +15,10 @@ pub mod files;
 pub mod commands;
 pub mod editor;
 pub mod foreground;
+pub mod frames;
 pub mod hotkey_guard;
+#[cfg(feature = "pro-board")]
+pub mod pro_board;
 pub mod hotkeys;
 pub mod library_ops;
 pub mod media;
@@ -175,6 +178,9 @@ pub fn run() {
             appname::start_tracker();
             library_ops::start_watch(&handle);
 
+            // Pop-out frames: reopen the ones that were open, own shortcut.
+            frames::init(&handle);
+
             if std::env::var("LASTSHOT_TEST_INSTANCE").as_deref() == Ok("1") {
                 /* no global shortcuts in test instances */
                 hotkey_guard::skip();
@@ -288,6 +294,7 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             popout::on_event(window, event);
+            frames::on_event(window, event);
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == snip::SNIP_LABEL
                     || window.label() == recording::BAR_LABEL
@@ -412,6 +419,27 @@ pub fn run() {
             popout::popout_open,
             popout::popout_close,
             popout::popout_list,
+            frames::viewer_copy_png,
+            frames::viewer_save_png,
+            frames::frame_open,
+            frames::frame_list,
+            frames::frame_update,
+            frames::frame_set_rect,
+            frames::frame_fullscreen,
+            frames::frame_raise,
+            frames::frame_close,
+            frames::frame_close_all,
+            frames::frame_click_through_all,
+            frames::frame_hide_all,
+            frames::frame_layout,
+            frames::frame_get_hotkey,
+            frames::frame_set_hotkey,
+            frames::frame_from_clipboard,
+            frames::frame_show_panel,
+            #[cfg(feature = "pro-board")]
+            pro_board::board_keep_picture,
+            #[cfg(feature = "pro-board")]
+            pro_board::board_allow,
             audio_guard::guard_status,
             audio_guard::guard_set_settings,
             audio_guard::guard_set_default,
@@ -535,7 +563,8 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         true,
         &[&save, &last30, &record_item, &snip_item, &snip_rec_item, &bar_item, &toggle],
     )?;
-    let menu = Menu::with_items(app, &[&capture, &sep, &show, &folder, &sep, &quit])?;
+    let frames_menu = frames::tray_menu(app)?;
+    let menu = Menu::with_items(app, &[&capture, &frames_menu, &sep, &show, &folder, &sep, &quit])?;
 
     let mut builder = TrayIconBuilder::with_id("lastshot-tray")
         .menu(&menu)
@@ -606,7 +635,9 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 app.cleanup_before_exit();
                 std::process::exit(0);
             }
-            _ => {}
+            other => {
+                frames::on_tray(app, other);
+            }
         })
         .on_tray_icon_event(|tray, event| {
             match event {

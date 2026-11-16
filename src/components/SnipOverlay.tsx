@@ -2,6 +2,8 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { lastshot, isTauri, showCurrentWindow } from "../lib/bridge";
 import type { SnipCapture, SnipWindowRect } from "../lib/types";
 import { cn } from "../utils/cn";
+import Viewer from "../viewer/Viewer";
+import { sameView, viewForRect, type Pt } from "../viewer/math";
 
 /**
  * Full-screen snipping overlay. It runs in its own borderless window that
@@ -146,7 +148,12 @@ export default function SnipOverlay() {
   const [busy, setBusy] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>("shot");
 
+  // The marked-up selection at full resolution. The viewer shows it (zoom,
+  // pan, turn, inspect); at rest it sits exactly over the frozen screen.
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  if (!canvasRef.current && typeof document !== "undefined") canvasRef.current = document.createElement("canvas");
+  const [canvasVersion, setCanvasVersion] = useState(0);
+  const [zoomed, setZoomed] = useState(false);
   const shown = useRef(false);
 
   // Physical pixels per CSS pixel.
@@ -208,6 +215,7 @@ export default function SnipOverlay() {
       c.height = sel.h;
     }
     render(c.getContext("2d")!, img, sel, draft ? [...shapes, draft] : shapes, blockPx);
+    setCanvasVersion((v) => v + 1);
   }, [img, sel, shapes, draft, blockPx]);
 
   const toImage = (e: React.PointerEvent | PointerEvent): [number, number] => {
@@ -235,6 +243,9 @@ export default function SnipOverlay() {
   }, [capture, select]);
 
   // ------------------------------------------------------------ finish
+  /** Host buttons at the end of the viewer's bar. */
+  const snipExtra: React.ReactNode = null;
+
   const finish = useCallback(
     async (save: boolean) => {
       const c = canvasRef.current;
@@ -340,20 +351,29 @@ export default function SnipOverlay() {
   };
 
   // ------------------------------------------------------------ markup pointer
-  const toSel = (e: React.PointerEvent): [number, number] => {
-    const [x, y] = toImage(e);
-    return [x - (sel?.x ?? 0), y - (sel?.y ?? 0)];
-  };
-  const onEditDown = (e: React.PointerEvent) => {
-    if (e.button !== 0 || busy || mode === "rec") return;
-    (e.target as Element).setPointerCapture(e.pointerId);
-    const [x, y] = toSel(e);
+  // Markup gets points in the selection's own pixels from the viewer, so it
+  // works the same zoomed, panned or turned.
+  const onEditDown = (p: Pt, e: React.PointerEvent) => {
+    if (e.button !== 0 || busy) return;
+    const outside = !sel || p.x < 0 || p.y < 0 || p.x > sel.w || p.y > sel.h;
+    if (outside && !zoomed) {
+      // Clicking outside the selection with no markup starts over.
+      if (shapes.length === 0) {
+        setSel(null);
+        onPickDown(e);
+      }
+      return;
+    }
+    if (mode === "rec") return;
+    const x = Math.round(p.x);
+    const y = Math.round(p.y);
     if (tool === "pen") setDraft({ kind: "pen", points: [[x, y]], color, width: strokeWidth });
     else setDraft({ kind: tool, x1: x, y1: y, x2: x, y2: y, color, width: strokeWidth });
   };
-  const onEditMove = (e: React.PointerEvent) => {
+  const onEditMove = (p: Pt) => {
     if (!draft) return;
-    const [x, y] = toSel(e);
+    const x = Math.round(p.x);
+    const y = Math.round(p.y);
     if (draft.kind === "pen") setDraft({ ...draft, points: [...draft.points, [x, y]] });
     else setDraft({ ...draft, x2: x, y2: y });
   };
@@ -369,6 +389,7 @@ export default function SnipOverlay() {
 
   // ------------------------------------------------------------ layout
   const css = (r: Rect) => ({ left: r.x / scale, top: r.y / scale, width: r.w / scale, height: r.h / scale });
+  const cssRect = (r: Rect) => ({ x: r.x / scale, y: r.y / scale, w: r.w / scale, h: r.h / scale });
   const live: Rect | null = sel
     ? sel
     : drag
@@ -413,7 +434,7 @@ export default function SnipOverlay() {
       <img src={capture.image} alt="" draggable={false} className="pointer-events-none absolute inset-0 h-full w-full" />
 
       {/* Dim everything except the live rectangle. */}
-      {liveCss ? (
+      {zoomed && sel ? null : liveCss ? (
         <div
           className="pointer-events-none absolute rounded-[1px]"
           style={{
@@ -518,26 +539,25 @@ export default function SnipOverlay() {
 
       {sel && (
         <>
-          {/* Clicking outside the selection with no markup starts over. */}
-          <div
+          {zoomed && <div className="pointer-events-none absolute inset-0 bg-[#0a0c10]" />}
+          {/* The selection in the viewer: wheel zooms (to single pixels),
+              Space+drag or the middle button pans, C picks colours, D
+              measures, H mirrors. Markup keeps working at any zoom. */}
+          <Viewer
             className="absolute inset-0"
-            onPointerDown={(e) => {
-              if (shapes.length === 0 && !busy) {
-                setSel(null);
-                onPickDown(e);
-              }
-            }}
-            onPointerMove={(e) => drag && onPickMove(e)}
-            onPointerUp={(e) => drag && onPickUp(e)}
-          />
-          <canvas
-            ref={canvasRef}
-            className="absolute"
-            style={{ ...css(sel), cursor: mode === "rec" ? "default" : "crosshair" }}
-            onPointerDown={onEditDown}
-            onPointerMove={onEditMove}
-            onPointerUp={onEditUp}
+            source={canvasRef.current}
+            version={canvasVersion}
+            name="Lastshot snip"
+            background="none"
+            leftDragPans={false}
+            bar="show"
+            barPlace="bottom"
+            exportKeys={false}
+            homeView={(c) => viewForRect(c, cssRect(sel))}
+            onViewChange={(v, _st, c) => setZoomed(!sameView(v, viewForRect(c, cssRect(sel))))}
+            pointer={{ down: onEditDown, move: onEditMove, up: onEditUp }}
             onDoubleClick={() => void finish(false)}
+            extra={snipExtra}
           />
           {mode === "rec" ? (
             <div

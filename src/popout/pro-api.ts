@@ -1,0 +1,29 @@
+/**
+ * The one seam between the free app and Lastshot Pro (open core).
+ *
+ * `import pro from "lastshot-pro"` resolves (vite.config.ts alias) to
+ * `src/pro/index.ts` when built with `VITE_PRO_BOARD=1`, and to
+ * `src/popout/no-pro.ts` otherwise, so a free build never sees Pro code and
+ * builds fine when `src/pro/` is missing. Both export a `ProModule`.
+ */
+import type { ComponentType } from "react";
+import type { Frame } from "./frames";
+
+export interface FrameBodyProps {
+  frame: Frame;
+  /** Shows a short status line in the frame. */
+  status: (msg: string) => void;
+}
+
+export interface ProAction {
+  label: string;
+  title: string;
+  run: () => void | Promise<unknown>;
+}
+
+export interface ProModule {
+  /** Draws the inside of a frame of a Pro kind ("board", "live"). */
+  FrameBody: ComponentType<FrameBodyProps> | null;
+  /** Extra buttons in the Pop-outs panel ("New reference board", …). */
+  panelActions: ProAction[];
+}

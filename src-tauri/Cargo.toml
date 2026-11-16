@@ -130,6 +130,9 @@ headless-sim = []
 # Lastshot Pro: virtual audio cables (src/cables/, CablesSection.tsx).
 # The free build leaves this off and compiles no cable code.
 pro-cables = []
+# Lastshot Pro: the Reference board and live pop-outs (src/pro_board.rs,
+# src/pro/). Off in the free build.
+pro-board = []
 
 [profile.dev]
 incremental = true

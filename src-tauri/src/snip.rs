@@ -16,6 +16,8 @@ use crate::commands::{AppState, EVT_ERROR};
 
 pub const EVT_SNIP_DONE: &str = "lastshot://snip-done";
 pub use imp::snapshot;
+/// Also used by the viewer and pop-out frames ("copy this frame").
+pub(crate) use imp::copy_png;
 
 pub const SNIP_LABEL: &str = "snip";
 

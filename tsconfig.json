@@ -18,7 +18,8 @@
     /* Path mapping */
     "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["src/*"],
+      "lastshot-pro": ["src/popout/no-pro.ts"]
     },
 
     /* Linting */

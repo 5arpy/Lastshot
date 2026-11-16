@@ -13,10 +13,32 @@ All notable changes to **Lastshot** (and, before 1.7.1, to **ClipFlow**, which L
 - **Pop out a tab.** *Pop out* (next to the tabs) opens Audio, Editor or Studio in a window of its own, with its own taskbar button. It remembers its size and place. The main window shows where the tab went, with *Bring back*; closing the window brings the tab back as well.
 - **Whose sound.** *PC sound* can now be *Everything*, *Only one app* (just the game) or *Everything except one app* (leave out Discord), in Studio and Settings › Sound. The sound follows the app when it starts or restarts. Needs Windows 10 (2004) or newer.
 
+- **Studio layers are part of the video.** Pictures, text, the clock, the timer and the webcam are drawn into replays and recordings by the recorder, also when Lastshot runs in the tray without its window. Studio shows a live preview while it is open.
+- **Window capture method** in Studio: *Automatic*, *Crop from screen* or *Graphics Capture*. Full screen falls back to Graphics Capture by itself when the usual capture can't start or stays black.
+- **Clips named after the game** (`Roblox 2026-11-16 20-15-03.mp4`), in **a folder per game** (on by default; Settings › *Sort clips into a folder per game*).
+- **Clips works like File Explorer:** game folders, path bar, back / forward, *All clips*, *Recent*, grid or details view, search. Select several clips, make folders, rename (F2), move, drag onto a folder, cut / copy / paste, *Show in File Explorer*, *Copy for Discord*. It updates by itself when files change in Explorer.
+- **Always on, in the tray.** With *Launch at startup*, Lastshot starts in the tray with instant replay on and no window. It restarts itself after a crash (up to three times in a row) and after a Windows update restart.
+- **Scenes in Studio:** save a source plus its layers and switch with one click. **Crop** pictures and the webcam.
+- **Portable mode:** an empty file named `portable` next to `lastshot.exe` keeps all settings in a `Lastshot data` folder beside it.
+- **Sound meters** in Studio, and **Clean up my voice** (off by default): less background noise, steadier level, no clipping.
+- **Audio → Devices:** default playback and recording devices with a fallback order; per app: microphone, volume, mute, solo and a meter.
+- **Audio guard** (off by default): when Windows or an app changes a default device or moves an app, Lastshot asks, puts it back, or only logs it. Automatic backups of the audio setup, named setups, a change history, auto-duck and a mic-mute shortcut.
+- **Audio → Cables (Lastshot Pro):** Lastshot's own virtual audio cables, without Voicemeeter. Not in the free build.
+- **Viewer: zoom to single pixels** (up to 6400 %, sharp pixels, pixel grid), pan, turn and flip (H mirrors), frame by frame (`,` and `.`), slow motion and loops, colour picker (C), measure (D), crop the view, compare (wipe, difference, side by side), value check, grids, colour adjustments, onion skin. Ctrl+C copies the frame, Ctrl+S saves it as a PNG. The snip editor has the same viewer. "?" lists every key.
+- **Pop-out frames.** Pop out a snip, a picture, a clip's current frame or the playing clip into a borderless window that stays on top, to trace or copy from in another app (Blender, a drawing app). Opacity down to 5 %, click-through (clicks go to the app below), zoom and pan inside the frame, flip, grayscale and a grid, free resize with the shape kept (Shift frees it). Frames never take the keyboard focus and remember their place, size and settings. Control them all from the *Pop-outs* panel, the tray, or **Ctrl+Alt+Shift+X** (click-through on / off for every frame). Drop a picture on Lastshot or paste one (Ctrl+V) to pop it out.
+
+### Changed
+
+- **Deleting clips moves them to the Recycle Bin**, so they can be restored. Automatic cleanup of old clips still frees the space for good.
+
 ### Fixed
 
 - A recording started right after Lastshot started (or right after a settings change) could have no sound at all. It now always gets its sound track, from the first frame.
 - Changing what to record and pressing *Record* straight away could record with the old setting and then cut the recording short.
+- **Shortcuts like Alt+C could stop working for good** when another app briefly held one at start-up. Each shortcut is now set up on its own, retried every 3 seconds and checked every 10 seconds (and after sleep or unlocking). If one stays taken, a notification says so, and Settings shows *Not working* with *Try again*.
+- The microphone slider in Studio set the volume to almost nothing.
+- Quitting left the tray icon behind until the mouse passed over it.
+- 60 fps replays and recordings could drop frames or play unevenly; frames are now placed on an even 60 fps grid.
 
 ## [1.9.0] - 2026-11-15
 

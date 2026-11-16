@@ -191,7 +191,7 @@ export default function EditorView(props: EditorProps) {
   const selRef = useRef(sel);
   selRef.current = sel;
   const [gap, setGap] = useState<{ track: string; t: number; start: number; end: number } | null>(null);
-  const [tool, setToolState] = useState<Tool | "blade">("select");
+  const [tool, setToolState] = useState<Tool | "blade" | "slip">("select");
   const [style, setStyle] = usePersist<Style>("style", DEFAULT_STYLE);
   const [editing, setEditing] = useState<string | null>(null);
   const [crop, setCrop] = useState<{ id: string; aspect: import("../lib/edit").CropAspect } | null>(null);
@@ -218,9 +218,9 @@ export default function EditorView(props: EditorProps) {
   const flushMsRef = useRef<number | undefined>(undefined);
   const shuttle = useRef(0);
 
-  const setTool = (t: Tool | "blade") => {
+  const setTool = (t: Tool | "blade" | "slip") => {
     setToolState(t);
-    if (t !== "select" && t !== "blade") setShowDraw(true);
+    if (t !== "select" && t !== "blade" && t !== "slip") setShowDraw(true);
   };
 
   const selItems = useMemo(() => p.tl.items.filter((i) => sel.has(i.id)), [p.tl.items, sel]);
@@ -906,6 +906,7 @@ export default function EditorView(props: EditorProps) {
     split: () => split(false),
     splitAll: () => split(true),
     blade: () => setTool(tool === "blade" ? "select" : "blade"),
+    slip: () => setTool(tool === "slip" ? "select" : "slip"),
     select: () => setTool("select"),
     del: () => del(false),
     rippleDelete: () => del(true),
@@ -1249,7 +1250,7 @@ export default function EditorView(props: EditorProps) {
   const undoL = hist.current.undoLabel;
   const redoL = hist.current.redoLabel;
   const trackHeight = useCallback((t: Track) => TRACK_H[t.kind] ?? 48, []);
-  const previewTool: Tool = tool === "blade" ? "select" : tool;
+  const previewTool: Tool = tool === "blade" || tool === "slip" ? "select" : tool;
 
   const arrange = {
     flip: (axis: "x" | "y") => void shapeEdit((s) => flipShape(s, axis), "Flip"),
@@ -1302,6 +1303,9 @@ export default function EditorView(props: EditorProps) {
         </Btn>
         <Btn title={k("Blade tool (click a clip to cut it)")} on={tool === "blade"} onClick={actions.blade}>
           <Ico d={I.blade} />
+        </Btn>
+        <Btn title={k("Slip tool (drag what a clip shows; Alt+drag a cut rolls it)")} on={tool === "slip"} onClick={actions.slip}>
+          <Ico d={I.slip} />
         </Btn>
         <Btn title={k("Split at playhead")} onClick={() => split(false)}>
           <Ico d={I.split} />
@@ -1519,7 +1523,7 @@ export default function EditorView(props: EditorProps) {
             view={view}
             onView={setView}
             snapping={p.snapping}
-            tool={tool === "blade" ? "blade" : "select"}
+            tool={tool === "blade" || tool === "slip" ? tool : "select"}
             ripple={p.ripple}
             editOpts={editOpts}
             onEdit={setTl}

@@ -18,6 +18,7 @@ export const I = {
   redo: "M11 4l3 3-3 3M14 7H7a4 4 0 0 0 0 8h2",
   split: "M8 1v14M4 4l-2 4 2 4M12 4l2 4-2 4",
   blade: "M3 13L13 3M9 3h4v4",
+  slip: "M2 4h12v8H2zM5 8h6M5 8l1.5-1.5M5 8l1.5 1.5M11 8l-1.5-1.5M11 8l-1.5 1.5",
   select: "M3 2l9 5-4 1.5L6.5 13z",
   trash: "M3 4h10M6 4V2.5h4V4M4.5 4l.7 9.5h5.6l.7-9.5",
   ripple: "M2 8h5M9 5l-3 3 3 3M14 3v10",

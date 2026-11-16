@@ -31,6 +31,7 @@ export interface EditorActions {
   split: () => void;
   splitAll: () => void;
   blade: () => void;
+  slip: () => void;
   select: () => void;
   del: () => void;
   rippleDelete: () => void;
@@ -99,6 +100,7 @@ export function editorKeymap(a: EditorActions): Shortcut[] {
     { keys: "Ctrl+B", label: "Split at playhead", group: "Edit", run: a.split },
     { keys: "Shift+S", label: "Split every track", group: "Edit", run: a.splitAll },
     { keys: "B", label: "Blade tool (click a clip to cut it)", group: "Tools", run: a.blade },
+    { keys: "Y", label: "Slip tool (drag what a clip shows; Alt+drag a cut rolls it)", group: "Tools", run: a.slip },
     { keys: "V", label: "Select / move tool", group: "Tools", run: a.select },
     { keys: "Delete", label: "Delete (leaves a gap)", group: "Edit", run: a.del },
     { keys: "Backspace", label: "Delete (leaves a gap)", group: "Edit", run: a.del },

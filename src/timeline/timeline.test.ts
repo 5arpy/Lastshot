@@ -345,3 +345,29 @@ describe("extract range", () => {
     expect(keep.items.find((i) => i.track === "v1")!.srcIn).toBe(3);
   });
 });
+
+import { rollEdit, slipItem } from "./ops";
+describe("slip and roll", () => {
+  it("slip moves what the clip shows, not where it is, within the source", () => {
+    const t = tl([it2("a", "v1", 2, 4, { srcIn: 3, srcDuration: 10 }), it2("s", "a1", 2, 4, { srcIn: 3, srcDuration: 10, link: "L" }), it2("x", "v1", 6, 2)]);
+    t.items[0] = { ...t.items[0], link: "L" };
+    const r = slipItem(t, "a", 2);
+    expect(r.items.find((i) => i.id === "a")).toMatchObject({ start: 2, duration: 4, srcIn: 5 });
+    expect(r.items.find((i) => i.id === "s")?.srcIn).toBe(5);
+    expect(slipItem(t, "a", 50).items[0].srcIn).toBe(6);
+    expect(slipItem(t, "a", -50).items[0].srcIn).toBe(0);
+  });
+  it("roll moves the cut between two touching clips", () => {
+    const t = tl([it2("a", "v1", 0, 4, { srcIn: 0, srcDuration: 10 }), it2("b", "v1", 4, 4, { srcIn: 2, srcDuration: 10 })]);
+    const r = rollEdit(t, "a", "right", 5);
+    expect(spans(r, "v1")).toEqual([
+      [0, 5],
+      [5, 8],
+    ]);
+    expect(r.items.find((i) => i.id === "b")?.srcIn).toBe(3);
+    // The right clip cannot show source before 0: the cut stops at 2.
+    expect(spans(rollEdit(t, "b", "left", 0), "v1")[0]).toEqual([0, 2]);
+    // Nothing touching: no change.
+    expect(rollEdit(tl([it2("a", "v1", 0, 4)]), "a", "right", 6).items[0].duration).toBe(4);
+  });
+});

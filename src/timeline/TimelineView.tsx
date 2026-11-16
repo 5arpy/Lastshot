@@ -1,6 +1,6 @@
 import { type ReactNode, type Ref, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { EPS, type Item, type Marker, type Timeline, type Track, end, timelineEnd, withLinked } from "./model";
-import { type EditOpts, type Move, type PlaceMode, itemsInBox, moveItems, patchMarker, splitAt, trimItem } from "./ops";
+import { type EditOpts, type Move, type PlaceMode, itemsInBox, moveItems, patchMarker, rollEdit, slipItem, splitAt, trimItem } from "./ops";
 import { nearest, snapPoints, snapSpan } from "./snap";
 import { type TlView, rulerLabel, tickStep, timeToX, xToTime, zoomAt } from "./view";
 
@@ -55,7 +55,8 @@ export interface TimelineViewProps<I extends Item> {
   view: TlView;
   onView: (v: TlView) => void;
   snapping: boolean;
-  tool: "select" | "blade";
+  /** select; blade cuts on click; slip drags what a clip shows (Y). */
+  tool: "select" | "blade" | "slip";
   /** Ripple trims (and Ctrl while trimming). */
   ripple: boolean;
   editOpts: () => EditOpts;
@@ -85,7 +86,8 @@ const RULER_H = 26;
 
 type Drag =
   | { kind: "move"; x0: number; y0: number; t0: number; orig: Timeline<Item>; ids: string[]; anchor: Item; moved: boolean; trackIdx0: number }
-  | { kind: "trim"; orig: Timeline<Item>; id: string; edge: "left" | "right"; moved: boolean }
+  | { kind: "trim"; orig: Timeline<Item>; id: string; edge: "left" | "right"; moved: boolean; roll: boolean }
+  | { kind: "slip"; orig: Timeline<Item>; id: string; t0: number; moved: boolean }
   | { kind: "marquee"; x0: number; y0: number; add: boolean; before: Set<string>; moved: boolean; t: number; track: Track | null }
   | { kind: "scrub" }
   | { kind: "marker"; id: string; orig: Timeline<Item>; moved: boolean };
@@ -285,8 +287,11 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
       }
       P.onSelection(sel);
       if (locked) return;
-      if (edge) {
-        drag.current = { kind: "trim", orig: P.tl as Timeline<Item>, id: it.id, edge, moved: false };
+      if (P.tool === "slip" && !edge) {
+        drag.current = { kind: "slip", orig: P.tl as Timeline<Item>, id: it.id, t0: t, moved: false };
+      } else if (edge) {
+        // Alt on a cut between two clips rolls it (one longer, one shorter).
+        drag.current = { kind: "trim", orig: P.tl as Timeline<Item>, id: it.id, edge, moved: false, roll: e.altKey };
       } else {
         const ids = [...sel].filter((id) => {
           const x = P.tl.items.find((i) => i.id === id);
@@ -364,10 +369,22 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
         }
       }
       setSnapAt(at);
-      const next = trimItem(d.orig as Timeline<I>, d.id, d.edge, t, { ripple: P.ripple || e.ctrlKey, ...P.editOpts() });
+      const rolled = d.roll ? rollEdit(d.orig as Timeline<I>, d.id, d.edge, t) : null;
+      const roll = !!rolled && rolled !== d.orig;
+      const next = roll ? rolled! : trimItem(d.orig as Timeline<I>, d.id, d.edge, t, { ripple: P.ripple || e.ctrlKey, ...P.editOpts() });
       const it = next.items.find((i) => i.id === d.id);
       P.onEdit(next, "live", "Trim");
-      if (it) setTip({ x: e.clientX, y: e.clientY, text: `${fmt(it.duration)} long${P.ripple || e.ctrlKey ? " · Ripple" : ""}` });
+      if (it) setTip({ x: e.clientX, y: e.clientY, text: roll ? `Roll · cut at ${fmt(d.edge === "right" ? end(it) : it.start)}` : `${fmt(it.duration)} long${P.ripple || e.ctrlKey ? " · Ripple" : ""}` });
+    } else if (d.kind === "slip") {
+      if (!d.moved) {
+        d.moved = true;
+        P.onEdit(P.tl, "start", "Slip");
+      }
+      // Dragging right shows earlier source (the picture moves with the mouse).
+      const next = slipItem(d.orig as Timeline<I>, d.id, d.t0 - timeAt(e.clientX));
+      const it = next.items.find((i) => i.id === d.id);
+      P.onEdit(next, "live", "Slip");
+      if (it) setTip({ x: e.clientX, y: e.clientY, text: `Slip · shows ${fmt(it.srcIn)} to ${fmt(it.srcIn + it.duration)}` });
     } else if (d.kind === "marquee") {
       if (!d.moved && Math.hypot(e.clientX - d.x0, e.clientY - d.y0) < 4) return;
       d.moved = true;
@@ -396,8 +413,8 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
       /* not captured */
     }
     if (!d) return;
-    if (d.kind === "move" || d.kind === "trim") {
-      if (d.moved) P.onEdit(P.tl, "end", d.kind === "move" ? "Move" : "Trim");
+    if (d.kind === "move" || d.kind === "trim" || d.kind === "slip") {
+      if (d.moved) P.onEdit(P.tl, "end", d.kind === "move" ? "Move" : d.kind === "slip" ? "Slip" : "Trim");
     } else if (d.kind === "marquee" && !d.moved) {
       // A click on empty track: playhead there, and the gap (if any) selected.
       if (!d.add) P.onSelection(new Set());
@@ -542,7 +559,7 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
           </div>
           <div
             ref={lanesRef}
-            className={`relative flex-1 overflow-hidden ${p.tool === "blade" ? "cursor-crosshair" : hoverEdge ? "cursor-ew-resize" : ""}`}
+            className={`relative flex-1 overflow-hidden ${p.tool === "blade" ? "cursor-crosshair" : p.tool === "slip" ? "cursor-col-resize" : hoverEdge ? "cursor-ew-resize" : ""}`}
             onPointerDown={onLaneDown}
             onPointerMove={onLaneMove}
             onPointerUp={onLaneUp}

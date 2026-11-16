@@ -220,6 +220,57 @@ export function trimItem<I extends Item>(tl: Timeline<I>, id: string, edge: "lef
 }
 
 /**
+ * Slip: the item stays where it is; the part of its source it shows moves
+ * by `d` seconds (Premiere's Y). Linked items slip with it. Clamped to the
+ * source.
+ */
+export function slipItem<I extends Item>(tl: Timeline<I>, id: string, d: number): Timeline<I> {
+  const ids = withLinked(tl, [id]);
+  const group = tl.items.filter((i) => ids.has(i.id) && i.srcDuration !== undefined);
+  if (!group.length || group.some((g) => isLocked(tl, g.track))) return tl;
+  let lo = -Infinity;
+  let hi = Infinity;
+  for (const g of group) {
+    lo = Math.max(lo, -g.srcIn);
+    hi = Math.min(hi, g.srcDuration! - g.srcIn - g.duration);
+  }
+  if (hi < lo) return tl;
+  const dd = round(Math.min(hi, Math.max(lo, d)));
+  if (Math.abs(dd) < EPS) return tl;
+  const set = new Set(group.map((g) => g.id));
+  return { ...tl, items: tl.items.map((i) => (set.has(i.id) ? cloneItem(i, { srcIn: round(i.srcIn + dd) } as Partial<I>) : i)) };
+}
+
+/**
+ * Roll: moves the cut between `id` and the item touching its `edge` to `to`.
+ * One gets longer, the other shorter; nothing else moves. Returns the
+ * timeline unchanged when no item touches that edge.
+ */
+export function rollEdit<I extends Item>(tl: Timeline<I>, id: string, edge: "left" | "right", to: number): Timeline<I> {
+  const it = tl.items.find((i) => i.id === id);
+  if (!it || isLocked(tl, it.track)) return tl;
+  const cut = edge === "right" ? end(it) : it.start;
+  const other = tl.items.find((i) => i.track === it.track && i.id !== it.id && (edge === "right" ? Math.abs(i.start - cut) < 1e-3 : Math.abs(end(i) - cut) < 1e-3));
+  if (!other) return tl;
+  const [a, b] = edge === "right" ? [it, other] : [other, it];
+  let lo = Math.max(a.start + MIN_LEN, b.srcDuration !== undefined ? b.start - b.srcIn : -Infinity);
+  let hi = Math.min(end(b) - MIN_LEN, a.srcDuration !== undefined ? a.start + (a.srcDuration - a.srcIn) : Infinity);
+  if (hi < lo) return tl;
+  const t = round(Math.min(hi, Math.max(lo, to)));
+  const d = t - cut;
+  return {
+    ...tl,
+    items: tl.items.map((i) =>
+      i.id === a.id
+        ? cloneItem(i, { duration: round(t - i.start) } as Partial<I>)
+        : i.id === b.id
+          ? cloneItem(i, { start: t, srcIn: i.srcDuration === undefined ? i.srcIn : round(i.srcIn + d), duration: round(i.duration - d) } as Partial<I>)
+          : i,
+    ),
+  };
+}
+
+/**
  * Splits items under `t`. With `ids`, only those (and their links); else
  * every item on an unlocked track. Returns the new right-hand pieces too.
  */

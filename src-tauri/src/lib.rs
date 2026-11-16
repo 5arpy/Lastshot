@@ -19,6 +19,10 @@ pub mod frames;
 pub mod hotkey_guard;
 #[cfg(feature = "pro-board")]
 pub mod pro_board;
+// Extension seam (the `pro` feature): an optional module with
+// `init`, `handles`, `invoke_handler` and `shutdown`. Not in the free build.
+#[cfg(feature = "pro")]
+mod pro;
 pub mod hotkeys;
 pub mod library_ops;
 pub mod media;
@@ -133,6 +137,9 @@ pub fn run() {
             cables::init(&handle);
             // Audio tab → Devices: the Audio guard (idle until turned on).
             audio_guard::init(&handle);
+            // Extension seam (`pro` feature).
+            #[cfg(feature = "pro")]
+            pro::init(&handle);
 
             if let Some(path) = files::video_arg(&std::env::args().collect::<Vec<_>>()) {
                 files::request_open(&handle, path);
@@ -478,26 +485,35 @@ pub fn run() {
         });
 }
 
-/// The app's commands, plus the Pro cables' commands when built with them.
+/// The app's commands, plus the Pro cables' commands and the extension
+/// module's commands when built with them.
 fn invoke_handler(
     free: impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static,
 ) -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
     #[cfg(feature = "pro-cables")]
-    let pro = cables::invoke_handler();
+    let cables_handler = cables::invoke_handler();
+    #[cfg(feature = "pro")]
+    let pro_handler = pro::invoke_handler();
     move |invoke| {
         #[cfg(feature = "pro-cables")]
         if cables::handles(invoke.message.command()) {
-            return pro(invoke);
+            return cables_handler(invoke);
+        }
+        #[cfg(feature = "pro")]
+        if pro::handles(invoke.message.command()) {
+            return pro_handler(invoke);
         }
         free(invoke)
     }
 }
 
-/// Before Lastshot quits: detach the cables (Pro), undo the Audio guard's
-/// temporary mutes, release Voicemeeter.
+/// Before Lastshot quits: detach the cables (Pro), stop the extension module,
+/// undo the Audio guard's temporary mutes, release Voicemeeter.
 pub(crate) fn quit_cleanup(app: &tauri::AppHandle) {
     #[cfg(feature = "pro-cables")]
     cables::shutdown(app);
+    #[cfg(feature = "pro")]
+    pro::shutdown(app);
     audio_guard::shutdown(app);
     audio_routing::voicemeeter::shutdown();
 }

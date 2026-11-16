@@ -14,8 +14,12 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "src"),
-      // Open core: Lastshot Pro code only with VITE_PRO_BOARD=1 (src/popout/pro-api.ts).
-      "lastshot-pro": path.resolve(__dirname, process.env.VITE_PRO_BOARD === "1" ? "src/pro/index.ts" : "src/popout/no-pro.ts"),
+      // Open core: Lastshot Pro code only with VITE_PRO=1 or VITE_PRO_BOARD=1
+      // (src/popout/pro-api.ts).
+      "lastshot-pro": path.resolve(
+        __dirname,
+        process.env.VITE_PRO === "1" || process.env.VITE_PRO_BOARD === "1" ? "src/pro/index.ts" : "src/popout/no-pro.ts",
+      ),
       // Lastshot Pro's Cables section only with VITE_PRO_CABLES=1 (with the
       // `pro-cables` cargo feature); the free build bundles no cable UI.
       "lastshot-cables": path.resolve(

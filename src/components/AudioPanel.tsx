@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 import { useCallback, useEffect, useRef, useState, type ComponentType, type KeyboardEvent, type PointerEvent } from "react";
 import CablesModule from "lastshot-cables";
+import pro from "lastshot-pro";
 import {
   audio,
   dbToPos,
@@ -352,6 +353,11 @@ export default function AudioPanel({ active = true, onToast }: { active?: boolea
       <DevicesSection live={live} onToast={onToast} />
 
       {CablesSection && <CablesSection live={live} onToast={onToast} onCableIds={setCableIds} />}
+
+      {/* Extra sections from an extension module (none in the free build). */}
+      {pro.audioSections.map((Section, i) => (
+        <Section key={i} live={live} onToast={onToast} />
+      ))}
 
       {/* Apps */}
       <section className="panel rounded-xl p-5">

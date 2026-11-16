@@ -133,6 +133,10 @@ pro-cables = []
 # Lastshot Pro: the Reference board and live pop-outs (src/pro_board.rs,
 # src/pro/). Off in the free build.
 pro-board = []
+# Extension seam: compiles an optional `src/pro/` module (init, commands,
+# shutdown) that is not part of this repository. Off in the free build, which
+# never references it.
+pro = []
 
 [profile.dev]
 incremental = true

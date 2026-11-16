@@ -1323,7 +1323,7 @@ export default function EditorView(props: EditorProps) {
         <Btn title={showBin ? "Hide media" : "Show media"} on={showBin} onClick={() => setShowBin(!showBin)}>
           <Ico d={I.media} />
         </Btn>
-        <button type="button" onClick={projectsMenu} title="Projects: new, recent, rename, duplicate" className="ml-1 flex h-7 max-w-[220px] items-center gap-1 rounded-md px-2 text-[12px] font-semibold text-ink hover:bg-surface-4">
+        <button type="button" onClick={projectsMenu} title={`Projects: new, recent, rename, duplicate · autosaved ${new Date(p.updated).toLocaleTimeString()}`} className="ml-1 flex h-7 max-w-[220px] items-center gap-1 rounded-md px-2 text-[12px] font-semibold text-ink hover:bg-surface-4">
           <span className="truncate">{p.name}</span>
           <span className="text-[9px] text-ink-4">▼</span>
         </button>

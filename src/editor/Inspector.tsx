@@ -443,7 +443,10 @@ export default function Inspector(P: InspectorProps) {
                 onChange={(v) => P.patchProject({ fps: v }, "Frame rate")}
                 options={[
                   { v: "auto", label: "Auto", title: "The highest clip rate" },
+                  { v: 24, label: "24", title: "Film" },
+                  { v: 25, label: "25", title: "PAL" },
                   { v: 30, label: "30" },
+                  { v: 50, label: "50" },
                   { v: 60, label: "60" },
                   { v: 120, label: "120" },
                 ]}

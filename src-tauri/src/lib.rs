@@ -146,7 +146,9 @@ pub fn run() {
                     s.hotkey_toggle.clone(),
                     s.hotkey_snip.clone(),
                     s.hotkey_record.clone(),
-                    s.autostart_buffer,
+                    // Test copies never capture the screen on their own:
+                    // a test starts the buffer on its own window.
+                    s.autostart_buffer && !startup::is_test_instance(),
                     // If auto-switch is on and the game already in the foreground
                     // maps to a profile, arm the buffer with that profile's
                     // capture values from frame zero.

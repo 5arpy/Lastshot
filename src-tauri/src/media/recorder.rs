@@ -637,18 +637,22 @@ impl RollingRingBuffer {
             None => i64::MIN,
         };
 
-        // Find the first key frame at or after the lower bound (walking back so
-        // we keep as much history as the user asked for).
-        let mut start_idx = 0usize;
+        // Start on the newest key frame at or before the lower bound, so the
+        // clip holds at least the history asked for (never up to a GOP less);
+        // when the buffer is shorter, on its first key frame.
+        let mut start_idx = None;
+        let mut first_key = None;
         for (i, p) in self.video.iter().enumerate() {
-            if p.generation == generation && p.keyframe && p.pts_hns >= lower_bound {
-                start_idx = i;
+            if p.generation != generation || !p.keyframe {
+                continue;
+            }
+            first_key.get_or_insert(i);
+            if p.pts_hns > lower_bound {
                 break;
             }
-            if p.generation == generation && p.keyframe {
-                start_idx = i; // keep the newest key frame that is still older
-            }
+            start_idx = Some(i);
         }
+        let start_idx = start_idx.or(first_key).unwrap_or(0);
 
         let video: Vec<EncodedPacket> = self
             .video
@@ -4034,6 +4038,20 @@ mod ring_buffer_tests {
         assert!(span >= 9.0, "10 s request returned {span:.1}s");
         assert!(span <= 12.5, "10 s request returned {span:.1}s (too much)");
         assert!(video[0].keyframe);
+    }
+
+    #[test]
+    fn snapshot_never_returns_less_than_asked_when_the_gop_is_off_grid() {
+        // 1.5 s GOP: key frames at 0, 1.5, 3, ... never on the 10 s mark.
+        let mut ring = RollingRingBuffer::new(60, ring_cap_mb(60, 12_000));
+        feed_video(&mut ring, 31, 90, 1_000);
+        for want in [4.0f32, 10.0, 7.3] {
+            let (video, _) = ring.snapshot(Some(want));
+            let span = (video.last().unwrap().pts_hns - video[0].pts_hns) as f32 / HNS_PER_SECOND as f32;
+            assert!(video[0].keyframe);
+            assert!(span >= want - 0.02, "{want} s request returned {span:.2}s");
+            assert!(span <= want + 1.5, "{want} s request returned {span:.2}s (too much)");
+        }
     }
 
     #[test]

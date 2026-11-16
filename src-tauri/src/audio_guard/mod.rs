@@ -276,7 +276,14 @@ fn set_default(app: &AppHandle, flow: Flow, roles: &[Role], id: &str) -> Result<
 
 fn set_app_device(app: &AppHandle, pid: u32, render: bool, id: Option<&str>) -> Result<(), String> {
     mark_own(app, format!("a{pid}{render}"));
-    app_output::set_app_device(pid, render, id).inspect_err(|e| set_error(app, Some(format!("Per-app devices are not available ({e})"))))
+    let r = app_output::set_app_device(pid, render, id).inspect_err(|e| set_error(app, Some(format!("Per-app devices are not available ({e})"))));
+    if r.is_ok() {
+        // Its setting is now ours: the next change to it is news again.
+        if let Some(g) = guard(app) {
+            g.st.lock().handled_setting.remove(&(pid, render));
+        }
+    }
+    r
 }
 
 fn fixed(app: &AppHandle, text: String) {

@@ -16,6 +16,14 @@
 //!   (WS_EX_TRANSPARENT | WS_EX_LAYERED via Tauri). The frame can then only be
 //!   reached from Lastshot: the Pop-outs panel, the tray menu and a global
 //!   shortcut that flips click-through for every frame.
+//!   Ways back are many and named when it turns on: hold Ctrl+Alt over the
+//!   frame for half a second ("peek": it takes clicks again until the mouse
+//!   leaves, polled with GetCursorPos / GetAsyncKeyState only while a
+//!   click-through frame is on screen; no hooks), the tray's "Frames: turn
+//!   off click-through", the Pop-outs panel and the shortcut.
+//! - A frame's stored rectangle is its *content* (the picture). Its tools
+//!   ("chrome") grow the window outside that rectangle while the mouse is
+//!   over it: below the content, or above near a screen's bottom edge.
 //! - Picture and clip frames never take the keyboard focus, not even when
 //!   clicked. Frames made for typing (a Pro reference board) take it only
 //!   when clicked.
@@ -41,6 +49,14 @@ pub const EVT_NOTICE: &str = "lastshot://frames-notice";
 /// Sent to one frame window: the user asked to close it (Alt+F4) and it holds
 /// things, so the frame asks first.
 pub const EVT_ASK_CLOSE: &str = "lastshot://frame-ask-close";
+/// To one frame window: its content size (physical px) and where its tools
+/// are (`ContentInfo`), after every move, resize or tools change.
+pub const EVT_CONTENT: &str = "lastshot://frame-content";
+/// To one frame window: Ctrl+Alt held over it made a click-through frame
+/// clickable for now (true), or that ended (false).
+pub const EVT_PEEK: &str = "lastshot://frame-peek";
+/// How long Ctrl+Alt must be held over a click-through frame.
+pub const PEEK_HOLD_MS: u64 = 450;
 /// Closed frames that owned files stay in `frames\trash\` this long.
 pub const TRASH_DAYS: i64 = 7;
 /// Files a frame may show from disk.
@@ -64,7 +80,8 @@ pub struct Frame {
     /// Picture or clip path ("" for boards and live views).
     pub src: String,
     pub title: String,
-    /// Outer rectangle, physical pixels.
+    /// The content's rectangle (the picture, without the tools that grow
+    /// outside it on hover), physical pixels.
     pub x: i32,
     pub y: i32,
     pub w: u32,
@@ -418,7 +435,9 @@ pub(crate) fn get(id: &str) -> Option<Frame> {
 }
 
 fn announce(app: &AppHandle) {
-    let _ = app.emit(EVT_FRAMES, infos());
+    let list = infos();
+    refresh_tray(app, list.iter().any(|f| f.click_through));
+    let _ = app.emit(EVT_FRAMES, list);
 }
 
 fn test_instance() -> bool {
@@ -439,6 +458,126 @@ fn window(app: &AppHandle, id: &str) -> Option<WebviewWindow> {
 /// ShowWindow would be undone by tao's next style change).
 fn show_quietly(win: &WebviewWindow) {
     let _ = win.show();
+}
+
+/// The tools strip a frame shows outside its content (physical px).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Chrome {
+    pub top: u32,
+    pub bottom: u32,
+}
+
+impl Chrome {
+    pub fn side(&self) -> &'static str {
+        if self.top > 0 {
+            "top"
+        } else if self.bottom > 0 {
+            "bottom"
+        } else {
+            "none"
+        }
+    }
+}
+
+fn chromes() -> &'static Mutex<std::collections::HashMap<String, Chrome>> {
+    static C: OnceLock<Mutex<std::collections::HashMap<String, Chrome>>> = OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
+fn chrome_of(id: &str) -> Chrome {
+    chromes().lock().get(id).copied().unwrap_or_default()
+}
+
+/// The window's rectangle for a content rectangle and its tools.
+pub fn window_rect((x, y, w, h): (i32, i32, u32, u32), c: Chrome) -> (i32, i32, u32, u32) {
+    (x, y - c.top as i32, w, h + c.top + c.bottom)
+}
+
+/// The content's rectangle inside a window rectangle with tools.
+pub fn content_rect((x, y, w, h): (i32, i32, u32, u32), c: Chrome) -> (i32, i32, u32, u32) {
+    (x, y + c.top as i32, w, h.saturating_sub(c.top + c.bottom).max(1))
+}
+
+/// Where tools of `px` go for content `r` inside the work area `area`:
+/// below when they fit, else above, else below anyway (off the screen edge
+/// rather than over the picture); `prefer` keeps the side they are on.
+pub fn chrome_side((_, y, _, h): (i32, i32, u32, u32), px: u32, area: Option<(i32, i32, u32, u32)>, prefer: &str) -> Chrome {
+    if px == 0 {
+        return Chrome::default();
+    }
+    let Some((_, ay, _, ah)) = area else { return Chrome { top: 0, bottom: px } };
+    let below = (y as i64 + h as i64 + px as i64) <= ay as i64 + ah as i64;
+    let above = (y as i64 - px as i64) >= ay as i64;
+    let top = match prefer {
+        "top" if above => true,
+        "bottom" if below => false,
+        _ => !below && above,
+    };
+    if top {
+        Chrome { top: px, bottom: 0 }
+    } else {
+        Chrome { top: 0, bottom: px }
+    }
+}
+
+/// The work area (x, y, w, h) holding a rectangle's centre, if any.
+fn area_of(app: &AppHandle, (x, y, w, h): (i32, i32, u32, u32)) -> Option<(i32, i32, u32, u32)> {
+    let (cx, cy) = (x as i64 + w as i64 / 2, y as i64 + h as i64 / 2);
+    screens(app)
+        .into_iter()
+        .find(|&(sx, sy, sw, sh)| cx >= sx as i64 && cx < sx as i64 + sw as i64 && cy >= sy as i64 && cy < sy as i64 + sh as i64)
+}
+
+/// Content size and tools side, as told to the frame's page.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentInfo {
+    pub w: u32,
+    pub h: u32,
+    pub side: String,
+    pub chrome: u32,
+}
+
+fn tell_content(app: &AppHandle, id: &str) {
+    let Some(f) = get(id) else { return };
+    let c = chrome_of(id);
+    let _ = app.emit_to(label_of(id), EVT_CONTENT, ContentInfo { w: f.w, h: f.h, side: c.side().into(), chrome: c.top + c.bottom });
+}
+
+/// Places a frame's window for its content rectangle and current tools.
+fn place_frame(win: &WebviewWindow, id: &str, r: (i32, i32, u32, u32)) {
+    let (x, y, w, h) = window_rect(r, chrome_of(id));
+    place(win, x, y, w, h);
+}
+
+/// Shows (`height` > 0, CSS px) or removes (0) the tools strip outside the
+/// content. Returns where it went: "bottom", "top" or "none" (full screen).
+#[tauri::command]
+pub fn frame_chrome(app: AppHandle, id: String, height: f64) -> Result<String, String> {
+    let win = window(&app, &id).ok_or("That frame is closed")?;
+    let f = get(&id).ok_or("That frame is closed")?;
+    if win.is_fullscreen().unwrap_or(false) {
+        chromes().lock().remove(&id);
+        return Ok("none".into());
+    }
+    let scale = win.scale_factor().unwrap_or(1.0);
+    let px = if height.is_finite() && height > 0.0 { (height.min(600.0) * scale).round() as u32 } else { 0 };
+    let r = (f.x, f.y, f.w, f.h);
+    let old = chrome_of(&id);
+    let next = chrome_side(r, px, area_of(&app, r), old.side());
+    if next != old {
+        {
+            let mut m = chromes().lock();
+            if next == Chrome::default() {
+                m.remove(&id);
+            } else {
+                m.insert(id.clone(), next);
+            }
+        }
+        place_frame(&win, &id, r);
+    }
+    tell_content(&app, &id);
+    Ok(next.side().into())
 }
 
 /// Moves and sizes in one step, without activating or changing the z-order.
@@ -526,6 +665,7 @@ fn build_window(app: &AppHandle, f: &Frame) -> Result<WebviewWindow, String> {
     if f.click_through {
         let _ = win.set_ignore_cursor_events(true);
         keep_visible(&win);
+        start_peek_watch(app);
     }
     if !f.hidden && over_its_app(f) {
         show_quietly(&win);
@@ -856,6 +996,9 @@ fn update(app: &AppHandle, id: &str, patch: &FramePatch) -> Result<(Frame, bool)
         }
         if through {
             set_click_through(app, &win, f.click_through);
+            if f.click_through {
+                start_peek_watch(app);
+            }
         }
         if shown {
             if f.hidden || !over_its_app(&f) {
@@ -879,11 +1022,12 @@ pub fn frame_cursor(app: AppHandle) -> Result<(f64, f64), String> {
     Ok((p.x, p.y))
 }
 
-/// Moves / resizes a frame (physical px), e.g. while dragging its edges.
+/// Moves / resizes a frame's content (physical px), e.g. while dragging its
+/// edges; its tools stay outside.
 #[tauri::command]
 pub fn frame_set_rect(app: AppHandle, id: String, x: i32, y: i32, w: u32, h: u32) -> Result<(), String> {
     let win = window(&app, &id).ok_or("That frame is closed")?;
-    place(&win, x, y, w, h);
+    place_frame(&win, &id, (x, y, w.max(40), h.max(30)));
     Ok(())
 }
 
@@ -891,6 +1035,12 @@ pub fn frame_set_rect(app: AppHandle, id: String, x: i32, y: i32, w: u32, h: u32
 pub fn frame_fullscreen(app: AppHandle, id: String, on: Option<bool>) -> Result<bool, String> {
     let win = window(&app, &id).ok_or("That frame is closed")?;
     let next = on.unwrap_or(!win.is_fullscreen().unwrap_or(false));
+    if next && chromes().lock().remove(&id).is_some() {
+        // Leaving full screen comes back to the content alone.
+        if let Some(f) = get(&id) {
+            place_frame(&win, &id, (f.x, f.y, f.w, f.h));
+        }
+    }
     win.set_fullscreen(next).map_err(|e| e.to_string())?;
     Ok(next)
 }
@@ -967,6 +1117,7 @@ fn forget(app: &AppHandle, id: &str) -> Option<Frame> {
         i.map(|i| s.file.frames.remove(i))
     };
     if f.is_some() {
+        chromes().lock().remove(id);
         save_soon();
         announce(app);
     }
@@ -1254,9 +1405,9 @@ pub fn frame_hide_all(app: AppHandle, hidden: Option<bool>) -> bool {
 pub struct Layout {
     /// Work areas (physical px): x, y, w, h.
     pub screens: Vec<(i32, i32, u32, u32)>,
-    /// Other frames' outer rectangles.
+    /// Other frames' content rectangles.
     pub frames: Vec<(String, i32, i32, u32, u32)>,
-    /// This frame's own outer rectangle.
+    /// This frame's own content rectangle.
     pub me: Option<(i32, i32, u32, u32)>,
     pub scale: f64,
     /// The cursor, physical px (where a drag starts).
@@ -1266,6 +1417,7 @@ pub struct Layout {
 /// What a frame snaps to while moved or resized.
 #[tauri::command]
 pub fn frame_layout(app: AppHandle, id: String) -> Layout {
+    // Content rectangles: frames snap picture to picture, tools aside.
     let frames = app
         .webview_windows()
         .into_iter()
@@ -1274,18 +1426,13 @@ pub fn frame_layout(app: AppHandle, id: String) -> Layout {
             if fid == id || !w.is_visible().unwrap_or(false) {
                 return None;
             }
-            let p = w.outer_position().ok()?;
-            let s = w.outer_size().ok()?;
-            Some((fid, p.x, p.y, s.width, s.height))
+            let f = get(&fid)?;
+            Some((fid, f.x, f.y, f.w, f.h))
         })
         .collect();
     let win = window(&app, &id);
     let scale = win.as_ref().and_then(|w| w.scale_factor().ok()).unwrap_or(1.0);
-    let me = win.and_then(|w| {
-        let p = w.outer_position().ok()?;
-        let s = w.outer_size().ok()?;
-        Some((p.x, p.y, s.width, s.height))
-    });
+    let me = get(&id).map(|f| (f.x, f.y, f.w, f.h));
     let cursor = app.cursor_position().ok().map(|p| (p.x, p.y));
     Layout { screens: screens(&app), frames, me, scale, cursor }
 }
@@ -1687,6 +1834,220 @@ fn start_follow(app: &AppHandle) {
 }
 
 // ---------------------------------------------------------------------------
+// Peek: hold Ctrl+Alt over a click-through frame
+// ---------------------------------------------------------------------------
+
+/// What the peek watch decides each tick (pure, unit-tested).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeekStep {
+    Wait,
+    /// Ctrl+Alt held over this frame long enough: make it clickable.
+    Start(String),
+    /// The peeked frame stops: restore click-through (true) or not (the user
+    /// turned it off meanwhile).
+    End(String, bool),
+}
+
+/// State of the peek watch between ticks.
+#[derive(Debug, Default, Clone)]
+pub struct PeekState {
+    /// Frame under the cursor while Ctrl+Alt is held, and since when (ms).
+    pub held: Option<(String, u64)>,
+    /// The frame being peeked, and when the cursor last was over it (ms).
+    pub peek: Option<(String, u64)>,
+}
+
+/// One tick: `over` = the click-through frame under the cursor (content or
+/// tools), `keys` = Ctrl and Alt both down, `still_through(id)` = the frame
+/// is still click-through, `inside_peeked` = the cursor is over the peeked
+/// frame's window.
+pub fn peek_tick(st: &mut PeekState, now_ms: u64, over: Option<&str>, keys: bool, inside_peeked: bool, still_through: impl Fn(&str) -> bool) -> PeekStep {
+    if let Some((id, last_in)) = st.peek.clone() {
+        if !still_through(&id) {
+            st.peek = None;
+            st.held = None;
+            return PeekStep::End(id, false);
+        }
+        if inside_peeked || keys {
+            st.peek = Some((id, now_ms));
+            return PeekStep::Wait;
+        }
+        // Out of it for a moment (not just crossing its edge): back to click-through.
+        if now_ms.saturating_sub(last_in) >= 400 {
+            st.peek = None;
+            st.held = None;
+            return PeekStep::End(id, true);
+        }
+        return PeekStep::Wait;
+    }
+    match (over, keys) {
+        (Some(id), true) => {
+            let since = match &st.held {
+                Some((h, t)) if h == id => *t,
+                _ => {
+                    st.held = Some((id.to_string(), now_ms));
+                    now_ms
+                }
+            };
+            if now_ms.saturating_sub(since) >= PEEK_HOLD_MS {
+                st.held = None;
+                st.peek = Some((id.to_string(), now_ms));
+                return PeekStep::Start(id.to_string());
+            }
+            PeekStep::Wait
+        }
+        _ => {
+            st.held = None;
+            PeekStep::Wait
+        }
+    }
+}
+
+#[cfg(windows)]
+fn cursor_now() -> Option<(i32, i32)> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let mut p = POINT::default();
+    unsafe { GetCursorPos(&mut p).ok()? };
+    Some((p.x, p.y))
+}
+
+#[cfg(not(windows))]
+fn cursor_now() -> Option<(i32, i32)> {
+    None
+}
+
+/// Ctrl and Alt both held right now (asked only while over a frame).
+#[cfg(windows)]
+fn ctrl_alt_down() -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_MENU};
+    unsafe { (GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0 && (GetAsyncKeyState(VK_MENU.0 as i32) as u16 & 0x8000) != 0 }
+}
+
+#[cfg(not(windows))]
+fn ctrl_alt_down() -> bool {
+    false
+}
+
+fn contains((x, y, w, h): (i32, i32, u32, u32), (px, py): (i32, i32)) -> bool {
+    px >= x && py >= y && (px as i64) < x as i64 + w as i64 && (py as i64) < y as i64 + h as i64
+}
+
+/// Runs while a visible click-through frame exists (or one is being peeked):
+/// the cursor position 8×/s, Ctrl/Alt only while the cursor is over such a
+/// frame. No hooks, nothing global.
+fn start_peek_watch(app: &AppHandle) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+    if RUNNING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let app = app.clone();
+    let t0 = std::time::Instant::now();
+    let _ = std::thread::Builder::new().name("frames-peek".into()).spawn(move || {
+        let mut st = PeekState::default();
+        loop {
+            // Visible click-through frames (their windows, which have no tools).
+            let through: Vec<(String, (i32, i32, u32, u32))> = store()
+                .lock()
+                .file
+                .frames
+                .iter()
+                .filter(|f| f.click_through && !f.hidden)
+                .map(|f| (f.id.clone(), window_rect((f.x, f.y, f.w, f.h), chrome_of(&f.id))))
+                .filter(|(id, _)| window(&app, id).is_some_and(|w| w.is_visible().unwrap_or(false)))
+                .collect();
+            if through.is_empty() && st.peek.is_none() {
+                RUNNING.store(false, Ordering::Release);
+                // One may have turned on meanwhile.
+                let again = store().lock().file.frames.iter().any(|f| f.click_through && !f.hidden);
+                if again && !RUNNING.swap(true, Ordering::AcqRel) {
+                    std::thread::sleep(std::time::Duration::from_millis(120));
+                    continue;
+                }
+                return;
+            }
+            let cur = cursor_now();
+            let over = cur.and_then(|c| through.iter().find(|(_, r)| contains(*r, c)).map(|(id, _)| id.clone()));
+            // The keyboard is only looked at while the cursor is over a frame.
+            let keys = (over.is_some() || st.peek.is_some()) && ctrl_alt_down();
+            let inside_peeked = match (&st.peek, cur) {
+                (Some((id, _)), Some(c)) => get(id).is_some_and(|f| contains(window_rect((f.x, f.y, f.w, f.h), chrome_of(id)), c)),
+                _ => false,
+            };
+            let now = t0.elapsed().as_millis() as u64;
+            let step = peek_tick(&mut st, now, over.as_deref(), keys, inside_peeked, |id| get(id).is_some_and(|f| f.click_through));
+            match step {
+                PeekStep::Start(id) => {
+                    if let Some(w) = window(&app, &id) {
+                        let w2 = w.clone();
+                        let _ = app.run_on_main_thread(move || {
+                            let _ = w2.set_ignore_cursor_events(false);
+                            keep_visible(&w2);
+                        });
+                        let _ = app.emit_to(label_of(&id), EVT_PEEK, true);
+                    }
+                }
+                PeekStep::End(id, restore) => {
+                    if let Some(w) = window(&app, &id) {
+                        if restore {
+                            let w2 = w.clone();
+                            let _ = app.run_on_main_thread(move || {
+                                let _ = w2.set_ignore_cursor_events(true);
+                                keep_visible(&w2);
+                            });
+                        }
+                        let _ = app.emit_to(label_of(&id), EVT_PEEK, false);
+                    }
+                }
+                PeekStep::Wait => {}
+            }
+            let busy = over.is_some() || st.peek.is_some();
+            std::thread::sleep(std::time::Duration::from_millis(if busy { 40 } else { 125 }));
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Tray: "Frames: turn off click-through" while any frame is click-through
+// ---------------------------------------------------------------------------
+
+type TrayMenu = tauri::menu::Menu<tauri::Wry>;
+type TrayItem = tauri::menu::MenuItem<tauri::Wry>;
+
+fn tray_slot() -> &'static Mutex<Option<(TrayMenu, TrayItem, bool)>> {
+    static S: OnceLock<Mutex<Option<(TrayMenu, TrayItem, bool)>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(None))
+}
+
+/// Gives the tray's top menu to frames: while any frame is click-through it
+/// starts with "Frames: turn off click-through".
+pub fn tray_attach(app: &AppHandle, menu: &TrayMenu) -> tauri::Result<()> {
+    let item = tauri::menu::MenuItem::with_id(app, "frames:through-off", "Frames: turn off click-through", true, None::<&str>)?;
+    *tray_slot().lock() = Some((menu.clone(), item, false));
+    refresh_tray(app, all().iter().any(|f| f.click_through));
+    Ok(())
+}
+
+fn refresh_tray(app: &AppHandle, any_through: bool) {
+    let mut slot = tray_slot().lock();
+    let Some((menu, item, shown)) = slot.as_mut() else { return };
+    if *shown == any_through {
+        return;
+    }
+    *shown = any_through;
+    let (menu, item) = (menu.clone(), item.clone());
+    drop(slot);
+    let _ = app.run_on_main_thread(move || {
+        if any_through {
+            let _ = menu.insert(&item, 0);
+        } else {
+            let _ = menu.remove(&item);
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Start-up, window events, shortcut, tray
 // ---------------------------------------------------------------------------
 
@@ -1761,11 +2122,12 @@ pub fn on_event(window: &tauri::Window, event: &tauri::WindowEvent) {
                 return;
             }
             let (Ok(p), Ok(s)) = (window.outer_position(), window.outer_size()) else { return };
+            let r = content_rect((p.x, p.y, s.width, s.height), chrome_of(&id));
             let changed = {
                 let mut st = store().lock();
                 match st.file.frames.iter_mut().find(|f| f.id == id) {
-                    Some(f) if (f.x, f.y, f.w, f.h) != (p.x, p.y, s.width, s.height) => {
-                        (f.x, f.y, f.w, f.h) = (p.x, p.y, s.width, s.height);
+                    Some(f) if (f.x, f.y, f.w, f.h) != r => {
+                        (f.x, f.y, f.w, f.h) = r;
                         true
                     }
                     _ => false,
@@ -1773,6 +2135,9 @@ pub fn on_event(window: &tauri::Window, event: &tauri::WindowEvent) {
             };
             if changed {
                 save_soon();
+            }
+            if matches!(event, tauri::WindowEvent::Resized(_)) {
+                tell_content(window.app_handle(), &id);
             }
         }
         tauri::WindowEvent::CloseRequested { api, .. } => {
@@ -1820,6 +2185,9 @@ pub fn on_tray(app: &AppHandle, id: &str) -> bool {
     match id {
         "frames:through" => {
             frame_click_through_all(h, None);
+        }
+        "frames:through-off" => {
+            frame_click_through_all(h, Some(false));
         }
         "frames:hide" => {
             frame_hide_all(h, None);
@@ -1976,6 +2344,49 @@ mod tests {
         assert_eq!(f.opacity, 1.0);
         f.apply(&FramePatch { title: Some("x".repeat(500)), ..Default::default() });
         assert_eq!(f.title.len(), 120);
+    }
+
+    #[test]
+    fn tools_grow_outside_the_content_and_flip_near_the_bottom() {
+        let area = Some((0, 0, 1920, 1040));
+        // Room below: tools below.
+        assert_eq!(chrome_side((100, 100, 400, 300), 40, area, "none"), Chrome { top: 0, bottom: 40 });
+        // At the bottom edge: above.
+        assert_eq!(chrome_side((100, 700, 400, 320), 40, area, "none"), Chrome { top: 40, bottom: 0 });
+        // Taller than the screen: below anyway (never over the picture).
+        assert_eq!(chrome_side((0, 0, 400, 1040), 40, area, "none"), Chrome { top: 0, bottom: 40 });
+        // Keeps its side while it fits.
+        assert_eq!(chrome_side((100, 100, 400, 300), 80, area, "top"), Chrome { top: 80, bottom: 0 });
+        assert_eq!(chrome_side((100, 100, 400, 300), 0, area, "top"), Chrome::default());
+        // Window and content rectangles round-trip, whatever the side.
+        for c in [Chrome::default(), Chrome { top: 36, bottom: 0 }, Chrome { top: 0, bottom: 54 }] {
+            let r = (-300, 50, 640, 360);
+            assert_eq!(content_rect(window_rect(r, c), c), r);
+        }
+        assert_eq!(window_rect((10, 100, 200, 100), Chrome { top: 30, bottom: 0 }), (10, 70, 200, 130));
+    }
+
+    #[test]
+    fn holding_ctrl_alt_over_a_click_through_frame_peeks_until_the_mouse_leaves() {
+        let mut st = PeekState::default();
+        let through = |_: &str| true;
+        // Ctrl+Alt elsewhere does nothing; over the frame it needs the hold time.
+        assert_eq!(peek_tick(&mut st, 0, None, true, false, through), PeekStep::Wait);
+        assert_eq!(peek_tick(&mut st, 100, Some("a"), true, false, through), PeekStep::Wait);
+        assert_eq!(peek_tick(&mut st, 300, Some("a"), true, false, through), PeekStep::Wait);
+        // Letting go resets the hold.
+        assert_eq!(peek_tick(&mut st, 400, Some("a"), false, false, through), PeekStep::Wait);
+        assert_eq!(peek_tick(&mut st, 500, Some("a"), true, false, through), PeekStep::Wait);
+        assert_eq!(peek_tick(&mut st, 500 + PEEK_HOLD_MS, Some("a"), true, false, through), PeekStep::Start("a".into()));
+        // While the mouse is over it (keys up), it stays clickable.
+        assert_eq!(peek_tick(&mut st, 2000, None, false, true, through), PeekStep::Wait);
+        // Crossing the edge briefly is fine; leaving for good restores click-through.
+        assert_eq!(peek_tick(&mut st, 2200, None, false, false, through), PeekStep::Wait);
+        assert_eq!(peek_tick(&mut st, 2500, None, false, false, through), PeekStep::End("a".into(), true));
+        // Turned off while peeking: it stays clickable.
+        let mut st = PeekState { held: None, peek: Some(("b".into(), 0)) };
+        assert_eq!(peek_tick(&mut st, 10, None, false, true, |_| false), PeekStep::End("b".into(), false));
+        assert!(st.peek.is_none());
     }
 
     #[test]

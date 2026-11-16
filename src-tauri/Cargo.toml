@@ -67,6 +67,9 @@ features = [
     "Win32_System_Memory",
     "Win32_System_SystemInformation",
     "Win32_UI_WindowsAndMessaging",
+    # Pop-out frames: hold Ctrl+Alt over a click-through frame (polled with
+    # GetAsyncKeyState only while the cursor is over one; no hooks).
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Graphics_Gdi",
     # Studio picture layers (decoded with the built-in WIC codecs).
     "Win32_Graphics_Imaging",

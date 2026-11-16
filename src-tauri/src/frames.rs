@@ -1027,7 +1027,17 @@ pub fn frame_cursor(app: AppHandle) -> Result<(f64, f64), String> {
 #[tauri::command]
 pub fn frame_set_rect(app: AppHandle, id: String, x: i32, y: i32, w: u32, h: u32) -> Result<(), String> {
     let win = window(&app, &id).ok_or("That frame is closed")?;
-    place_frame(&win, &id, (x, y, w.max(40), h.max(30)));
+    let r = (x, y, w.max(40), h.max(30));
+    // Moved near a screen edge: the tools flip to the side where they fit.
+    let old = chrome_of(&id);
+    let px = old.top + old.bottom;
+    if px > 0 {
+        let next = chrome_side(r, px, area_of(&app, r), old.side());
+        if next != old {
+            chromes().lock().insert(id.clone(), next);
+        }
+    }
+    place_frame(&win, &id, r);
     Ok(())
 }
 

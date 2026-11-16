@@ -643,7 +643,7 @@ function FrameChrome({
             </svg>
           </div>
         )}
-        {hintOn && frame.clickThrough && (
+        {hintOn && frame.clickThrough && !peek && (
           <div
             className="pointer-events-none absolute inset-x-2 bottom-2 z-40 rounded-md bg-black/80 px-2.5 py-1.5 text-[11px] leading-snug text-white shadow-lg"
             data-testid="frame-through-hint"

@@ -1,21 +1,27 @@
 /**
  * The inside of a pop-out frame window (`frame-<id>`): a borderless,
- * see-through window showing a picture, a clip frame or a playing clip in the
- * full viewer, with a thin move bar that shows only while the mouse is over
- * it, resize edges (shape kept; Shift frees it), snapping to screen edges and
- * other frames, opacity, "Always on top" and "Click-through".
+ * see-through window showing a picture, a playing clip or (Pro) a board.
  *
- * Everything here can also be changed from the main window (Pop-outs panel),
- * the tray and the click-through shortcut, because a click-through frame
- * cannot be clicked.
+ * - The window is the content. Its tools are a strip that grows the window
+ *   *outside* the content while the mouse is over it (below; above near a
+ *   screen's bottom), so they never cover the picture. "View tools" adds the
+ *   viewer's tool row to that strip.
+ * - Resize edges keep the shape (Shift frees it) and the picture follows the
+ *   window; the frame snaps to screen edges and other frames (Alt: no snap).
+ * - Right-click anywhere: every action in one menu.
+ * - Click-through: clicks reach the app below. It says how to get back when
+ *   it turns on, keeps a small marker, and holding Ctrl+Alt over the frame
+ *   makes it clickable again with "Turn off click-through" in its strip.
+ *   The Pop-outs panel, the tray and the shortcut also turn it off.
  */
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import pro from "lastshot-pro";
 import Viewer, { DEFAULT_SETTINGS, type ViewerApi, type ViewerSettings } from "../viewer/Viewer";
 import { Btn, Icon } from "../viewer/ui";
-import { actualView, fitView, flipScreenH, flipScreenV, zoomAt, type View } from "../viewer/math";
+import { actualView, fitView, flipScreenH, flipScreenV, zoomAt, type Size, type View } from "../viewer/math";
 import { naturalSize } from "../viewer/render";
 import { assetUrl } from "../lib/bridge";
+import { useShortcuts } from "../lib/useShortcuts";
 import NumberField from "../components/NumberField";
 import { cn } from "../utils/cn";
 import {
@@ -28,6 +34,7 @@ import {
   pickEcho,
   popOutMany,
   popOutPicture,
+  type ContentInfo,
   type Frame,
   type FrameCmd,
   type FrameViewState,
@@ -36,7 +43,13 @@ import {
 import { dragRect, snapRect, snapTargets, type Edge, type R } from "./snap";
 
 const SNAP_PX = 10;
-const HIDE_MS = 1600;
+/** How long the strip stays after the mouse left the frame. */
+const HIDE_MS = 900;
+/** The strip's own row (CSS px); the tool row adds to it. */
+export const STRIP_H = 30;
+/** How long the "click-through is on" hint stays. */
+const HINT_MS = 7000;
+const TOOLS_KEY = "lastshot.frame.tools";
 
 export const FI = {
   pin: "M6 2h4l-.5 4 2.5 2.5H4L6.5 6zM8 8.5V14",
@@ -46,6 +59,12 @@ export const FI = {
   close: "M4 4l8 8M12 4l-8 8",
   opacity: "M8 2a6 6 0 1 0 0 12zM8 2a6 6 0 0 1 0 12",
   panel: "M2 3h12v10H2zM2 6h12M5 9h6",
+  more: "M3.5 8h.01M8 8h.01M12.5 8h.01",
+  tools: "M2 4h12M2 8h12M2 12h7",
+  play: "M5 3.5v9l7-4.5z",
+  pause: "M5 3.5v9M11 3.5v9",
+  sound: "M3 6h2.5L9 3v10L5.5 10H3zM11.5 5.5a3.5 3.5 0 0 1 0 5",
+  mute: "M3 6h2.5L9 3v10L5.5 10H3zM11 6l3.5 4M14.5 6 11 10",
 };
 
 /** A yes/no question shown inside the frame window (frames have no dialogs). */
@@ -54,6 +73,21 @@ export interface Ask {
   yes: string;
   onYes: () => void;
 }
+
+const readTools = () => {
+  try {
+    return localStorage.getItem(TOOLS_KEY) === "1";
+  } catch {
+    return false;
+  }
+};
+
+const fmtTime = (t: number) => {
+  if (!Number.isFinite(t) || t < 0) return "0:00";
+  const m = Math.floor(t / 60);
+  const s = Math.floor(t % 60);
+  return `${m}:${String(s).padStart(2, "0")}`;
+};
 
 export default function FrameWindow({ id }: { id: string }) {
   const [frame, setFrame] = useState<Frame | null>(null);
@@ -160,7 +194,7 @@ function AskBox({ ask, onDone }: { ask: Ask; onDone: () => void }) {
   }, [ask, onDone]);
   return (
     <div
-      className="absolute inset-0 z-[60] grid place-items-center bg-black/55 p-3"
+      className="absolute inset-0 z-[80] grid place-items-center bg-black/55 p-3"
       data-testid="frame-ask"
       onPointerDown={(e) => e.stopPropagation()}
       onDoubleClick={(e) => e.stopPropagation()}
@@ -188,6 +222,15 @@ function AskBox({ ask, onDone }: { ask: Ask; onDone: () => void }) {
   );
 }
 
+/** What the media body hands up for the strip and the menu. */
+interface MediaHandle {
+  api: ViewerApi | null;
+  video: HTMLVideoElement | null;
+  run: (cmd: FrameCmd) => void;
+}
+
+type FramePatch = Partial<Pick<Frame, "opacity" | "onTop" | "clickThrough" | "hidden">>;
+
 function FrameChrome({
   frame,
   setFrame,
@@ -204,37 +247,140 @@ function FrameChrome({
   markOpacity: () => void;
 }) {
   const id = frame.id;
-  // Picture and clip frames never take the keyboard (the app you trace in
-  // keeps it); a board does once clicked, so only boards have keys.
+  const media = frame.kind === "image" || frame.kind === "video";
+  // Picture and clip frames never take the keyboard focus (the app you trace
+  // in keeps it); a board does once clicked, so only boards have keys.
   const takesKeys = frame.kind === "board";
   // The click-through shortcut, as set in the Pop-outs panel.
   const [hotkey, setHotkey] = useState("");
   const loadHotkey = useCallback(() => void frames.getHotkey().then(setHotkey, () => undefined), []);
   useEffect(loadHotkey, [loadHotkey]);
   const [full, setFull] = useState(false);
-  const [awake, setAwake] = useState(true);
-  const [overBar, setOverBar] = useState(false);
-  const hideTimer = useRef(0);
-  const wake = useCallback(() => {
-    setAwake(true);
-    window.clearTimeout(hideTimer.current);
-    hideTimer.current = window.setTimeout(() => setAwake(false), HIDE_MS);
+
+  // ---------------------------------------------------------------- content size and the strip
+  const [dpr, setDpr] = useState(() => window.devicePixelRatio || 1);
+  const [content, setContent] = useState<{ w: number; h: number }>({ w: frame.w, h: frame.h });
+  const [side, setSide] = useState<ContentInfo["side"]>("none");
+  const [winW, setWinW] = useState(() => window.innerWidth);
+  const [winH, setWinH] = useState(() => window.innerHeight);
+  useEffect(() => {
+    const r = () => {
+      setDpr(window.devicePixelRatio || 1);
+      setWinW(window.innerWidth);
+      setWinH(window.innerHeight);
+    };
+    window.addEventListener("resize", r);
+    let off: (() => void) | undefined;
+    let alive = true;
+    void frames
+      .onContent((c) => {
+        setContent({ w: c.w, h: c.h });
+        setSide(c.side);
+      })
+      .then((u) => (alive ? (off = u) : u()));
+    // Asks for the current content size (and drops a strip left from before).
+    void frames.chrome(id, 0).then(setSide, () => undefined);
+    return () => {
+      alive = false;
+      off?.();
+      window.removeEventListener("resize", r);
+    };
+  }, [id]);
+
+  const [hover, setHover] = useState(false);
+  const leaveTimer = useRef(0);
+  const enter = useCallback(() => {
+    window.clearTimeout(leaveTimer.current);
+    setHover(true);
+  }, []);
+  const leave = useCallback(() => {
+    window.clearTimeout(leaveTimer.current);
+    leaveTimer.current = window.setTimeout(() => setHover(false), HIDE_MS);
   }, []);
   useEffect(() => {
-    wake();
-    const leave = () => setAwake(false);
     document.documentElement.addEventListener("mouseleave", leave);
     return () => document.documentElement.removeEventListener("mouseleave", leave);
-  }, [wake]);
+  }, [leave]);
 
+  const [peek, setPeek] = useState(false);
+  useEffect(() => {
+    let off: (() => void) | undefined;
+    let alive = true;
+    void frames
+      .onPeek((on) => {
+        setPeek(on);
+        if (on) {
+          loadHotkey();
+          enter();
+        }
+      })
+      .then((u) => (alive ? (off = u) : u()));
+    return () => {
+      alive = false;
+      off?.();
+    };
+  }, [enter, loadHotkey]);
+  useEffect(() => {
+    if (!frame.clickThrough) setPeek(false);
+  }, [frame.clickThrough]);
+
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const [tools, setToolsState] = useState(readTools);
+  const setTools = useCallback((on: boolean) => {
+    setToolsState(on);
+    try {
+      localStorage.setItem(TOOLS_KEY, on ? "1" : "0");
+    } catch {
+      /* a preference only */
+    }
+  }, []);
+  const [dragging, setDragging] = useState(false);
+
+  const stripRef = useRef<HTMLDivElement | null>(null);
+  const [stripH, setStripH] = useState(STRIP_H);
+  useEffect(() => {
+    const el = stripRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setStripH(Math.ceil(el.getBoundingClientRect().height)));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const [toolTarget, setToolTarget] = useState<HTMLDivElement | null>(null);
+
+  // The strip shows while the mouse is over the frame (and it can be used).
+  const usable = !frame.clickThrough || peek;
+  const want = !full && usable && (hover || peek || dragging || !!menu);
+  const asked = useRef(-1);
+  useEffect(() => {
+    const h = want ? stripH : 0;
+    if (asked.current === h) return;
+    asked.current = h;
+    void frames.chrome(id, h).then(setSide, () => undefined);
+  }, [want, stripH, id]);
+
+  // ---------------------------------------------------------------- settings
   const patch = useCallback(
-    (p: Partial<Pick<Frame, "opacity" | "onTop" | "clickThrough" | "hidden">>) => {
+    (p: FramePatch) => {
       if (p.opacity !== undefined) markOpacity();
       setFrame({ ...frame, ...p });
       void frames.update(id, p).catch((e) => say(String(e)));
     },
     [frame, id, markOpacity, say, setFrame],
   );
+
+  // "Click-through is on": how to get back, said each time it turns on.
+  const [hintOn, setHintOn] = useState(false);
+  const wasThrough = useRef(frame.clickThrough);
+  useEffect(() => {
+    const was = wasThrough.current;
+    wasThrough.current = frame.clickThrough;
+    if (!frame.clickThrough) return setHintOn(false);
+    if (was) return;
+    loadHotkey();
+    setHintOn(true);
+    const t = window.setTimeout(() => setHintOn(false), HINT_MS);
+    return () => window.clearTimeout(t);
+  }, [frame.clickThrough, loadHotkey]);
 
   const toggleFull = useCallback(() => {
     void frames.fullscreen(id).then(setFull);
@@ -269,7 +415,8 @@ function FrameChrome({
 
   // ---------------------------------------------------------------- moving / resizing
   // The frame follows the cursor's physical position (asked from the app), so
-  // a move onto a monitor with other scaling does not jump.
+  // a move onto a monitor with other scaling does not jump. Rectangles are
+  // the content's; the strip stays outside.
   const drag = useRef<{ edge: Edge; pointer: number; cx: number; cy: number; start: R; layout: Layout; aspect: number } | null>(null);
   const dragToken = useRef(0);
   const mods = useRef({ shift: false, alt: false });
@@ -304,6 +451,7 @@ function FrameChrome({
     if (e && drag.current && e.pointerId !== drag.current.pointer) return;
     dragToken.current++;
     drag.current = null;
+    setDragging(false);
     if (e && e.type !== "lostpointercapture") {
       const el = e.currentTarget as HTMLElement;
       if (el.hasPointerCapture?.(e.pointerId)) el.releasePointerCapture(e.pointerId);
@@ -319,20 +467,19 @@ function FrameChrome({
       el.setPointerCapture(pointer);
       const token = ++dragToken.current;
       mods.current = { shift: e.shiftKey, alt: e.altKey };
-      // Where the cursor is inside the window (CSS px). The window does not
-      // move before the drag starts, so this gives the physical start point.
-      const ox = e.clientX;
-      const oy = e.clientY;
+      setDragging(true);
       void frames.layout(id).then(
         (layout) => {
           // A quick click may be over already: never start a drag after the button is up.
           if (token !== dragToken.current || !el.hasPointerCapture(pointer)) return;
-          const scale = layout.scale || window.devicePixelRatio || 1;
           const me = layout.me ?? [frame.x, frame.y, frame.w, frame.h];
           const start = { x: me[0], y: me[1], w: me[2], h: me[3] };
-          drag.current = { edge, pointer, cx: me[0] + ox * scale, cy: me[1] + oy * scale, start, layout, aspect: start.w / Math.max(1, start.h) };
+          // The drag starts where the cursor is now (physical px): the window
+          // is the content plus the strip, so window-relative offsets would not do.
+          const cur = layout.cursor ?? [me[0], me[1]];
+          drag.current = { edge, pointer, cx: cur[0], cy: cur[1], start, layout, aspect: start.w / Math.max(1, start.h) };
         },
-        () => undefined,
+        () => setDragging(false),
       );
     },
     [frame.x, frame.y, frame.w, frame.h, full, id],
@@ -362,33 +509,54 @@ function FrameChrome({
       onLostPointerCapture={endDrag}
       style={{ cursor: `${edge}-resize` }}
       className={cn("absolute z-40", cls)}
+      data-testid={`frame-edge-${edge}`}
     />
   );
 
-  // ---------------------------------------------------------------- keys and wheel
-  // Only frames that take the keyboard (boards) have keys; the bar's
-  // tooltips name them there.
+  // ---------------------------------------------------------------- media (viewer + video)
+  const mediaRef = useRef<MediaHandle>({ api: null, video: null, run: () => undefined });
+  const [video, setVideo] = useState<HTMLVideoElement | null>(null);
+  const [vt, setVt] = useState({ t: 0, d: 0, playing: false, muted: true });
   useEffect(() => {
-    if (!takesKeys) return;
-    const key = (e: KeyboardEvent) => {
-      const t = e.target as HTMLElement | null;
-      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
-      const lower = e.key.toLowerCase();
-      const plain = !e.ctrlKey && !e.altKey && !e.metaKey;
-      const done = () => {
-        e.preventDefault();
-        e.stopPropagation();
-      };
-      if (e.ctrlKey && !e.shiftKey && lower === "w") return done(), close();
-      if (!plain) return;
-      if (lower === "f" && !e.shiftKey) return done(), toggleFull();
-      if (e.key === "Escape" && full) return done(), void frames.fullscreen(id, false).then(setFull);
-      if (lower === "t" && !e.shiftKey) return done(), patch({ onTop: !frame.onTop });
-      if (lower === "x" && !e.shiftKey) return done(), patch({ clickThrough: true });
-    };
-    window.addEventListener("keydown", key, true);
-    return () => window.removeEventListener("keydown", key, true);
-  }, [close, frame.onTop, full, id, patch, takesKeys, toggleFull]);
+    if (!video) return;
+    const sync = () => setVt({ t: video.currentTime, d: video.duration || 0, playing: !video.paused, muted: video.muted });
+    const evs = ["timeupdate", "play", "pause", "loadedmetadata", "volumechange", "seeked"];
+    evs.forEach((e) => video.addEventListener(e, sync));
+    sync();
+    return () => evs.forEach((e) => video.removeEventListener(e, sync));
+  }, [video]);
+  const playPause = () => {
+    if (!video) return;
+    if (video.paused) void video.play().catch(() => undefined);
+    else video.pause();
+  };
+
+  // ---------------------------------------------------------------- keys (boards) and wheel
+  // Only frames that take the keyboard (boards) have keys; for picture and
+  // clip frames everything is on the strip, the right-click menu and the
+  // Pop-outs panel.
+  const setOpacityBy = (d: number) => patch({ opacity: Math.min(1, Math.max(0.05, Math.round((frame.opacity + d) * 100) / 100)) });
+  useShortcuts(
+    "frame",
+    [
+      { id: "close", keys: "Ctrl+W", label: "Close this frame", group: "Frame", run: close },
+      { id: "full", keys: "F", label: "Full screen on or off", group: "Frame", run: toggleFull },
+      {
+        id: "leave-full",
+        keys: "Escape",
+        label: "Leave full screen",
+        group: "Frame",
+        run: () => void frames.fullscreen(id, false).then(setFull),
+        when: () => full,
+      },
+      { id: "on-top", keys: "T", label: "Always on top", group: "Frame", run: () => patch({ onTop: !frame.onTop }) },
+      { id: "through", keys: "X", label: "Click-through (clicks reach the app below)", group: "Frame", run: () => patch({ clickThrough: true }) },
+      { id: "opacity-down", keys: "Shift+-", label: "Less opaque", group: "Frame", run: () => setOpacityBy(-0.1) },
+      { id: "opacity-up", keys: "Shift+=", label: "More opaque", group: "Frame", run: () => setOpacityBy(0.1) },
+      { id: "menu", keys: "Shift+F10", label: "The frame's menu", group: "Frame", run: () => setMenu({ x: 12, y: 12 }) },
+    ],
+    takesKeys,
+  );
   const k = (key: string) => (takesKeys ? ` (${key})` : "");
 
   const opacityRef = useRef(frame.opacity);
@@ -410,164 +578,453 @@ function FrameChrome({
     return () => el.removeEventListener("wheel", wheel, { capture: true });
   }, [patch, say]);
 
-  const barShown = (awake || overBar) && !frame.clickThrough;
   const Body = frame.kind === "board" || frame.kind === "live" ? pro.FrameBody : null;
+
+  // ---------------------------------------------------------------- layout
+  // The content keeps its size and place while the window grows around it:
+  // anchored to the top when the strip is below, to the bottom when above.
+  const contentCssH = full ? Math.max(40, winH - STRIP_H) : Math.max(1, Math.min(winH, content.h / dpr));
+  const stripAbove = side === "top" && !full;
+  const contentStyle: React.CSSProperties = stripAbove ? { bottom: 0, height: contentCssH } : { top: 0, height: contentCssH };
+  const stripStyle: React.CSSProperties = full ? { bottom: 0 } : stripAbove ? { bottom: contentCssH } : { top: contentCssH };
+  const narrow = winW < 300;
+  const stripBtn = "grid h-6 w-6 shrink-0 place-items-center rounded text-white/80 hover:bg-white/12 hover:text-white";
 
   return (
     <div
       ref={wrap}
       className="group/frame relative h-screen w-screen overflow-hidden"
-      onPointerMove={wake}
-      onPointerDown={wake}
+      onPointerEnter={enter}
+      onPointerMove={enter}
+      onPointerDown={enter}
+      onPointerLeave={leave}
+      onContextMenu={(e) => {
+        if ((e.target as HTMLElement).closest("input, textarea, [data-frame-menu]")) return;
+        e.preventDefault();
+        setMenu({ x: e.clientX, y: e.clientY });
+      }}
     >
-      {/* The picture. Opacity applies to the content only, so the bar stays readable. */}
-      <div className="absolute inset-0" style={{ opacity: frame.opacity }}>
-        {frame.kind === "image" || frame.kind === "video" ? (
-          <MediaBody frame={frame} say={say} onFullscreen={toggleFull} />
-        ) : Body ? (
-          <Suspense fallback={null}>
-            <Body frame={frame} status={say} />
-          </Suspense>
-        ) : (
-          <div className="grid h-full place-items-center bg-black/70 p-4 text-center text-[12px] text-white/75">
-            This frame needs Lastshot Pro.
+      {/* The content: the picture or clip, at the frame's own size. */}
+      <div className="absolute inset-x-0" style={contentStyle} data-testid="frame-content">
+        {/* Opacity applies to the content only, so the strip stays readable. */}
+        <div className="absolute inset-0" style={{ opacity: frame.opacity }}>
+          {media ? (
+            <MediaBody
+              frame={frame}
+              say={say}
+              onFullscreen={toggleFull}
+              handle={mediaRef}
+              onVideo={setVideo}
+              tools={tools}
+              toolTarget={toolTarget}
+            />
+          ) : Body ? (
+            <Suspense fallback={null}>
+              <Body frame={frame} status={say} />
+            </Suspense>
+          ) : (
+            <div className="grid h-full place-items-center bg-black/70 p-4 text-center text-[12px] text-white/75">This frame needs Lastshot Pro.</div>
+          )}
+        </div>
+
+        {/* A faint outline so a see-through frame can be found while the mouse is over it. */}
+        {!full && (
+          <div className={cn("pointer-events-none absolute inset-0 z-30 border transition-colors", want ? "border-white/25" : "border-transparent")} />
+        )}
+
+        {/* Click-through: a small, quiet marker while it is on. */}
+        {frame.clickThrough && !peek && (
+          <div
+            className="pointer-events-none absolute right-1 top-1 z-30 grid h-[18px] w-[18px] place-items-center rounded-full bg-black/55 text-white/80 ring-1 ring-white/20"
+            data-testid="frame-through-marker"
+          >
+            <svg viewBox="0 0 16 16" className="h-3 w-3 fill-none stroke-current" strokeWidth="1.6" strokeLinejoin="round">
+              <path d={FI.through} />
+            </svg>
           </div>
+        )}
+        {hintOn && frame.clickThrough && (
+          <div
+            className="pointer-events-none absolute inset-x-2 bottom-2 z-40 rounded-md bg-black/80 px-2.5 py-1.5 text-[11px] leading-snug text-white shadow-lg"
+            data-testid="frame-through-hint"
+          >
+            <b>Click-through is on:</b> clicks reach the app below. To use this frame again, hold <b>Ctrl+Alt</b> over it
+            {hotkey ? (
+              <>
+                , press <b>{hotkey}</b>
+              </>
+            ) : null}
+            , or use Lastshot's tray › <b>Frames: turn off click-through</b>.
+          </div>
+        )}
+
+        {status && (
+          <div className="pointer-events-none absolute left-1/2 top-2 z-50 max-w-[90%] -translate-x-1/2 rounded-md bg-black/75 px-2.5 py-1 text-center text-[11px] text-white">
+            {status}
+          </div>
+        )}
+
+        {/* Resize edges and corners of the content (not in full screen or click-through). */}
+        {!full && usable && (
+          <>
+            {handle("n", "inset-x-3 top-0 h-1.5")}
+            {handle("s", "inset-x-3 bottom-0 h-1.5")}
+            {handle("w", "inset-y-3 left-0 w-1.5")}
+            {handle("e", "inset-y-3 right-0 w-1.5")}
+            {handle("nw", "left-0 top-0 h-3 w-3")}
+            {handle("ne", "right-0 top-0 h-3 w-3")}
+            {handle("sw", "bottom-0 left-0 h-3 w-3")}
+            {handle("se", "bottom-0 right-0 h-3 w-3")}
+          </>
         )}
       </div>
 
-      {/* A faint outline so a see-through frame can be found while the mouse is over it. */}
-      {!full && (
-        <div
-          className={cn(
-            "pointer-events-none absolute inset-0 z-30 border transition-colors",
-            barShown ? "border-white/25" : "border-transparent",
-          )}
-        />
-      )}
-
-      {/* Move bar. */}
+      {/* The strip: outside the content (the window grows to show it). */}
       <div
-        onPointerEnter={() => {
-          setOverBar(true);
-          loadHotkey();
-        }}
-        onPointerLeave={() => setOverBar(false)}
+        ref={stripRef}
         className={cn(
-          "absolute inset-x-0 top-0 z-50 transition-opacity duration-150",
-          barShown ? "opacity-100" : "pointer-events-none opacity-0",
+          "absolute inset-x-0 z-50 flex flex-col bg-[#14161c] text-white",
+          stripAbove ? "border-b border-white/10" : "border-t border-white/10",
         )}
+        style={stripStyle}
+        data-testid="frame-strip"
+        onPointerEnter={loadHotkey}
       >
-        <div className="flex h-8 items-center gap-1 bg-[#14161c]/88 pl-1 pr-1 text-white backdrop-blur">
+        {peek && frame.clickThrough && (
+          <div className="flex items-center gap-1.5 bg-[#5d72db]/30 px-1.5 py-1 text-[11px]" data-testid="frame-peek">
+            <span className="min-w-0 flex-1 truncate text-white/85">Clickable while the mouse is here</span>
+            <button
+              type="button"
+              data-testid="frame-peek-off"
+              onClick={() => patch({ clickThrough: false })}
+              className="shrink-0 rounded bg-[#5d72db] px-2 py-0.5 font-semibold text-white hover:bg-[#6f83ea]"
+            >
+              Turn off click-through
+            </button>
+          </div>
+        )}
+        <div className="flex items-center gap-0.5 pl-1 pr-1" style={{ height: STRIP_H }}>
           <div
-            data-tauri-drag-region-ignore
             onPointerDown={startDrag("move")}
             onPointerMove={onDragMove}
             onPointerUp={endDrag}
             onPointerCancel={endDrag}
             onLostPointerCapture={endDrag}
             onDoubleClick={toggleFull}
-            title="Drag to move (snaps to screen edges and other frames; hold Alt to stop snapping). Double-click: full screen."
-            className="flex h-full min-w-0 flex-1 cursor-move items-center gap-1.5 px-1.5"
+            title="Drag to move (snaps to screen edges and other frames; hold Alt to stop snapping). Double-click: full screen. Right-click: everything."
+            className="flex h-full min-w-[24px] flex-1 cursor-move items-center gap-1.5 px-1"
+            data-testid="frame-grip"
           >
             <span className="h-3 w-1 shrink-0 rounded-sm bg-white/30" />
-            <span className="truncate text-[11px] text-white/80">{frame.title}</span>
+            {!narrow && <span className="truncate text-[11px] text-white/80">{frame.title}</span>}
           </div>
-          <label
-            className="flex items-center gap-1 px-1"
-            title="Opacity of the picture (Shift + mouse wheel anywhere on the frame)"
-            onPointerDown={(e) => e.stopPropagation()}
-          >
-            <span className="text-white/60">
-              <Icon d={FI.opacity} />
-            </span>
-            <input
-              type="range"
-              min={5}
-              max={100}
-              step={1}
-              value={Math.round(frame.opacity * 100)}
-              onChange={(e) => patch({ opacity: Number(e.target.value) / 100 })}
-              className="h-1 w-20 accent-[#7d8ff0]"
-              aria-label="Opacity"
-            />
-            {takesKeys ? (
-              // A frame that takes the keyboard: type any value (Enter sets it).
-              <>
-                <NumberField
-                  value={Math.round(frame.opacity * 100)}
-                  min={5}
-                  max={100}
-                  step={1}
-                  digits={0}
-                  onChange={(v) => patch({ opacity: Math.round(v) / 100 })}
-                  aria-label="Opacity, percent"
-                  title="Type any opacity from 5 to 100 %"
-                  testid="frame-opacity"
-                  className="w-7 rounded border border-transparent bg-transparent px-0.5 text-right font-mono text-[10px] text-white/80 hover:border-white/20 focus:border-white/30 focus:bg-black/40 focus:outline-none"
+          {frame.kind === "video" && video && (
+            <>
+              <button type="button" className={stripBtn} title={vt.playing ? "Pause" : "Play"} onClick={playPause} data-testid="frame-play">
+                <Icon d={vt.playing ? FI.pause : FI.play} />
+              </button>
+              {winW >= 360 && (
+                <input
+                  type="range"
+                  min={0}
+                  max={Math.max(0.01, vt.d)}
+                  step={0.01}
+                  value={Math.min(vt.t, vt.d || 0)}
+                  onChange={(e) => {
+                    video.currentTime = Number(e.target.value);
+                  }}
+                  className="h-1 w-20 shrink accent-[#7d8ff0]"
+                  aria-label="Position"
+                  title="Position"
                 />
-                <span className="-ml-1 font-mono text-[10px] text-white/60">%</span>
-              </>
-            ) : (
-              // Picture and clip frames never take the keyboard: exact values are typed in the Pop-outs panel.
-              <span className="w-8 text-right font-mono text-[10px] text-white/70" title="Type an exact value in Lastshot's Pop-outs panel">
-                {Math.round(frame.opacity * 100)}%
+              )}
+              {winW >= 260 && <span className="shrink-0 px-0.5 font-mono text-[10px] text-white/70">{fmtTime(vt.t)}</span>}
+              <button
+                type="button"
+                className={stripBtn}
+                title={vt.muted ? "Sound on" : "Mute"}
+                onClick={() => {
+                  video.muted = !video.muted;
+                }}
+              >
+                <Icon d={vt.muted ? FI.mute : FI.sound} />
+              </button>
+            </>
+          )}
+          {winW >= 420 && (
+            <label className="flex shrink-0 items-center gap-1 px-1" title="Opacity of the picture (Shift + mouse wheel anywhere on the frame)">
+              <span className="text-white/60">
+                <Icon d={FI.opacity} />
               </span>
-            )}
-          </label>
-          <Btn title={`Always on top${k("T")}`} on={frame.onTop} onClick={() => patch({ onTop: !frame.onTop })}>
-            <Icon d={FI.pin} />
-          </Btn>
+              <input
+                type="range"
+                min={5}
+                max={100}
+                step={1}
+                value={Math.round(frame.opacity * 100)}
+                onChange={(e) => patch({ opacity: Number(e.target.value) / 100 })}
+                className="h-1 w-16 accent-[#7d8ff0]"
+                aria-label="Opacity"
+              />
+              {takesKeys ? (
+                // A frame that takes the keyboard: type any value (Enter sets it).
+                <>
+                  <NumberField
+                    value={Math.round(frame.opacity * 100)}
+                    min={5}
+                    max={100}
+                    step={1}
+                    digits={0}
+                    onChange={(v) => patch({ opacity: Math.round(v) / 100 })}
+                    aria-label="Opacity, percent"
+                    title="Type any opacity from 5 to 100 %"
+                    testid="frame-opacity"
+                    className="w-7 rounded border border-transparent bg-transparent px-0.5 text-right font-mono text-[10px] text-white/80 hover:border-white/20 focus:border-white/30 focus:bg-black/40 focus:outline-none"
+                  />
+                  <span className="-ml-1 font-mono text-[10px] text-white/60">%</span>
+                </>
+              ) : (
+                // Picture and clip frames never take the keyboard: presets are in the menu, exact values in the Pop-outs panel.
+                <span className="w-8 text-right font-mono text-[10px] text-white/70" title="Right-click for presets; type an exact value in Lastshot's Pop-outs panel">
+                  {Math.round(frame.opacity * 100)}%
+                </span>
+              )}
+            </label>
+          )}
+          {media && (
+            <Btn title={tools ? "Hide the view tools" : "View tools: zoom, turn, mirror, grid, colour, compare…"} on={tools} onClick={() => setTools(!tools)}>
+              <Icon d={FI.tools} />
+            </Btn>
+          )}
+          {winW >= 200 && (
+            <Btn title={`Always on top${k("T")}`} on={frame.onTop} onClick={() => patch({ onTop: !frame.onTop })}>
+              <Icon d={FI.pin} />
+            </Btn>
+          )}
           <Btn
-            title={`Click-through${k("X")}: clicks go to the app below and this frame cannot be clicked. Turn it off from the Pop-outs panel in Lastshot, the tray menu${hotkey ? `, or ${hotkey}` : ""}.`}
+            title={
+              frame.clickThrough
+                ? "Click-through is on: turn it off"
+                : `Click-through${k("X")}: clicks go to the app below. To get the frame back, hold Ctrl+Alt over it${hotkey ? `, press ${hotkey}` : ""}, or use the tray or the Pop-outs panel.`
+            }
             on={frame.clickThrough}
-            onClick={() => patch({ clickThrough: true })}
+            onClick={() => patch({ clickThrough: !frame.clickThrough })}
           >
             <Icon d={FI.through} />
           </Btn>
+          {winW >= 240 && (
+            <Btn title={full ? `Leave full screen (double-click the strip${takesKeys ? " or Esc" : ""})` : `Full screen${k("F")}, or double-click`} on={full} onClick={toggleFull}>
+              <Icon d={FI.full} />
+            </Btn>
+          )}
           <Btn
-            title={full ? `Leave full screen (double-click the bar${takesKeys ? " or Esc" : ""})` : `Full screen${k("F")}, or double-click the bar`}
-            on={full}
-            onClick={toggleFull}
+            title="Everything (or right-click the frame)"
+            on={!!menu}
+            onClick={(e) => {
+              const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+              setMenu(menu ? null : { x: r.left, y: stripAbove ? r.bottom + 2 : Math.max(0, r.top - 4) });
+            }}
           >
-            <Icon d={FI.full} />
+            <Icon d={FI.more} />
           </Btn>
-          <Btn title="Show the Pop-outs panel in Lastshot" onClick={() => void frames.showPanel()}>
-            <Icon d={FI.panel} />
-          </Btn>
-          <Btn title="Hide (bring it back from the Pop-outs panel or the tray)" onClick={() => patch({ hidden: true })}>
-            <Icon d={FI.hide} />
-          </Btn>
+          {winW >= 280 && (
+            <Btn title="Hide (bring it back from the Pop-outs panel or the tray)" onClick={() => patch({ hidden: true })}>
+              <Icon d={FI.hide} />
+            </Btn>
+          )}
           <Btn title={`Close${k("Ctrl+W")}`} onClick={close} className="hover:bg-red-500/70">
             <Icon d={FI.close} />
           </Btn>
         </div>
+        {/* The viewer's tool row, when "View tools" is on. */}
+        <div ref={setToolTarget} className={cn(!(tools && media) && "hidden")} data-testid="frame-tools" />
       </div>
 
-      {status && (
-        <div className="pointer-events-none absolute left-1/2 top-10 z-50 -translate-x-1/2 rounded-md bg-black/75 px-2.5 py-1 text-[11px] text-white">
-          {status}
-        </div>
-      )}
-
-      {/* Resize edges and corners (hidden in full screen and click-through). */}
-      {!full && !frame.clickThrough && (
-        <>
-          {handle("n", "inset-x-3 top-0 h-1.5")}
-          {handle("s", "inset-x-3 bottom-0 h-1.5")}
-          {handle("w", "inset-y-3 left-0 w-1.5")}
-          {handle("e", "inset-y-3 right-0 w-1.5")}
-          {handle("nw", "left-0 top-0 h-3 w-3")}
-          {handle("ne", "right-0 top-0 h-3 w-3")}
-          {handle("sw", "bottom-0 left-0 h-3 w-3")}
-          {handle("se", "bottom-0 right-0 h-3 w-3")}
-        </>
+      {menu && (
+        <FrameMenu
+          at={menu}
+          onClose={() => setMenu(null)}
+          frame={frame}
+          full={full}
+          tools={tools}
+          hotkey={hotkey}
+          media={media ? mediaRef.current : null}
+          video={video}
+          patch={patch}
+          setTools={setTools}
+          toggleFull={toggleFull}
+          close={close}
+        />
       )}
     </div>
   );
 }
 
+/** The right-click menu: every action of a frame in one place. */
+function FrameMenu({
+  at,
+  onClose,
+  frame,
+  full,
+  tools,
+  hotkey,
+  media,
+  video,
+  patch,
+  setTools,
+  toggleFull,
+  close,
+}: {
+  at: { x: number; y: number };
+  onClose: () => void;
+  frame: Frame;
+  full: boolean;
+  tools: boolean;
+  hotkey: string;
+  media: MediaHandle | null;
+  video: HTMLVideoElement | null;
+  patch: (p: FramePatch) => void;
+  setTools: (on: boolean) => void;
+  toggleFull: () => void;
+  close: () => void;
+}) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [pos, setPos] = useState(at);
+  // Kept inside the window (it scrolls when the window is small).
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    setPos({ x: Math.max(4, Math.min(at.x, window.innerWidth - r.width - 4)), y: Math.max(4, Math.min(at.y, window.innerHeight - r.height - 4)) });
+  }, [at]);
+  useEffect(() => {
+    const down = (e: PointerEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+    };
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        onClose();
+      }
+    };
+    const blur = () => onClose();
+    window.addEventListener("pointerdown", down, true);
+    window.addEventListener("keydown", key, true);
+    window.addEventListener("blur", blur);
+    return () => {
+      window.removeEventListener("pointerdown", down, true);
+      window.removeEventListener("keydown", key, true);
+      window.removeEventListener("blur", blur);
+    };
+  }, [onClose]);
+  const item = (label: string, run: () => void, opts: { on?: boolean; hint?: string; danger?: boolean; testid?: string } = {}): ReactNode => (
+    <button
+      key={label}
+      type="button"
+      role="menuitem"
+      data-testid={opts.testid}
+      onClick={() => {
+        onClose();
+        run();
+      }}
+      className={cn(
+        "flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[11.5px]",
+        opts.danger ? "text-red-300 hover:bg-red-500/25" : "text-white/85 hover:bg-white/10",
+      )}
+    >
+      <span className="w-3 text-center text-[10px] text-[#9fb0ff]">{opts.on ? "✓" : ""}</span>
+      <span className="flex-1">{label}</span>
+      {opts.hint && <span className="font-mono text-[10px] text-white/40">{opts.hint}</span>}
+    </button>
+  );
+  const sep = (key: string) => <div key={key} className="my-1 h-px bg-white/10" />;
+  const a = media?.api ?? null;
+  const run = (cmd: FrameCmd) => media?.run(cmd);
+  return (
+    <div
+      ref={ref}
+      data-frame-menu
+      role="menu"
+      className="absolute z-[70] max-h-[calc(100vh-8px)] w-[230px] overflow-y-auto rounded-lg border border-white/15 bg-[#1c1e25] p-1 shadow-2xl"
+      style={{ left: pos.x, top: pos.y }}
+      onPointerDown={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+      onContextMenu={(e) => e.preventDefault()}
+      data-testid="frame-menu"
+    >
+      {frame.clickThrough && [item("Turn off click-through", () => patch({ clickThrough: false }), { testid: "frame-menu-through-off" }), sep("ct")]}
+      {video && [
+        item(video.paused ? "Play" : "Pause", () => (video.paused ? void video.play().catch(() => undefined) : video.pause())),
+        item(video.muted ? "Sound on" : "Mute", () => {
+          video.muted = !video.muted;
+        }),
+        sep("v"),
+      ]}
+      {a && [
+        item("Fit", () => a.fit(), { on: a.fitted(), testid: "frame-menu-fit" }),
+        item("100 %", () => a.zoom100()),
+        item("Zoom in", () => a.zoomBy(1.5), { hint: "wheel" }),
+        item("Zoom out", () => a.zoomBy(1 / 1.5)),
+        item("Turn right 90°", () => a.turn(90), { testid: "frame-menu-turn" }),
+        item("Turn left 90°", () => a.turn(-90)),
+        item("Mirror left↔right", () => a.mirror()),
+        item("Flip upside down", () => a.flipV()),
+        item("Grey", () => run("gray")),
+        item("Grid", () => run("grid")),
+        item("Undo", () => void a.undo()),
+        item("Reset the view", () => a.resetAll()),
+        sep("view"),
+        item("Copy picture", () => void a.copyFrame()),
+        item("Save picture as PNG", () => void a.saveFrame()),
+        sep("pic"),
+      ]}
+      <div className="flex items-center gap-1 px-2 py-1 text-[11px] text-white/60" data-testid="frame-menu-opacity">
+        <span className="flex-1">Opacity</span>
+        {[100, 75, 50, 25].map((o) => (
+          <button
+            key={o}
+            type="button"
+            onClick={() => patch({ opacity: o / 100 })}
+            className={cn(
+              "rounded px-1.5 py-0.5 font-mono text-[10px]",
+              Math.round(frame.opacity * 100) === o ? "bg-[#5d72db] text-white" : "bg-white/10 text-white/80 hover:bg-white/20",
+            )}
+          >
+            {o}
+          </button>
+        ))}
+      </div>
+      {item("Always on top", () => patch({ onTop: !frame.onTop }), { on: frame.onTop })}
+      {!frame.clickThrough && item("Click-through", () => patch({ clickThrough: true }), { hint: hotkey || undefined, testid: "frame-menu-through" })}
+      {item(full ? "Leave full screen" : "Full screen", toggleFull, { on: full, hint: "double-click" })}
+      {media && item("View tools in the strip", () => setTools(!tools), { on: tools, testid: "frame-menu-tools" })}
+      {sep("frame")}
+      {item("Pop-outs panel in Lastshot", () => void frames.showPanel())}
+      {item("Hide", () => patch({ hidden: true }))}
+      {item("Close", close, { danger: true })}
+    </div>
+  );
+}
+
 /** A picture or a playing clip in the viewer; remembers its view and settings. */
-function MediaBody({ frame, say, onFullscreen }: { frame: Frame; say: (m: string) => void; onFullscreen: () => void }) {
+function MediaBody({
+  frame,
+  say,
+  onFullscreen,
+  handle,
+  onVideo,
+  tools,
+  toolTarget,
+}: {
+  frame: Frame;
+  say: (m: string) => void;
+  onFullscreen: () => void;
+  handle: React.MutableRefObject<MediaHandle>;
+  onVideo: (v: HTMLVideoElement | null) => void;
+  tools: boolean;
+  toolTarget: HTMLElement | null;
+}) {
   const saved = useMemo(() => (frame.view ?? {}) as FrameViewState, []); // eslint-disable-line react-hooks/exhaustive-deps
   const [settings, setSettings] = useState<ViewerSettings>({ ...DEFAULT_SETTINGS, ...(saved.s ?? {}) });
   const [source, setSource] = useState<HTMLImageElement | HTMLVideoElement | null>(null);
@@ -606,21 +1063,19 @@ function MediaBody({ frame, say, onFullscreen }: { frame: Frame; say: (m: string
   }, [saveNow]);
   const url = useMemo(() => assetUrl(frame.src) || frame.src, [frame.src]);
 
-  // The Pop-outs panel in the main window drives the view (a click-through
-  // frame cannot be clicked).
+  // The Pop-outs panel in the main window and the menu drive the view (a
+  // click-through frame cannot be clicked).
   const api = useRef<ViewerApi | null>(null);
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
   const sourceRef = useRef(source);
   sourceRef.current = source;
-  useEffect(() => {
-    let off: (() => void) | undefined;
-    let alive = true;
-    const setS = (s: ViewerSettings) => {
-      setSettings(s);
-      save({ s });
-    };
-    const run = (cmd: FrameCmd) => {
+  const run = useCallback(
+    (cmd: FrameCmd) => {
+      const setS = (s: ViewerSettings) => {
+        setSettings(s);
+        save({ s });
+      };
       const a = api.current;
       const s = settingsRef.current;
       if (cmd === "gray") return setS({ ...s, adjust: { ...s.adjust, grayscale: s.adjust.grayscale >= 0.5 ? 0 : 1 } });
@@ -643,13 +1098,19 @@ function MediaBody({ frame, say, onFullscreen }: { frame: Frame; say: (m: string
         setS({ ...s, adjust: { ...s.adjust, grayscale: 0 }, grid: { ...s.grid, kind: "off" } });
         if (c) a.setView(fitView(c, st));
       }
-    };
+    },
+    [save],
+  );
+  handle.current.run = run;
+  useEffect(() => {
+    let off: (() => void) | undefined;
+    let alive = true;
     void frames.onCommand(frame.id, run).then((u) => (alive ? (off = u) : u()));
     return () => {
       alive = false;
       off?.();
     };
-  }, [frame.id, save]);
+  }, [frame.id, run]);
 
   useEffect(() => {
     if (frame.kind !== "image") return;
@@ -667,6 +1128,8 @@ function MediaBody({ frame, say, onFullscreen }: { frame: Frame; say: (m: string
 
   const videoRef = useCallback(
     (v: HTMLVideoElement | null) => {
+      handle.current.video = v;
+      onVideo(v);
       if (!v) return;
       setSource(v);
       v.muted = saved.muted ?? true;
@@ -680,8 +1143,9 @@ function MediaBody({ frame, say, onFullscreen }: { frame: Frame; say: (m: string
       );
       v.addEventListener("pause", () => save({ t: v.currentTime, playing: false }));
       v.addEventListener("play", () => save({ playing: true }));
+      v.addEventListener("volumechange", () => save({ muted: v.muted }));
     },
-    [save, saved],
+    [save, saved, handle, onVideo],
   );
 
   const toggle = useCallback(() => {
@@ -690,6 +1154,12 @@ function MediaBody({ frame, say, onFullscreen }: { frame: Frame; say: (m: string
     if (v.paused) void v.play().catch(() => undefined);
     else v.pause();
   }, [source]);
+
+  // A remembered view: a fitted one fits again; a zoomed one is scaled from
+  // the stage it was made for (a frame restored at another size or DPI). A
+  // view handed in without its stage (older saves) starts fitted, keeping
+  // its turn and flips.
+  const initialFitted = saved.v ? (saved.fit ?? !saved.st) : undefined;
 
   if (error) return <div className="grid h-full place-items-center bg-black/70 p-4 text-center text-[12px] text-white/75">{error}</div>;
   return (
@@ -712,12 +1182,20 @@ function MediaBody({ frame, say, onFullscreen }: { frame: Frame; say: (m: string
         fps={60}
         name={frame.title}
         background="none"
-        bar="auto"
+        bar={tools && toolTarget ? "show" : "none"}
+        barTarget={tools ? toolTarget : null}
         barPlace="bottom"
         videoBar={frame.kind === "video"}
-        apiRef={api}
+        keys={false}
+        follow="scale"
+        apiRef={(a: ViewerApi | null) => {
+          api.current = a;
+          handle.current.api = a;
+        }}
         initialView={(saved.v as View | undefined) ?? null}
-        onViewChange={(v) => save({ v })}
+        initialStage={(saved.st as Size | undefined) ?? null}
+        initialFitted={initialFitted}
+        onViewChange={(v, st, _c, fitted) => save({ v, st, fit: fitted })}
         settings={settings}
         onSettingsChange={(s) => {
           setSettings(s);

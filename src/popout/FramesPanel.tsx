@@ -144,6 +144,7 @@ export default function FramesPanel({
   };
 
   const allThrough = list.length > 0 && list.every((f) => f.clickThrough);
+  const throughCount = list.filter((f) => f.clickThrough && !f.hidden).length;
   const allHidden = list.length > 0 && list.every((f) => f.hidden);
   const holding = list.filter((f) => (f.items ?? 0) > 0);
   const closeAll = (force: boolean) => {
@@ -198,6 +199,24 @@ export default function FramesPanel({
             </button>
           ))}
         </div>
+
+        {throughCount > 0 && (
+          // The way back from click-through, where nobody can miss it.
+          <div className="flex flex-wrap items-center gap-2 border-b border-line bg-accent/15 px-4 py-2.5 text-[11.5px] text-ink-2" data-testid="frames-through-banner">
+            <span className="min-w-0 flex-1">
+              {throughCount === 1 ? "1 frame ignores" : `${throughCount} frames ignore`} the mouse (click-through). Hold <b>Ctrl+Alt</b> over a frame to use
+              it for a moment{hotkey ? <>, or press <b>{hotkey}</b></> : null}.
+            </span>
+            <button
+              type="button"
+              data-testid="frames-through-off"
+              className="rounded-md bg-accent px-2.5 py-1 text-[11.5px] font-semibold text-white hover:brightness-110"
+              onClick={() => void frames.clickThroughAll(false).catch(fail)}
+            >
+              Turn off click-through
+            </button>
+          </div>
+        )}
 
         <div className="flex flex-wrap items-center gap-1.5 border-b border-line px-4 py-2.5">
           <button

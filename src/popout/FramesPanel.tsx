@@ -295,14 +295,14 @@ function FrameRow({
         </button>
       </div>
 
-      <label className="mt-1.5 flex items-center gap-2 text-[11px] text-ink-3" title="Show this frame only while that app (or Lastshot) is in front, so it never covers your browser or a game">
+      <label className="mt-1.5 flex items-center gap-2 text-[11px] text-ink-3" title="Show this frame only while that app (or Lastshot) is in front. Frames hide while another app is full screen on their screen (a game, a video); pick the app here to keep the frame over it.">
         <span className="w-12 shrink-0">Show over</span>
         <select
           value={f.onlyWith}
           onChange={(e) => upd(f, { onlyWith: e.target.value })}
           className="h-6 min-w-0 flex-1 rounded border border-line bg-surface px-1 text-[11px] text-ink"
         >
-          <option value="">every app</option>
+          <option value="">every app (not over full screen)</option>
           {[...new Set([...(f.onlyWith ? [f.onlyWith] : []), ...apps])].map((a) => (
             <option key={a} value={a}>
               only {a.replace(/\.exe$/i, "")}

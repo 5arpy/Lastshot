@@ -25,7 +25,7 @@ All notable changes to **Lastshot** (and, before 1.7.1, to **ClipFlow**, which L
 - **Audio guard** (off by default): when Windows or an app changes a default device or moves an app, Lastshot asks, puts it back, or only logs it. Automatic backups of the audio setup, named setups, a change history, auto-duck and a mic-mute shortcut.
 - **Audio → Cables (Lastshot Pro):** Lastshot's own virtual audio cables, without Voicemeeter. Not in the free build.
 - **Viewer: zoom to single pixels** (up to 6400 %, sharp pixels, pixel grid), pan, turn and flip (H mirrors), frame by frame (`,` and `.`), slow motion and loops, colour picker (C), measure (D), crop the view, compare (wipe, difference, side by side), value check, grids, colour adjustments, onion skin. Ctrl+C copies the frame, Ctrl+S saves it as a PNG. The snip editor has the same viewer. "?" lists every key.
-- **Pop-out frames.** Pop out a snip, a picture, a clip's current frame or the playing clip into a borderless window that stays on top, to trace or copy from in another app (Blender, a drawing app). Opacity down to 5 %, click-through (clicks go to the app below), zoom and pan inside the frame, flip, grayscale and a grid, free resize with the shape kept (Shift frees it). Frames snap to screen edges and to each other, never take the keyboard focus, and remember their place, size and settings. *Show over: only Blender* (any app) shows a frame only while that app or Lastshot is in front. Control them all from the *Pop-outs* panel (top bar), the tray, or **Ctrl+Alt+Shift+X** (click-through on / off for every frame). Drop a picture on Lastshot or paste one (Ctrl+V) to pop it out.
+- **Pop-out frames.** Pop out a snip, a picture, a clip's current frame or the playing clip into a borderless window that stays on top, to trace or copy from in another app (Blender, a drawing app). Opacity down to 5 %, click-through (clicks go to the app below), zoom and pan inside the frame, flip, grayscale and a grid, free resize with the shape kept (Shift frees it). Frames snap to screen edges and to each other, never take the keyboard focus, and remember their place, size and settings. *Show over: only Blender* (any app) shows a frame only while that app or Lastshot is in front. Control them all from the *Pop-outs* panel (top bar), the tray, or **Ctrl+Alt+Shift+X** (click-through on / off for every frame). Drop a picture on Lastshot or paste one (Ctrl+V) to pop it out. Frames step aside while another app is full screen on their screen (a game, a video), so they never cover a game; pick the app under *Show over* to keep a frame over it.
 
 ### Changed
 
@@ -39,6 +39,8 @@ All notable changes to **Lastshot** (and, before 1.7.1, to **ClipFlow**, which L
 - The microphone slider in Studio set the volume to almost nothing.
 - Quitting left the tray icon behind until the mouse passed over it.
 - 60 fps replays and recordings could drop frames or play unevenly; frames are now placed on an even 60 fps grid.
+- A settings file missing one setting (an older version, a hand edit) reset every setting to its default. Missing settings now take their default one by one, and a file Lastshot cannot read is kept as `settings.json.unreadable`.
+- One shortcut can no longer be given to two actions at once (the four main shortcuts, mic mute and the frames click-through shortcut).
 
 ## [1.9.0] - 2026-11-15
 

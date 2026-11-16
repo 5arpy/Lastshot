@@ -388,6 +388,7 @@ fn build_window(app: &AppHandle, f: &Frame) -> Result<WebviewWindow, String> {
     if !f.hidden && over_its_app(f) {
         show_quietly(&win);
     }
+    start_follow(app);
     Ok(win)
 }
 
@@ -936,11 +937,70 @@ pub(crate) fn allow_file(app: &AppHandle, path: &str) {
 // ---------------------------------------------------------------------------
 // "Only over one app": the frame shows while that app (or Lastshot) is in
 // front and hides when anything else is, so a tracing frame never covers
-// the browser or a game. A light thread (5 checks a second, one window
-// query each) runs only while a frame uses it.
+// the browser or a game.
+// Full screen: while another app fills a monitor (a game, a video), frames
+// on that monitor hide unless they follow that app, so they never cover a
+// game or knock it out of independent flip.
+// A light thread (5 checks a second, a few window queries each) runs only
+// while a frame is open.
 // ---------------------------------------------------------------------------
 
 static FRONT: Mutex<Option<String>> = Mutex::new(None);
+/// The monitor (left, top, right, bottom) another app fills, if any.
+static FULLSCREEN: Mutex<Option<(i32, i32, i32, i32)>> = Mutex::new(None);
+
+/// The monitor a window of another app in front covers whole, if it does.
+#[cfg(windows)]
+fn fullscreen_front() -> Option<(i32, i32, i32, i32)> {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONULL};
+    use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetForegroundWindow, GetWindowRect};
+    unsafe {
+        let h = GetForegroundWindow();
+        if h.is_invalid() || crate::appname::foreground_pid() == Some(std::process::id()) {
+            return None;
+        }
+        let mut cls = [0u16; 64];
+        let n = GetClassNameW(h, &mut cls).max(0) as usize;
+        // The desktop and the taskbar cover the screen but are not apps.
+        if matches!(String::from_utf16_lossy(&cls[..n]).as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd") {
+            return None;
+        }
+        let mut r = RECT::default();
+        GetWindowRect(h, &mut r).ok()?;
+        let mon = MonitorFromWindow(h, MONITOR_DEFAULTTONULL);
+        if mon.is_invalid() {
+            return None;
+        }
+        let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if !GetMonitorInfoW(mon, &mut mi).as_bool() {
+            return None;
+        }
+        let m = mi.rcMonitor;
+        covers((r.left, r.top, r.right, r.bottom), (m.left, m.top, m.right, m.bottom)).then_some((m.left, m.top, m.right, m.bottom))
+    }
+}
+
+#[cfg(not(windows))]
+fn fullscreen_front() -> Option<(i32, i32, i32, i32)> {
+    None
+}
+
+fn covers(w: (i32, i32, i32, i32), m: (i32, i32, i32, i32)) -> bool {
+    w.0 <= m.0 && w.1 <= m.1 && w.2 >= m.2 && w.3 >= m.3
+}
+
+/// Whether the frame should be on screen given the app in front and the
+/// monitor a full-screen app fills.
+pub fn may_show(f: &Frame, front: Option<&str>, fullscreen: Option<(i32, i32, i32, i32)>) -> bool {
+    if !f.only_with.is_empty() {
+        return front_matches(&f.only_with, front);
+    }
+    let Some(m) = fullscreen else { return true };
+    let (l, t, r, b) = (f.x, f.y, f.x + f.w as i32, f.y + f.h as i32);
+    // Hidden when it overlaps the full-screen monitor.
+    !(l < m.2 && r > m.0 && t < m.3 && b > m.1)
+}
 
 /// True when the app in front is the one this frame follows, or Lastshot.
 pub fn front_matches(only_with: &str, front: Option<&str>) -> bool {
@@ -954,11 +1014,9 @@ pub fn front_matches(only_with: &str, front: Option<&str>) -> bool {
 }
 
 fn over_its_app(f: &Frame) -> bool {
-    if f.only_with.is_empty() {
-        return true;
-    }
     let front = FRONT.lock().clone();
-    front_matches(&f.only_with, front.as_deref())
+    let fs = *FULLSCREEN.lock();
+    may_show(f, front.as_deref(), fs)
 }
 
 fn start_follow(app: &AppHandle) {
@@ -973,11 +1031,12 @@ fn start_follow(app: &AppHandle) {
         let mut last_exe: Option<String> = None;
         let mut shown: std::collections::HashMap<String, bool> = Default::default();
         loop {
-            let users: Vec<Frame> = all().into_iter().filter(|f| !f.only_with.is_empty()).collect();
+            let users = all();
             if users.is_empty() {
                 RUNNING.store(false, Ordering::Release);
-                // A frame may have started following meanwhile.
-                if all().iter().any(|f| !f.only_with.is_empty()) && !RUNNING.swap(true, Ordering::AcqRel) {
+                *FULLSCREEN.lock() = None;
+                // A frame may have opened meanwhile.
+                if !all().is_empty() && !RUNNING.swap(true, Ordering::AcqRel) {
                     continue;
                 }
                 return;
@@ -994,8 +1053,10 @@ fn start_follow(app: &AppHandle) {
                 }
             }
             *FRONT.lock() = last_exe.clone();
+            let fs = fullscreen_front();
+            *FULLSCREEN.lock() = fs;
             for f in users {
-                let want = !f.hidden && front_matches(&f.only_with, last_exe.as_deref());
+                let want = !f.hidden && may_show(&f, last_exe.as_deref(), fs);
                 if shown.get(&f.id) == Some(&want) {
                     continue;
                 }
@@ -1057,7 +1118,7 @@ pub fn init(app: &AppHandle) {
     }
     store().lock().file.frames = keep.clone();
     save_soon();
-    if keep.iter().any(|f| !f.only_with.is_empty()) {
+    if !keep.is_empty() {
         start_follow(app);
     }
     for f in keep {
@@ -1344,6 +1405,22 @@ mod tests {
         let (_, _, shown) = f.apply(&FramePatch { only_with: Some(" blender.exe ".into()), ..Default::default() });
         assert!(shown);
         assert_eq!(f.only_with, "blender.exe");
+    }
+
+    #[test]
+    fn hides_over_a_full_screen_app_unless_it_follows_it() {
+        let f = Frame { x: 100, y: 100, w: 400, h: 300, ..Default::default() };
+        let mon = (0, 0, 1920, 1080);
+        assert!(may_show(&f, Some("game.exe"), None));
+        assert!(!may_show(&f, Some("game.exe"), Some(mon)));
+        // On the other monitor: stays.
+        let right = Frame { x: 2000, ..f.clone() };
+        assert!(may_show(&right, Some("game.exe"), Some(mon)));
+        // Asked to show over that app: stays.
+        let over = Frame { only_with: "game.exe".into(), ..f.clone() };
+        assert!(may_show(&over, Some("game.exe"), Some(mon)));
+        assert!(covers((-8, -8, 1928, 1088), mon));
+        assert!(!covers((0, 0, 1920, 1040), mon), "a maximised window leaves the taskbar");
     }
 
     #[test]

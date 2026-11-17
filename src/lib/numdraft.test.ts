@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseNum, showNum, stepNum } from "./numdraft";
+import { parseNum, parseNumOr, showNum, stepNum } from "./numdraft";
 import { CUSTOM, presetPick } from "../components/PresetOrCustom";
 
 describe("typed numbers", () => {
@@ -16,6 +16,13 @@ describe("typed numbers", () => {
     expect(parseNum("4", 10, 20000)).toBe(10);
     expect(parseNum("99999", 10, 20000)).toBe(20000);
     expect(parseNum("-30", -18, 18)).toBe(-18);
+  });
+  it("an emptied field means its empty value (e.g. 0 = off) when it has one", () => {
+    expect(parseNumOr("", 0, 60, 0)).toBe(0);
+    expect(parseNumOr("  ", 1, 60, 0)).toBe(0);
+    expect(parseNumOr("", 0, 60)).toBeNull();
+    expect(parseNumOr("90", 0, 60, 0)).toBe(60);
+    expect(parseNumOr("abc", 0, 60, 0)).toBeNull();
   });
   it("steps on the step grid and stays in range", () => {
     expect(stepNum(7.3, 0.5, 1, -18, 18)).toBe(8);

@@ -497,6 +497,74 @@ function ClipsExplorer(props: Props) {
       .catch((err) => onToast("err", "Could not copy the path", String(err)));
   };
 
+  // Repair / convert to MP4: path -> progress 0-1 (-1 while it is being checked).
+  const [repairs, setRepairs] = useState<ReadonlyMap<string, number>>(() => new Map());
+  useEffect(() => {
+    let off: (() => void) | undefined;
+    let alive = true;
+    void lastshot
+      .onRepairProgress((p) =>
+        setRepairs((m) => {
+          const k = [...m.keys()].find((x) => X.samePath(x, p.path));
+          return k ? new Map(m).set(k, Math.max(0, Math.min(1, p.progress))) : m;
+        }),
+      )
+      .then((u) => (alive ? (off = u) : u()));
+    return () => {
+      alive = false;
+      off?.();
+    };
+  }, []);
+  const repairOf = (p: string): number | undefined => {
+    for (const [k, v] of repairs) if (X.samePath(k, p)) return v;
+    return undefined;
+  };
+  const repairText = (v: number) => (v < 0 ? "Checking…" : `${Math.round(v * 100)}%`);
+  /** Checks one file first; repairs or converts it only when that helps. */
+  const repairOne = async (path: string, alone: boolean) => {
+    const convert = /\.mkv$/i.test(path);
+    setRepairs((m) => new Map(m).set(path, -1));
+    try {
+      const d = await lastshot.diagnoseClip(path);
+      if (d.need === "nothing") {
+        if (alone) onToast("ok", "This file is fine", d.message || `${X.baseName(path)} plays as it is.`);
+        return;
+      }
+      if (d.need === "unfixable") return onToast("err", `${X.baseName(path)} can't be repaired`, d.message);
+      setRepairs((m) => new Map(m).set(path, 0));
+      const r = await lastshot.repairClip(path);
+      onToast("ok", d.need === "remux" ? "Converted to MP4" : "Repaired", r.message || X.baseName(r.path));
+      if (r.newFile && alone) {
+        anchorRef.current = r.path;
+        setFocus(r.path);
+        onSelection([r.path], r.path);
+      }
+      refresh();
+    } catch (err) {
+      onToast("err", convert ? `Could not convert ${X.baseName(path)}` : `Could not repair ${X.baseName(path)}`, friendly(err));
+    } finally {
+      setRepairs((m) => {
+        const n = new Map(m);
+        for (const k of n.keys()) if (X.samePath(k, path)) n.delete(k);
+        return n;
+      });
+    }
+  };
+  /** One file or a selection (like OBS's remux list), one file at a time so the disk is not shared. */
+  const repair = (paths: string[]) => {
+    const todo = paths.filter((p) => repairOf(p) === undefined);
+    if (!todo.length) return;
+    // Queued files show "Checking…" until their turn.
+    setRepairs((m) => {
+      const n = new Map(m);
+      for (const p of todo) n.set(p, -1);
+      return n;
+    });
+    void (async () => {
+      for (const p of todo) await repairOne(p, todo.length === 1);
+    })();
+  };
+
   const newFolder = () => {
     if (loc.kind !== "folder") return;
     void run("Could not make a folder", async () => {
@@ -944,6 +1012,20 @@ function ClipsExplorer(props: Props) {
             { label: clip.favorite ? "Unstar" : "Star", run: () => props.onToggleFavorite(clip), off: many > 1 },
           ]
         : []),
+      ...(clip || (t.kind === "file" && fileKind(t.name) === "video")
+        ? [
+            (() => {
+              const videos = many > 1 ? selection.filter((p) => fileKind(X.baseName(p)) === "video") : [path];
+              const allMkv = videos.every((p) => /\.mkv$/i.test(p));
+              const what = allMkv ? "Convert" : "Repair / convert";
+              return {
+                label: videos.length > 1 ? `${what} ${videos.length} videos to MP4` : allMkv ? "Convert to MP4" : "Repair / convert to MP4",
+                run: () => repair(videos),
+                off: videos.every((p) => repairOf(p) !== undefined),
+              };
+            })(),
+          ]
+        : []),
       "-",
       { label: "Cut", key: "Ctrl+X", run: () => copySel(true), off: isRoot },
       { label: "Copy", key: "Ctrl+C", run: () => copySel(false) },
@@ -1083,6 +1165,9 @@ function ClipsExplorer(props: Props) {
               <span className="relative h-[18px] w-8 shrink-0 overflow-hidden rounded-sm">{picture(e, true)}</span>
             )}
             {nameEl(e, path)}
+            {repairOf(path) !== undefined && (
+              <span className="shrink-0 font-mono text-[10px] text-accent-fg">{repairText(repairOf(path)!)}</span>
+            )}
             {c?.favorite && <span className="text-warn">★</span>}
             {e.kind === "file" && e.readonly && <span className="text-[9px] text-ink-4" title="Read-only">RO</span>}
             {c && <EditBtn onClick={() => props.onOpen(c)} className="ml-auto opacity-0 group-hover:opacity-100" />}
@@ -1136,6 +1221,19 @@ function ClipsExplorer(props: Props) {
               )}
             </>
           ) : null}
+          {e.kind !== "folder" && repairOf(path) !== undefined && (
+            <>
+              <span className="absolute left-1 top-1 rounded bg-black/75 px-1.5 py-0.5 text-[10px] text-white" data-testid="repair-progress">
+                {/\.mkv$/i.test(path) ? "Converting" : "Repairing"} {repairText(repairOf(path)!)}
+              </span>
+              <span className="absolute inset-x-0 bottom-0 h-1 bg-black/50">
+                <span
+                  className={cn("block h-full bg-accent transition-[width] duration-300", repairOf(path)! < 0 && "animate-pulse")}
+                  style={{ width: `${repairOf(path)! < 0 ? 100 : Math.max(3, repairOf(path)! * 100)}%` }}
+                />
+              </span>
+            </>
+          )}
         </div>
         <div className="flex h-[46px] flex-col justify-center gap-0.5 px-2 text-[11px] text-ink">
           {nameEl(e, path)}
@@ -1528,6 +1626,12 @@ function ClipsExplorer(props: Props) {
         <span>
           {plural(entries.length, "item")} · {formatBytes(totalBytes)}
           {selection.length > 0 && ` · ${selection.length} selected (${formatBytes(selBytes)})`}
+          {[...repairs].map(([p, v]) => (
+            <span key={p} className="text-accent-fg">
+              {" · "}
+              {/\.mkv$/i.test(p) ? "Converting" : "Repairing"} {X.baseName(p)} {repairText(v)}
+            </span>
+          ))}
         </span>
         <span>
           {undo.length ? (

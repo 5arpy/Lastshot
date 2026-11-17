@@ -18,6 +18,8 @@ export interface PresetOrCustomProps {
   scale?: number;
   digits?: number;
   unit?: string;
+  /** What an emptied typed field commits, in field units (e.g. 0 = off). */
+  emptyValue?: number;
   disabled?: boolean;
   /** Fill the row (the list grows, the field keeps its size). */
   wide?: boolean;
@@ -44,6 +46,7 @@ export default function PresetOrCustom({
   scale = 1,
   digits = 0,
   unit,
+  emptyValue,
   disabled,
   wide,
   className,
@@ -84,7 +87,11 @@ export default function PresetOrCustom({
             step={step}
             digits={digits}
             disabled={disabled}
-            onChange={(v) => onChange(Math.round(v * scale))}
+            emptyValue={emptyValue}
+            // Picked "Custom…" from the list: the cursor goes straight into the field.
+            autoFocus={custom}
+            // Whole numbers of the stored unit; with scale 1 the shown decimals are kept.
+            onChange={(v) => onChange(+(v * scale).toFixed(scale === 1 ? digits : 0))}
             aria-label={label ? `${label}, custom value` : undefined}
             testid={testid ? `${testid}-custom` : undefined}
             className={fieldClassName}

@@ -63,6 +63,11 @@ export interface EngineStats {
   capture_method?: string;
   /** Something to know that is not an error (e.g. a black screen). */
   notice?: string | null;
+  /** Engine clock, for latency tests: QPC at engine time 0 and QPC ticks per second. */
+  clock_origin_qpc?: number;
+  qpc_freq?: number;
+  /** Engine time (100 ns) of the first frame of the last instant replay saved. */
+  last_save_start_hns?: number;
 }
 
 export interface ClipMetadata {
@@ -241,11 +246,33 @@ export interface AudioDevice {
   isDefault: boolean;
 }
 
+/** Video codecs the encoder can write. AV1 needs an RTX 40, RX 7000 or Intel Arc GPU. */
+export type VideoCodec = "h264" | "hevc" | "av1";
+/** VBR = around the bitrate; CBR = constant bitrate; CQP = constant quality. */
+export type RateControl = "vbr" | "cbr" | "cqp";
+/** "auto" follows Game Mode (speed when it is on). */
+export type EncoderPreset = "auto" | "speed" | "balanced" | "quality";
+/** "auto" = the GPU that draws the screen, then any other GPU, then software. */
+export type EncoderBackend = "auto" | "nvidia" | "amd" | "intel" | "software";
+
 export interface AppSettings {
   bufferSeconds: number;
   targetFps: number;
+  /** Target bitrate for VBR and CBR (kbps). */
   bitrateKbps: number;
-  codec: "h264" | "hevc";
+  /** Falls back to HEVC, then H.264, when the PC cannot encode it (and says so). */
+  codec: VideoCodec;
+  /** Screen recording container. MP4 is crash-safe; MKV is there for OBS habits. */
+  recordingFormat: "mp4" | "mkv";
+  /** MKV only: convert to MP4 after the recording stops (the MKV goes once the MP4 is checked). */
+  remuxMkv: boolean;
+  rateControl: RateControl;
+  /** CQP only: 1-51, lower = better quality and bigger files. */
+  cqpLevel: number;
+  /** Seconds between keyframes, 0.25-10. */
+  keyframeSeconds: number;
+  encoderPreset: EncoderPreset;
+  encoderBackend: EncoderBackend;
   monitorIndex: number;
   captureSystemAudio: boolean;
   captureMicrophone: boolean;
@@ -322,6 +349,20 @@ export interface AppSettings {
   libraryFolders: string[];
   /** Starts / stops a screen recording. */
   hotkeyRecord: string;
+  /** Pauses / resumes the running screen recording. */
+  hotkeyPause: string;
+  /** Seconds counted down before a recording starts (0 = off). */
+  recordCountdown: number;
+  /** The recording stops and saves after this many minutes, pauses not counted (0 = no limit). */
+  recordMaxMinutes: number;
+  /** The recording stops and saves at this file size in GB (0 = no limit). */
+  recordMaxGb: number;
+  /** File name template, e.g. "{app} Recording {date} {time}" (no extension). */
+  recordFileName: string;
+  /** A file with that name exists: add " 2", " 3"… or replace it (old one to the Recycle Bin). */
+  recordIfExists: "number" | "overwrite";
+  /** The recording stops (and keeps what it has) when the drive has less free space than this. */
+  diskReserveMb: number;
   /** On-screen control bar: while recording, always, or never. */
   controlBar: "recording" | "always" | "off";
   /** Studio layers on the recorded screen. */
@@ -363,15 +404,28 @@ export interface RecordingStatus {
   paused: boolean;
   /** False once it ended on its own; collect it with stopRecording. */
   active: boolean;
+  /** File size so far. */
+  bytes: number;
+  /** Something to know while recording, e.g. "Disk almost full: about 6 minutes left". */
+  notice: string | null;
+  /** Why it stopped by itself, if it did. */
+  ended: string | null;
+  /** Seconds until the time or size limit or a full disk, whichever comes first. */
+  seconds_left: number | null;
+  /** Engine time (100 ns) at file time 0, for latency tests. */
+  start_hns?: number | null;
 }
 
 /** What the control bar and Home show. */
 export interface BarState {
   recording: RecordingStatus | null;
+  /** Seconds left before a recording starts (it has not started yet). */
+  countdown: number | null;
   micMuted: boolean;
   micOn: boolean;
   replayOn: boolean;
   hotkeyRecord: string;
+  hotkeyPause: string;
   hotkeySave: string;
   hotkeySnip: string;
   /** Size of the recorded area ("1280×720"); null = whole screen. */
@@ -388,6 +442,44 @@ export interface BarState {
   barOpen?: boolean;
   /** Drawing on the screen is on. */
   drawing?: boolean;
+}
+
+/** What this PC can encode: hardware encoder names per codec, and software. */
+export interface EncoderCaps {
+  codecs: { codec: VideoCodec; hardware: string[]; software: boolean }[];
+  sessions: number;
+}
+
+/** What a video file needs to play everywhere. */
+export interface Diagnosis {
+  need: "nothing" | "repair-in-place" | "remux" | "unfixable";
+  container: string;
+  seconds: number;
+  video: string | null;
+  audio: string | null;
+  /** Written by Lastshot. */
+  ours: boolean;
+  message: string;
+}
+
+/** Result of a repair or a convert to MP4. */
+export interface FixResult {
+  path: string;
+  newFile: boolean;
+  seconds: number;
+  message: string;
+}
+
+export interface RepairProgress {
+  path: string;
+  /** 0-1 */
+  progress: number;
+}
+
+/** Something the backend wants the user to know (toast). */
+export interface Notice {
+  message: string;
+  level: "info" | "warning";
 }
 
 /** Small picture of the recorded screen (Studio preview). */

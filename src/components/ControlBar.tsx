@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { lastshot } from "../lib/bridge";
 import type { BarState, DrawCommand } from "../lib/types";
+import { timeLeftText } from "../lib/recordOptions";
+import { useCountdown } from "../lib/useCountdown";
+
+/** "Pause (Alt+Shift+R)", or just "Pause" without a key. */
+const withKey = (label: string, key?: string | null) => (key ? `${label} (${key})` : label);
 
 type DrawTool = Extract<DrawCommand, { kind: "tool" }>["tool"];
 const DRAW_TOOLS: { id: DrawTool; label: string; icon: string }[] = [
@@ -128,8 +133,11 @@ export default function ControlBar() {
       setFlash(`Marked (${n})`);
       setTimeout(() => setFlash(null), 1200);
     });
-  const seconds =
-    rec && !rec.paused ? base.current.seconds + (Date.now() - base.current.at) / 1000 : base.current.seconds;
+  const sinceUpdate = rec && !rec.paused ? (Date.now() - base.current.at) / 1000 : 0;
+  const seconds = base.current.seconds + sinceUpdate;
+  const secondsLeft = rec?.seconds_left != null ? Math.max(0, rec.seconds_left - sinceUpdate) : null;
+  const countdown = useCountdown(rec ? null : state?.countdown);
+  const cancelCountdown = () => void run(() => lastshot.cancelRecordCountdown());
 
   const drawing = !!state?.drawing;
   useEffect(() => {
@@ -163,18 +171,34 @@ export default function ControlBar() {
         <span data-tauri-drag-region className="cursor-grab px-0.5 text-white/35" title="Drag to move">
           ⋮⋮
         </span>
-        <span data-tauri-drag-region className="flex flex-1 items-center gap-1.5 font-mono text-[13px] tabular-nums">
+        <span data-tauri-drag-region className="flex min-w-0 flex-1 items-center gap-1.5 font-mono text-[13px] tabular-nums">
           {rec ? (
             <>
-              <span className={`h-2.5 w-2.5 rounded-full ${rec.paused ? "bg-amber-400" : "animate-pulse bg-red-500"}`} />
+              <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${rec.paused ? "bg-amber-400" : "animate-pulse bg-red-500"}`} />
               {clockTime(seconds)}
+              {rec.notice && (
+                <span className="font-sans font-bold text-amber-300" title={rec.notice}>
+                  !
+                </span>
+              )}
             </>
+          ) : countdown != null ? (
+            <span className="font-sans text-[12px] text-white/85" title="Recording starts in…">
+              In <span className="font-mono font-semibold">{countdown}</span>…
+            </span>
           ) : state?.finishing != null ? (
             <span className="font-sans text-[11px] text-white/70">Saving…</span>
           ) : (
             <span className="font-sans text-[11px] text-white/60">Lastshot</span>
           )}
         </span>
+        {countdown != null && !rec && (
+          <Btn title="Cancel the countdown (the recording does not start)" onClick={cancelCountdown}>
+            <svg viewBox="0 0 16 16" className={ICON} strokeWidth="1.5">
+              <path d="M4 4l8 8M12 4l-8 8" strokeLinecap="round" />
+            </svg>
+          </Btn>
+        )}
         <Btn title="Show the whole bar" onClick={() => toggleCompact(false)}>
           <svg viewBox="0 0 16 16" className={ICON} strokeWidth="1.5">
             <path d="M3 6l5 5 5-5" strokeLinecap="round" strokeLinejoin="round" />
@@ -203,6 +227,19 @@ export default function ControlBar() {
           {state.finishingLabel ?? "Saving the recording"}…
           {state.finishingLabel?.startsWith("Cutting") && ` ${Math.round(state.finishing * 100)}%`}
         </span>
+      ) : countdown != null && !rec ? (
+        <>
+          <span data-tauri-drag-region className="flex items-center gap-2 text-[13px] font-medium">
+            <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-red-500" />
+            Recording in
+            <span className="min-w-[1.2em] font-mono text-[17px] font-semibold tabular-nums" aria-live="polite">
+              {countdown}
+            </span>
+          </span>
+          <Btn title="Cancel the countdown (the recording does not start)" tone="red" onClick={cancelCountdown} disabled={busy}>
+            Cancel
+          </Btn>
+        </>
       ) : rec && drawing ? (
         <>
           <span data-tauri-drag-region className="flex items-center gap-1.5 font-mono text-[12px] tabular-nums text-white/80">
@@ -265,14 +302,26 @@ export default function ControlBar() {
             <span className={`h-2.5 w-2.5 rounded-full ${rec.paused ? "bg-amber-400" : "animate-pulse bg-red-500"}`} />
             {clockTime(seconds)}
           </span>
-          <span data-tauri-drag-region className="flex flex-col leading-tight text-[10px] text-white/50">
-            <span data-tauri-drag-region title={state?.area ? "Recording only this area" : "Recording the whole screen"}>
-              {state?.area ?? "Full screen"}
+          <span data-tauri-drag-region className="flex min-w-0 max-w-[118px] flex-col leading-tight text-[10px] text-white/50">
+            {rec.notice ? (
+              <span data-tauri-drag-region className="truncate font-medium text-amber-300" title={rec.notice} role="status">
+                ⚠ {rec.notice}
+              </span>
+            ) : (
+              <span data-tauri-drag-region className="truncate" title={state?.area ? "Recording only this area" : "Recording the whole screen"}>
+                {state?.area ?? "Full screen"}
+              </span>
+            )}
+            <span
+              data-tauri-drag-region
+              className={`truncate ${secondsLeft != null && secondsLeft < 60 ? "text-amber-300" : ""}`}
+              title={`File size so far: ${sizeText(rec.bytes ?? state?.bytes ?? 0)}${secondsLeft != null ? `. Stops by itself in about ${timeLeftText(secondsLeft).replace(/ left$/, "")}.` : ""}`}
+            >
+              {secondsLeft != null ? timeLeftText(secondsLeft) : sizeText(rec.bytes ?? state?.bytes ?? 0)}
             </span>
-            <span data-tauri-drag-region title="File size so far">{sizeText(state?.bytes ?? 0)}</span>
           </span>
           <Btn
-            title={rec.paused ? "Resume" : "Pause"}
+            title={withKey(rec.paused ? "Resume" : "Pause", state?.hotkeyPause)}
             onClick={() => void run(() => lastshot.pauseRecording(!rec.paused))}
             disabled={busy}
           >
@@ -294,7 +343,7 @@ export default function ControlBar() {
             </svg>
           </Btn>
           <Btn
-            title={`Stop and save (${state?.hotkeyRecord ?? ""})`}
+            title={withKey("Stop and save", state?.hotkeyRecord)}
             tone="red"
             onClick={() => void run(() => lastshot.stopRecording())}
             disabled={busy}
@@ -317,7 +366,7 @@ export default function ControlBar() {
       ) : (
         <>
           <Btn
-            title={`Record the screen (${state?.hotkeyRecord ?? ""})`}
+            title={withKey("Record the screen", state?.hotkeyRecord)}
             onClick={() => void run(() => lastshot.startRecording())}
             disabled={busy}
           >
@@ -332,7 +381,7 @@ export default function ControlBar() {
             Area
           </Btn>
           <Btn
-            title={`Save the last moments (${state?.hotkeySave ?? ""})`}
+            title={withKey("Save the last moments", state?.hotkeySave)}
             onClick={() => void run(() => lastshot.saveInstantReplay(undefined, "bar"))}
             disabled={busy || !state?.replayOn}
           >
@@ -358,7 +407,7 @@ export default function ControlBar() {
       )}
       {!drawing && (
         <>
-          <Btn title={`Screenshot (${state?.hotkeySnip ?? ""})`} onClick={() => void run(() => lastshot.startSnip())}>
+          <Btn title={withKey("Screenshot", state?.hotkeySnip)} onClick={() => void run(() => lastshot.startSnip())}>
             <svg viewBox="0 0 16 16" className={ICON} strokeWidth="1.5">
               <path d="M2 5V3a1 1 0 0 1 1-1h2M11 2h2a1 1 0 0 1 1 1v2M14 11v2a1 1 0 0 1-1 1h-2M5 14H3a1 1 0 0 1-1-1v-2" strokeLinecap="round" />
             </svg>

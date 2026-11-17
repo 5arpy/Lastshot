@@ -109,6 +109,7 @@ pub fn message(action: &str, accel: &str) -> String {
     let what = match action {
         "save" => "clips can't be saved with it",
         "record" => "recordings can't be started with it",
+        "pause" => "recordings can't be paused with it",
         "snip" => "screenshots can't be taken with it",
         "mic" => "the microphone can't be muted with it",
         "frames" => "pop-out frames can't be made click-through with it",

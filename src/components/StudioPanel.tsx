@@ -644,7 +644,9 @@ export default function StudioPanel({ settings, monitors, bar, onToast, onPatch 
                 <option value="off">Off</option>
               </select>
             </label>
-            <p className="text-[11px] text-ink-3">Shortcut: {settings.hotkeyRecord} starts / stops. More in Settings.</p>
+            <p className="text-[11px] text-ink-3">
+              Shortcuts: {settings.hotkeyRecord} starts / stops{settings.hotkeyPause ? `, ${settings.hotkeyPause} pauses` : ""}. More in Settings.
+            </p>
           </div>
         </div>
       </div>

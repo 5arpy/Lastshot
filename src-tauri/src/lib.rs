@@ -195,6 +195,8 @@ pub fn run() {
             }
 
             recording::sync_bar(&handle);
+            // Recordings cut off last time (crash, power cut) get finished.
+            recording::recover_unfinished(&handle);
             studio::init(&handle);
             appname::start_tracker();
             library_ops::start_watch(&handle);
@@ -209,6 +211,12 @@ pub fn run() {
                 // Each on its own, retried and checked in the background;
                 // failures show in Settings and as one notification.
                 hotkeys::register_all(&handle, &save_key, &toggle_key, &snip_key, &record_key);
+                let pause_key = handle.state::<AppState>().settings.read().hotkey_pause.clone();
+                if !pause_key.is_empty() {
+                    if let Err(e) = hotkey_guard::set(&handle, "pause", &pause_key) {
+                        log::warn!("[lastshot] pause hotkey: {e}");
+                    }
+                }
             }
             startup::mark("hotkeys");
 
@@ -382,6 +390,12 @@ pub fn run() {
             share::shrink_clip,
             share::export_clip,
             recording::start_recording,
+            recording::toggle_pause_recording,
+            recording::cancel_record_countdown,
+            recording::preview_record_file_name,
+            recording::diagnose_clip,
+            recording::repair_clip,
+            recording::encoder_caps,
             recording::stop_recording,
             recording::pause_recording,
             recording::get_bar_state,

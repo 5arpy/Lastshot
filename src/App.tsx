@@ -124,6 +124,9 @@ interface Toast {
   action?: { label: string; run: () => void };
 }
 
+/** A start that the user cancelled during the countdown (not an error to show). */
+const isCancelled = (e: unknown) => /cancel/i.test(String(e));
+
 const TONE_STYLES: Record<ToastTone, string> = {
   ok: "border-emerald-500/40 bg-surface text-ink shadow-xl",
   warn: "border-amber-500/40 bg-surface text-ink shadow-xl",
@@ -512,6 +515,18 @@ export default function App() {
     attach(
       Promise.resolve(lastshot.onError((msg) => primary && pushToast("err", "Engine error", String(msg)))),
     );
+    // A recording stopped by itself, an encoder fell back, a cut-off recording was repaired…
+    // The same message twice within 10 s shows once.
+    let lastNotice = { message: "", at: 0 };
+    attach(
+      lastshot.onNotice((n) => {
+        if (!primary || !n?.message) return;
+        const now = Date.now();
+        if (n.message === lastNotice.message && now - lastNotice.at < 10_000) return;
+        lastNotice = { message: n.message, at: now };
+        pushToast(n.level === "warning" ? "warn" : "info", n.message);
+      }),
+    );
     const applyBar = (b: BarState) => {
       setBarState(b);
       recClock.current = { seconds: b.recording?.seconds ?? 0, at: Date.now() };
@@ -624,7 +639,16 @@ export default function App() {
       setBarState(b);
       recClock.current = { seconds: b.recording?.seconds ?? 0, at: Date.now() };
     } catch (e) {
-      pushToast("err", "Could not start recording", String(e));
+      if (!isCancelled(e)) pushToast("err", "Could not start recording", String(e));
+    }
+  }, [pushToast]);
+
+  const cancelCountdown = useCallback(async () => {
+    try {
+      await lastshot.cancelRecordCountdown();
+      setBarState(await lastshot.getBarState());
+    } catch (e) {
+      pushToast("err", "Could not cancel the countdown", String(e));
     }
   }, [pushToast]);
 
@@ -650,7 +674,7 @@ export default function App() {
         setBarState(b);
         recClock.current = { seconds: b.recording?.seconds ?? 0, at: Date.now() };
       } catch (e) {
-        pushToast("err", "Could not start recording", String(e));
+        if (!isCancelled(e)) pushToast("err", "Could not start recording", String(e));
       }
     },
     [pushToast],
@@ -2001,6 +2025,7 @@ export default function App() {
               onStartRecording={() => void startRecording()}
               onStopRecording={() => void stopRecording()}
               onPauseRecording={(p) => void pauseRecording(p)}
+              onCancelCountdown={() => void cancelCountdown()}
               onRecordArea={() => void recordArea()}
               onRecordSource={(src) => void recordSource(src)}
               onMarker={() => void addMarker()}

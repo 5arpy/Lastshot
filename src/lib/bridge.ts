@@ -38,7 +38,13 @@ import type {
   RecordingStatus,
   SplitResult,
   TrimResult,
+  EncoderCaps,
+  Diagnosis,
+  FixResult,
+  RepairProgress,
+  Notice,
 } from "./types";
+import { DEFAULT_RECORD_NAME, recordNameError, renderRecordName } from "./recordOptions";
 
 type TauriGlobal = {
   core: {
@@ -164,6 +170,8 @@ export const CHANNELS = {
   openFile: "lastshot://open-file",
   libraryChanged: "lastshot://library-changed",
   dragDrop: "tauri://drag-drop",
+  notice: "lastshot://notice",
+  repairProgress: "lastshot://repair-progress",
 } as const;
 
 export const RELEASES_URL = "https://github.com/5arpy/Lastshot/releases";
@@ -191,6 +199,13 @@ export const DEFAULT_SETTINGS: AppSettings = {
   targetFps: 60,
   bitrateKbps: 12_000,
   codec: "h264",
+  recordingFormat: "mp4",
+  remuxMkv: true,
+  rateControl: "vbr",
+  cqpLevel: 23,
+  keyframeSeconds: 1,
+  encoderPreset: "auto",
+  encoderBackend: "auto",
   monitorIndex: 0,
   captureSystemAudio: true,
   captureMicrophone: false,
@@ -250,6 +265,13 @@ export const DEFAULT_SETTINGS: AppSettings = {
   snipScope: "all",
   libraryFolders: [],
   hotkeyRecord: "Alt+R",
+  hotkeyPause: "Alt+Shift+R",
+  recordCountdown: 0,
+  recordMaxMinutes: 0,
+  recordMaxGb: 0,
+  recordFileName: DEFAULT_RECORD_NAME,
+  recordIfExists: "number",
+  diskReserveMb: 1024,
   controlBar: "recording",
   studioLayers: "recording",
   captureSource: { kind: "display" },
@@ -267,30 +289,65 @@ export const DEFAULT_SETTINGS: AppSettings = {
 };
 
 // Browser preview stand-in for screen recording.
-const simRec = { startedAt: 0, pausedAt: 0, pausedMs: 0, on: false, muted: false };
+const simRec = { startedAt: 0, pausedAt: 0, pausedMs: 0, on: false, muted: false, countdownUntil: 0, cancelled: false };
+/** Browser preview: about 12 Mbit/s, like the default bitrate. */
+const SIM_BYTES_PER_S = 1_500_000;
 function simBarState(): BarState {
   const now = Date.now();
   const ms = simRec.on
     ? (simRec.pausedAt || now) - simRec.startedAt - simRec.pausedMs
     : 0;
+  const bytes = Math.round((ms / 1000) * SIM_BYTES_PER_S);
+  const s = browserSettings;
+  const left = [
+    s.recordMaxMinutes > 0 ? s.recordMaxMinutes * 60 - ms / 1000 : Infinity,
+    s.recordMaxGb > 0 ? (s.recordMaxGb * 1e9 - bytes) / SIM_BYTES_PER_S : Infinity,
+  ];
+  const secondsLeft = Math.min(...left);
+  const name = renderRecordName(s.recordFileName || DEFAULT_RECORD_NAME, {
+    app: "Desktop",
+    at: new Date(simRec.startedAt || now),
+    width: 1920,
+    height: 1080,
+    fps: s.targetFps,
+    codec: s.codec,
+    ext: s.recordingFormat,
+  });
   return {
     recording: simRec.on
       ? {
-          path: "C:\\Users\\You\\Videos\\Lastshot\\Lastshot_Recording.mp4",
-          file_name: "Lastshot_Recording.mp4",
+          path: `C:\\Users\\You\\Videos\\Lastshot\\${name}`,
+          file_name: name,
           seconds: ms / 1000,
           paused: simRec.pausedAt > 0,
           active: true,
+          bytes,
+          notice: null,
+          ended: null,
+          seconds_left: Number.isFinite(secondsLeft) ? Math.max(0, secondsLeft) : null,
         }
       : null,
+    countdown: simRec.countdownUntil ? Math.max(0, (simRec.countdownUntil - now) / 1000) : null,
     micMuted: simRec.muted,
-    micOn: browserSettings.captureMicrophone,
+    micOn: s.captureMicrophone,
     replayOn: simEngine.isRunning(),
-    hotkeyRecord: browserSettings.hotkeyRecord,
-    hotkeySave: browserSettings.hotkeySave,
-    hotkeySnip: browserSettings.hotkeySnip,
+    hotkeyRecord: s.hotkeyRecord,
+    hotkeyPause: s.hotkeyPause,
+    hotkeySave: s.hotkeySave,
+    hotkeySnip: s.hotkeySnip,
+    bytes,
   };
 }
+
+/** Browser preview of what this PC can encode. */
+const SIM_CAPS: EncoderCaps = {
+  codecs: [
+    { codec: "h264", hardware: ["NVIDIA NVENC"], software: true },
+    { codec: "hevc", hardware: ["NVIDIA NVENC"], software: false },
+    { codec: "av1", hardware: [], software: false },
+  ],
+  sessions: 3,
+};
 
 let browserSettings: AppSettings = { ...DEFAULT_SETTINGS };
 
@@ -732,6 +789,21 @@ export const lastshot = {
   },
   async startRecording(): Promise<RecordingStatus> {
     if (isTauri()) return invoke<RecordingStatus>("start_recording");
+    const countdown = browserSettings.recordCountdown;
+    if (countdown > 0 && !simRec.on && !simRec.countdownUntil) {
+      simRec.cancelled = false;
+      simRec.countdownUntil = Date.now() + countdown * 1000;
+      emitLocal(CHANNELS.recording, simBarState());
+      while (!simRec.cancelled && Date.now() < simRec.countdownUntil) {
+        await new Promise((r) => setTimeout(r, 250));
+        if (!simRec.cancelled) emitLocal(CHANNELS.recording, simBarState());
+      }
+      simRec.countdownUntil = 0;
+      if (simRec.cancelled) {
+        emitLocal(CHANNELS.recording, simBarState());
+        throw new Error("Countdown cancelled");
+      }
+    }
     if (!simEngine.isRunning()) await simEngine.start(browserSettings.bufferSeconds, browserSettings.targetFps);
     Object.assign(simRec, { on: true, startedAt: Date.now(), pausedAt: 0, pausedMs: 0 });
     emitLocal(CHANNELS.recording, simBarState());
@@ -753,6 +825,41 @@ export const lastshot = {
       simRec.pausedAt = 0;
     }
     emitLocal(CHANNELS.recording, simBarState());
+  },
+  /** Pauses or resumes the running recording (what the pause hotkey does). */
+  async togglePauseRecording(): Promise<void> {
+    if (isTauri()) return invoke("toggle_pause_recording");
+    await this.pauseRecording(!simRec.pausedAt);
+  },
+  /** Stops the countdown before a recording; the recording does not start. */
+  async cancelRecordCountdown(): Promise<void> {
+    if (isTauri()) return invoke("cancel_record_countdown");
+    simRec.cancelled = true;
+    simRec.countdownUntil = 0;
+    emitLocal(CHANNELS.recording, simBarState());
+  },
+  /**
+   * The file name a template gives right now (with its extension). Rejects
+   * with a plain-words reason when it cannot be a file name.
+   */
+  async previewRecordFileName(template: string): Promise<string> {
+    if (isTauri()) return invoke<string>("preview_record_file_name", { template });
+    const err = recordNameError(template);
+    if (err) throw new Error(err);
+    return renderRecordName(template, {
+      app: "Roblox",
+      at: new Date(),
+      width: 1920,
+      height: 1080,
+      fps: browserSettings.targetFps,
+      codec: browserSettings.codec,
+      ext: browserSettings.recordingFormat,
+    });
+  },
+  /** What this PC can encode (hardware encoders per codec, and software). */
+  async encoderCaps(): Promise<EncoderCaps> {
+    if (isTauri()) return invoke<EncoderCaps>("encoder_caps");
+    return SIM_CAPS;
   },
   /** Stops the running recording and deletes it. */
   async discardRecording(): Promise<void> {
@@ -884,6 +991,40 @@ export const lastshot = {
   async getDiskInfo(paths: string[]): Promise<DiskInfo[]> {
     if (isTauri()) return invoke<DiskInfo[]>("get_disk_info", { paths });
     return [{ root: "C:\\", totalBytes: 512e9, freeBytes: 143e9 }];
+  },
+  /** What a video file needs: nothing, a repair in place, a convert to MP4, or it can't be saved. */
+  async diagnoseClip(path: string): Promise<Diagnosis> {
+    if (isTauri()) return invoke<Diagnosis>("diagnose_clip", { path });
+    const mkv = /\.mkv$/i.test(path);
+    return {
+      need: mkv ? "remux" : "nothing",
+      container: mkv ? "MKV" : "MP4",
+      seconds: 30,
+      video: "H.264",
+      audio: "AAC",
+      ours: true,
+      message: mkv ? "MKV: converts to MP4 without re-encoding." : "Plays everywhere.",
+    };
+  },
+  /**
+   * Repairs a cut-off recording or converts it to MP4. Progress arrives on
+   * onRepairProgress; the library-changed event follows.
+   */
+  async repairClip(path: string): Promise<FixResult> {
+    if (isTauri()) return invoke<FixResult>("repair_clip", { path });
+    for (let i = 1; i <= 10; i++) {
+      await new Promise((r) => setTimeout(r, 120));
+      emitLocal<RepairProgress>(CHANNELS.repairProgress, { path, progress: i / 10 });
+    }
+    const out = path.replace(/\.[^.\\/]+$/, ".mp4");
+    return { path: out, newFile: out !== path, seconds: 30, message: `Saved as ${out.split(/[\\/]/).pop()}.` };
+  },
+  onRepairProgress(handler: Handler<RepairProgress>) {
+    return listen<RepairProgress>(CHANNELS.repairProgress, handler);
+  },
+  /** Something to tell the user (a recording stopped by itself, an encoder fell back…). */
+  onNotice(handler: Handler<Notice>) {
+    return listen<Notice>(CHANNELS.notice, handler);
   },
   /** Moves a clip from an extra folder into the save folder; returns the new path. */
   async moveClipToLibrary(path: string): Promise<string> {
@@ -1249,5 +1390,5 @@ export type LastshotApi = typeof lastshot;
 
 export interface HotkeyStatus {
   skipped: boolean;
-  keys: { action: "save" | "toggle" | "snip" | "record"; accel: string; ok: boolean; error: string | null }[];
+  keys: { action: "save" | "toggle" | "snip" | "record" | "pause"; accel: string; ok: boolean; error: string | null }[];
 }

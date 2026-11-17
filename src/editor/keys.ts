@@ -1,7 +1,7 @@
 /**
- * Keyboard shortcuts of the editor and snip tabs, as plain data lists
+ * Keyboard shortcuts of the editor and snip tabs (and Draw on screen), as plain data lists
  * ({ id, keys, label, group, run, when, context }). `keyTables.ts` turns them
- * into the app-wide registry's scopes "editor" and "snip" (rebinding, the
+ * into the app-wide registry's scopes "editor", "snip" and "draw" (rebinding, the
  * cheat sheet, the palette, Settings → Shortcuts and the clash test).
  *
  * Shortcut policy: app-wide keys are a small reserved set (`src/lib/appKeys.ts`:
@@ -357,6 +357,73 @@ export function snipKeymap(a: SnipActions): Shortcut[] {
       when: one,
     })),
     ...SNIP_TOOL_KEYS.map((t) => ({ keys: t.keys, label: t.label, group: "Tools", run: () => a.tool(t.tool) })),
+  ]);
+}
+
+// ------------------------------------------------------------------ draw on screen
+
+/** Tools of Draw on screen (the snip's keys; no blur / pixelate / black box: there is no picture under them). */
+export const DRAW_TOOL_KEYS = [...SNIP_TOOL_KEYS.filter((t) => !["blur", "pixelate", "redact"].includes(t.tool)), { keys: "X", tool: "eraser", label: "Eraser" }];
+
+export interface DrawActions {
+  undo: () => void;
+  redo: () => void;
+  selectAll: () => void;
+  duplicate: () => void;
+  del: () => void;
+  nudge: (dx: number, dy: number) => void;
+  tool: (t: string) => void;
+  /** Removes every drawing (one undo step). */
+  clear: () => void;
+  /** Hides / shows the drawing. */
+  ink: () => void;
+  /** Click-through: the drawing stays, the mouse works the apps under it. */
+  mouse: () => void;
+  board: (b: "white" | "black") => void;
+  /** Pen width a step thinner (-1) or thicker (1). */
+  width: (dir: number) => void;
+  /** The n-th palette colour (0-based). */
+  colour: (n: number) => void;
+  snip: () => void;
+  picked: () => boolean;
+}
+
+/** Keys of Draw on screen (scope "draw"; from the snip bar, D). */
+export function drawKeymap(a: DrawActions): Shortcut[] {
+  const one = a.picked;
+  const colours = ["red", "yellow", "green", "blue", "purple", "white", "black"];
+  return withIds("draw", [
+    { keys: "Ctrl+Z", label: "Undo", group: "Edit", run: a.undo },
+    { keys: "Ctrl+Y", label: "Redo", group: "Edit", run: a.redo },
+    { keys: "Ctrl+Shift+Z", label: "Redo", group: "Edit", run: a.redo },
+    { keys: "C", label: "Clear the drawing", group: "Edit", run: a.clear },
+    { keys: "Ctrl+A", label: "Select all", group: "Edit", run: a.selectAll },
+    { keys: "Ctrl+D", label: "Duplicate", group: "Edit", run: a.duplicate, when: one },
+    { keys: "Delete", label: "Delete", group: "Edit", run: a.del, when: one },
+    { keys: "Backspace", label: "Delete", group: "Edit", run: a.del, when: one },
+    { keys: "I", label: "Hide / show the drawing", group: "View", run: a.ink },
+    { keys: "M", label: "Use the mouse (click-through)", group: "View", run: a.mouse },
+    { keys: "W", label: "Whiteboard", group: "View", run: () => a.board("white") },
+    { keys: "K", label: "Blackboard", group: "View", run: () => a.board("black") },
+    { keys: "Ctrl+S", label: "Snip the screen with the drawing", group: "File", run: a.snip },
+    { keys: "[", label: "Thinner", group: "Style", run: () => a.width(-1) },
+    { keys: "]", label: "Thicker", group: "Style", run: () => a.width(1) },
+    ...colours.map((c, i) => ({ keys: String(i + 1), label: `Colour ${i + 1} (${c})`, group: "Style", run: () => a.colour(i) })),
+    ...(
+      [
+        ["ArrowLeft", -1, 0],
+        ["ArrowRight", 1, 0],
+        ["ArrowUp", 0, -1],
+        ["ArrowDown", 0, 1],
+      ] as const
+    ).flatMap(([k, dx, dy]) => {
+      const dir = dx < 0 ? "left" : dx > 0 ? "right" : dy < 0 ? "up" : "down";
+      return [
+        { keys: k, label: `Nudge ${dir} 1 px`, group: "Arrange", run: () => a.nudge(dx, dy), when: one },
+        { keys: `Shift+${k}`, label: `Nudge ${dir} 10 px`, group: "Arrange", run: () => a.nudge(dx * 10, dy * 10), when: one },
+      ];
+    }),
+    ...DRAW_TOOL_KEYS.map((t) => ({ keys: t.keys, label: t.label, group: "Tools", run: () => a.tool(t.tool) })),
   ]);
 }
 

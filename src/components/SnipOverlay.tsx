@@ -25,6 +25,8 @@ import { setShortcutOverrides } from "../lib/shortcuts";
  *
  * 1. Pick: drag a box (it may cross screens), click a window, click the
  *    desktop or press F for the screen under the mouse, Shift+F for all.
+ *    Or Draw (D): draw on the live screens instead (presentation mode,
+ *    `present/PresentWindow.tsx`).
  * 2. Screenshot: mark up with the shared annotation objects (text, boxes,
  *    arrows, pen, highlighter, steps, blur, pixelate, black box). Every
  *    object can be selected, moved, sized, turned and restyled; Ctrl+Z /
@@ -257,6 +259,11 @@ export default function SnipOverlay() {
     if (isTauri()) void lastshot.snipCancel();
     else window.close();
   }, []);
+  /** Draw on the live screens instead (this overlay closes). */
+  const drawOnScreen = useCallback(() => {
+    if (isTauri()) void lastshot.snipDraw().catch((e) => setError(String(e)));
+    else location.search = "?present";
+  }, []);
 
   // ------------------------------------------------------------ editing canvas
   useLayoutEffect(() => {
@@ -408,6 +415,10 @@ export default function SnipOverlay() {
           else selectScreen();
         }
         if (e.key === "Enter" && hover) select(hover);
+        if ((e.key === "d" || e.key === "D") && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+          done();
+          drawOnScreen();
+        }
         return;
       }
       if (mode === "rec") {
@@ -464,7 +475,7 @@ export default function SnipOverlay() {
       window.removeEventListener("keydown", onKey, true);
       window.removeEventListener("keyup", onUp, true);
     };
-  }, [sel, hover, mode, cancel, finish, popOut, startRecording, select, selectAll, selectScreen, editing, picked, tool, undo, redo, commitShapes, editPicked, duplicatePicked, scale]);
+  }, [sel, hover, mode, cancel, drawOnScreen, finish, popOut, startRecording, select, selectAll, selectScreen, editing, picked, tool, undo, redo, commitShapes, editPicked, duplicatePicked, scale]);
 
   // ------------------------------------------------------------ picking pointer
   const onPickDown = (e: React.PointerEvent) => {
@@ -536,7 +547,11 @@ export default function SnipOverlay() {
     const B = work;
     const barH = 44;
     const below = r.top + r.height + 10;
-    const top = below + barH < B.y + B.h ? below : r.top - barH - 10 > B.y ? r.top - barH - 10 : Math.min(r.top + r.height, B.y + B.h) - barH - 10;
+    // Below the box, else above it; never under the picking bar at the top
+    // (16 + 48 px) or the viewer's bar at the bottom (~56 px). A box that
+    // fills the screen gets the tools inside it, under the picking bar.
+    const top =
+      below + barH < B.y + B.h - 56 ? below : r.top - barH - 10 > B.y + 72 ? r.top - barH - 10 : Math.max(r.top + 10, B.y + 72);
     const left = Math.max(B.x + 8, Math.min(r.left, B.x + B.w - 960));
     return { top, left, maxWidth: B.w - 16 };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -606,7 +621,7 @@ export default function SnipOverlay() {
 
       {!drag && (
         <div
-          className="absolute z-20 flex -translate-x-1/2 items-center gap-1 rounded-xl border border-white/10 bg-[#1c1e25]/95 p-1.5 text-[12px] text-white shadow-2xl"
+          className="absolute z-20 flex w-max -translate-x-1/2 flex-wrap items-center justify-center gap-1 rounded-xl border border-white/10 bg-[#1c1e25]/95 p-1.5 text-[12px] text-white shadow-2xl"
           style={{ left: work.x + work.w / 2, top: work.y + 16, maxWidth: work.w - 16 }}
           data-testid="snip-bar"
           onPointerDown={(e) => e.stopPropagation()}
@@ -643,8 +658,24 @@ export default function SnipOverlay() {
               </button>
             ))}
           </div>
+          {!sel && (
+            <button
+              type="button"
+              title="Draw on the live screen: pen, arrows, boxes, text, spotlight (D)"
+              disabled={!!busy}
+              onClick={drawOnScreen}
+              className="flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 py-1.5 font-medium text-white/85 hover:bg-white/10"
+              data-testid="snip-draw"
+            >
+              <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 fill-none stroke-current" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 13c2-1 3-5 5-6s3 2 5 0" />
+              </svg>
+              Draw <span className="text-white/45">D</span>
+            </button>
+          )}
           <div className="mx-1 h-6 w-px bg-white/15" />
-          <span className="whitespace-nowrap px-1 text-white/75">
+          {/* On a small screen the hint goes; the buttons (and ✕) always fit. */}
+          <span className={cn("whitespace-nowrap px-1 text-white/75", work.w < 820 && "hidden")}>
             {sel
               ? mode === "rec"
                 ? "Click outside to pick again"

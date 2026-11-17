@@ -17,11 +17,14 @@ const ControlBar = lazy(() => import("./components/ControlBar"));
 const DrawLayer = lazy(() => import("./components/DrawLayer"));
 const SceneWindow = lazy(() => import("./components/StudioLayers"));
 const FrameWindow = lazy(() => import("./popout/FrameWindow"));
+const PresentWindow = lazy(() => import("./present/PresentWindow"));
 const params = new URLSearchParams(location.search);
 const isSnip = currentWindowLabel() === "snip" || params.has("snip");
 const isBar = currentWindowLabel() === "bar" || params.has("bar");
 const isDraw = currentWindowLabel() === "annot" || params.has("draw");
 const isScene = currentWindowLabel() === "scene" || params.has("scene");
+// Draw on screen ("present"), `?present` in a browser.
+const isPresent = currentWindowLabel() === "present" || params.has("present");
 // A pop-out frame (`frame-<id>`), or `?frame=<id>` in a browser.
 const frameId = frameIdOf(currentWindowLabel(), location.search);
 
@@ -29,7 +32,7 @@ initTheme();
 // Every window: no browser keys or menus (reload, print, zoom, devtools…).
 installBrowserKeyGuard();
 // Windows with keys (the app's, frames): the user's rebound shortcuts, kept current.
-if (lastshot.isTauri() && !isSnip && !isBar && !isDraw && !isScene) {
+if (lastshot.isTauri() && !isSnip && !isBar && !isDraw && !isScene && !isPresent) {
   void lastshot.getSettings().then((s) => setShortcutOverrides(s.shortcuts)).catch(() => undefined);
   void lastshot.onSettings((s) => setShortcutOverrides(s.shortcuts));
 }
@@ -40,6 +43,10 @@ createRoot(document.getElementById("root")!).render(
       {frameId ? (
         <Suspense fallback={null}>
           <FrameWindow id={frameId} />
+        </Suspense>
+      ) : isPresent ? (
+        <Suspense fallback={null}>
+          <PresentWindow />
         </Suspense>
       ) : isScene ? (
         <Suspense fallback={null}>

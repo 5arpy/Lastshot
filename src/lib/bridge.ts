@@ -26,6 +26,7 @@ import type {
   ShrinkResult,
   ExportSegment,
   CropRect,
+  PresentInfo,
   SnipCapture,
   SnipDone,
   BarState,
@@ -940,6 +941,25 @@ export const lastshot = {
   },
   async snipCancel(): Promise<void> {
     if (isTauri()) await invoke("snip_cancel");
+  },
+  /** Draw on screen: closes the snip and opens the drawing window over the same screens. */
+  async snipDraw(): Promise<void> {
+    await invoke("snip_draw");
+  },
+  async presentInfo(): Promise<PresentInfo> {
+    return invoke<PresentInfo>("present_info");
+  },
+  /** Mouse mode (click-through); `bar` = the toolbar in window physical px, which still takes clicks. */
+  async presentThrough(on: boolean, bar: [number, number, number, number] | null): Promise<void> {
+    if (isTauri()) await invoke("present_through", { on, bar });
+  },
+  async presentClose(): Promise<void> {
+    if (isTauri()) await invoke("present_close");
+    else window.close();
+  },
+  /** Snips the screen with the drawing on it; resolves once the screen is frozen. */
+  async presentSnip(): Promise<void> {
+    if (isTauri()) await invoke("present_snip");
   },
   async openScreenshotsFolder(): Promise<void> {
     if (isTauri()) await invoke("open_screenshots_folder");

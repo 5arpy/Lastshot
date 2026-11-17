@@ -1,6 +1,6 @@
 /**
- * The editor's and the snip's keys in the app-wide registry (scopes "editor"
- * and "snip"), so Settings → Shortcuts, the cheat sheet (F1), the command
+ * The editor's, the snip's and Draw on screen's keys in the app-wide registry
+ * (scopes "editor", "snip" and "draw"), so Settings → Shortcuts, the cheat sheet (F1), the command
  * list (Ctrl+Shift+P) and the clash test see them and rebinding applies.
  *
  * `keys.ts` writes one key per entry, with aliases as extra entries of the
@@ -8,7 +8,7 @@
  * ("S | C | Ctrl+K | Ctrl+B"), with an id that stays the same between runs.
  */
 import { comboFromEvent, declareShortcuts, effectiveKeys, isTextField, normalizeCombo, splitKeys, type Shortcut as Reg } from "../lib/shortcuts";
-import { editorKeymap, snipKeymap, type EditorActions, type Shortcut, type SnipActions } from "./keys";
+import { drawKeymap, editorKeymap, snipKeymap, type DrawActions, type EditorActions, type Shortcut, type SnipActions } from "./keys";
 
 /** What Shift turns a symbol key into (US layout), the way key presses arrive. */
 const SHIFTED: Record<string, string> = { ",": "<", ".": ">", "[": "{", "]": "}", "=": "+", "-": "_", ";": ":", "'": '"', "/": "?", "`": "~" };
@@ -52,7 +52,10 @@ export const EDITOR_KEYS = toRegistry(editorKeymap(stub<EditorActions>()));
 /** The snip's keys as built in. */
 export const SNIP_KEYS = toRegistry(snipKeymap(stub<SnipActions>()));
 declareShortcuts("editor", EDITOR_KEYS);
+/** Draw on screen's keys as built in. */
+export const DRAW_KEYS = toRegistry(drawKeymap(stub<DrawActions>()));
 declareShortcuts("snip", SNIP_KEYS);
+declareShortcuts("draw", DRAW_KEYS);
 
 /** The first entry that takes this key press now, with the user's keys (never while typing). */
 export function matchKey(scope: string, list: Reg[], e: KeyboardEvent): Reg | null {

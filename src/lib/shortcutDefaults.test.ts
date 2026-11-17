@@ -9,14 +9,14 @@ import { APP_KEYS, APP_SCOPE } from "./appKeys";
 import "../components/clipsKeys";
 import "../viewer/keys";
 import "../popout/frameKeys";
-import { EDITOR_KEYS, SNIP_KEYS } from "../editor/keyTables";
+import { DRAW_KEYS, EDITOR_KEYS, SNIP_KEYS } from "../editor/keyTables";
 
 const defaults = () => allShortcuts().map((s) => ({ scope: s.scope, id: s.id, label: s.label, keys: s.defaultKeys, context: s.context, mouse: s.mouse }));
 
 describe("default shortcuts", () => {
   it("covers every scope's table", () => {
     const scopes = new Set(allShortcuts().map((s) => s.scope));
-    for (const s of [APP_SCOPE, "clips", "viewer", "frame", "editor", "snip"]) expect(scopes.has(s), s).toBe(true);
+    for (const s of [APP_SCOPE, "clips", "viewer", "frame", "editor", "snip", "draw"]) expect(scopes.has(s), s).toBe(true);
     expect(EDITOR_KEYS.length).toBeGreaterThan(80);
     expect(SNIP_KEYS.length).toBeGreaterThan(20);
   });
@@ -45,7 +45,9 @@ describe("default shortcuts", () => {
     expect(ed("Back one frame")?.context).toBeUndefined();
     expect(ed("Detach audio")?.keys).toBe("Ctrl+Shift+D");
     expect(SNIP_KEYS.find((s) => s.label === "Open in the editor")?.keys).toBe("Ctrl+E");
-    for (const list of [EDITOR_KEYS, SNIP_KEYS]) expect(new Set(list.map((s) => s.id)).size).toBe(list.length);
+    for (const list of [EDITOR_KEYS, SNIP_KEYS, DRAW_KEYS]) expect(new Set(list.map((s) => s.id)).size).toBe(list.length);
+    expect(DRAW_KEYS.find((s) => s.label === "Redo")?.keys).toBe("Ctrl+Y | Ctrl+Shift+Z");
+    expect(DRAW_KEYS.some((s) => s.label === "Blur")).toBe(false);
     // The same key in two contexts of one tab is fine; in one context it is a clash.
     const c = findClashes([
       { scope: "editor", id: "a", label: "A", keys: "Left" },

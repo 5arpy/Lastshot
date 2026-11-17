@@ -159,6 +159,14 @@ export interface SnipCapture {
 
 export type SnipWindowRectNoTitle = Omit<SnipWindowRect, "title">;
 
+/** Draw on screen's window: its size and monitors (physical px, relative to it). */
+export interface PresentInfo {
+  width: number;
+  height: number;
+  monitors: SnipWindowRectNoTitle[];
+  home: number;
+}
+
 export interface SnipDone {
   path: string | null;
   copied: boolean;

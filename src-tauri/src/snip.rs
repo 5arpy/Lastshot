@@ -178,9 +178,19 @@ fn open_overlay(app: &AppHandle, rect: (i32, i32, u32, u32)) -> tauri::Result<()
         .background_color(tauri::window::Color(0, 0, 0, 255))
         .build()?;
     crate::recording::hide_from_alt_tab(&win);
-    // Over monitors with different scaling, Windows may resize the window
-    // when it lands on another monitor's scale (WM_DPICHANGED): set the
-    // place again until it holds.
+    // Test copies keep it far off screen (it shows a made-up desktop).
+    let place = if crate::startup::test_offscreen() { (-30000, 100, w, h) } else { (x, y, w, h) };
+    place_window(&win, place)?;
+    // The page shows the window once the frozen image has painted.
+    Ok(())
+}
+
+/// Puts a window over a desktop area (physical pixels). Over monitors with
+/// different scaling, Windows may resize the window when it lands on
+/// another monitor's scale (WM_DPICHANGED): the place is set again until it
+/// holds.
+pub(crate) fn place_window(win: &tauri::WebviewWindow, rect: (i32, i32, u32, u32)) -> tauri::Result<()> {
+    let (x, y, w, h) = rect;
     for _ in 0..4 {
         win.set_position(tauri::PhysicalPosition::new(x, y))?;
         win.set_size(tauri::PhysicalSize::new(w, h))?;
@@ -189,10 +199,14 @@ fn open_overlay(app: &AppHandle, rect: (i32, i32, u32, u32)) -> tauri::Result<()
         if (pos.x, pos.y, size.width, size.height) == (x, y, w, h) {
             break;
         }
-        log::info!("[snip] overlay landed at {pos:?} {size:?}, setting it again");
+        log::info!("[snip] window landed at {pos:?} {size:?}, setting it again");
     }
-    // The page shows the window once the frozen image has painted.
     Ok(())
+}
+
+/// A snip has frozen the screen (its overlay is opening or open).
+pub fn frozen() -> bool {
+    PENDING.lock().is_some()
 }
 
 /// The scope's monitor for "monitor:<index>" (Settings › Instant replay's
@@ -264,6 +278,20 @@ pub fn snip_get_capture() -> Result<SnipCapture, String> {
         .as_ref()
         .map(|p| p.capture.clone())
         .ok_or_else(|| "nothing to snip".into())
+}
+
+/// Draw on screen (the snip bar's Draw, D): closes the snip and opens the
+/// drawing window over the same screens, on the live desktop. Async: a
+/// window made inside a synchronous command deadlocks WebView2's event loop.
+#[tauri::command]
+pub async fn snip_draw(app: AppHandle) -> Result<(), String> {
+    let (rect, monitors, home) = {
+        let p = PENDING.lock();
+        let p = p.as_ref().ok_or("nothing to draw on")?;
+        (p.rect, p.capture.monitors.clone(), p.capture.home)
+    };
+    close_overlay(&app);
+    crate::present::open(&app, rect, monitors, home)
 }
 
 /// Starts a snip from Lastshot's own window (the window hides itself first).

@@ -1,7 +1,8 @@
 /**
  * Settings → Shortcuts: every key in one place.
  *
- * - Chips pick a tab (App-wide, Clips, Viewer, Frames, Editor, Snip) or the
+ * - Chips pick a tab (App-wide, Clips, Viewer, Frames, Editor, Snip, Draw on
+ *   screen) or the
  *   Windows-wide hotkeys; "All" lists everything, grouped by tab.
  * - Search by name, or press "Press a key" and then a key: the list shows
  *   what that key does in every tab ("what does Ctrl+D do?").
@@ -36,7 +37,7 @@ import { cn } from "../utils/cn";
 import { Keys } from "./ShortcutsOverlay";
 
 const MODIFIER_KEYS = new Set(["Control", "Alt", "Shift", "Meta", "CapsLock", "NumLock", "ScrollLock", "AltGraph"]);
-const ORDER = [APP_SCOPE, "clips", "viewer", "frame", "editor", "snip"];
+const ORDER = [APP_SCOPE, "clips", "viewer", "frame", "editor", "snip", "draw"];
 const CHIP_NAMES: Record<string, string> = {
   all: "All",
   [APP_SCOPE]: "App-wide",
@@ -45,6 +46,7 @@ const CHIP_NAMES: Record<string, string> = {
   frame: "Frames",
   editor: "Editor",
   snip: "Snip",
+  draw: "Draw on screen",
   os: "Windows-wide",
 };
 const chipName = (s: string) => CHIP_NAMES[s] ?? s.charAt(0).toUpperCase() + s.slice(1);

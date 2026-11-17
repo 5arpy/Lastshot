@@ -38,6 +38,7 @@ pub mod shell;
 pub mod share;
 pub mod snip;
 pub mod snip_geo;
+pub mod present;
 pub mod startup;
 pub mod studio;
 
@@ -317,6 +318,7 @@ pub fn run() {
             frames::on_event(window, event);
             if let WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == snip::SNIP_LABEL
+                    || window.label() == present::PRESENT_LABEL
                     || window.label() == recording::BAR_LABEL
                     || window.label() == recording::ANNOT_LABEL
                     || window.label() == studio::SCENE_LABEL {
@@ -483,6 +485,11 @@ pub fn run() {
             frames::frame_get_hotkey,
             frames::frame_set_hotkey,
             frames::frame_default_look,
+            snip::snip_draw,
+            present::present_info,
+            present::present_through,
+            present::present_close,
+            present::present_snip,
             frames::frame_set_default_look,
             frames::frame_from_clipboard,
             frames::frame_show_panel,

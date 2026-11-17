@@ -803,7 +803,9 @@ pub fn update_settings(
         }
         // ...nor the mic-mute or frames click-through shortcut.
         for changed in [&patch.hotkey_save, &patch.hotkey_toggle, &patch.hotkey_snip, &patch.hotkey_record, &patch.hotkey_pause, &patch.hotkey_mark, &patch.hotkey_rec_mic].into_iter().flatten().filter(|k| !k.is_empty()) {
-            let other = crate::hotkeys::used_by(&app, changed, "main").filter(|n| *n == "Mic mute" || *n == "Pop-out frames click-through");
+            // (The seven above are checked against each other already.)
+            let other = crate::hotkeys::used_by(&app, changed, "main")
+                .filter(|n| !["Save replay", "Instant replay on/off", "Screenshot", "Screen recording", "Pause recording", "Mark a moment", "Mic in the recording"].contains(n));
             if let Some(name) = other {
                 return Err(format!("'{changed}' is already the shortcut for {name}"));
             }

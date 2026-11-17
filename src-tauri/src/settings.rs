@@ -34,6 +34,55 @@ pub struct ProfileMapEntry {
     pub exe_name: String,
 }
 
+/// The extra screenshot hotkeys ("" = none).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SnipKeys {
+    /// Draw on screen, without the snip first.
+    pub draw: String,
+    /// Text extractor: drag a box, its text is copied.
+    pub text: String,
+    /// Colour picker: click a pixel, its colour is copied.
+    pub colour: String,
+    /// The last snipped area again, copied and saved at once.
+    pub last: String,
+    /// The window in front, copied and saved at once.
+    pub window: String,
+}
+
+impl SnipKeys {
+    pub fn get(&self, action: &str) -> Option<&String> {
+        match action {
+            "draw" => Some(&self.draw),
+            "text" => Some(&self.text),
+            "colour" => Some(&self.colour),
+            "last" => Some(&self.last),
+            "window" => Some(&self.window),
+            _ => None,
+        }
+    }
+    pub fn get_mut(&mut self, action: &str) -> Option<&mut String> {
+        match action {
+            "draw" => Some(&mut self.draw),
+            "text" => Some(&mut self.text),
+            "colour" => Some(&mut self.colour),
+            "last" => Some(&mut self.last),
+            "window" => Some(&mut self.window),
+            _ => None,
+        }
+    }
+    /// (action, what it does, keys) for every action.
+    pub fn all(&self) -> [(&'static str, &'static str, String); 5] {
+        [
+            ("draw", "Draw on screen", self.draw.clone()),
+            ("text", "Copy text from the screen", self.text.clone()),
+            ("colour", "Pick a colour from the screen", self.colour.clone()),
+            ("last", "Snip the last area again", self.last.clone()),
+            ("window", "Snip the window in front", self.window.clone()),
+        ]
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 // A missing field takes its default: an older or hand-edited file keeps
 // everything else instead of being thrown away whole.
@@ -176,6 +225,11 @@ pub struct Settings {
     /// Put screenshots on the clipboard (otherwise they are only saved).
     #[serde(default = "default_true")]
     pub screenshot_copy: bool,
+    /// More screenshot hotkeys (Draw on screen, text, colour, last area,
+    /// active window). None by default: each would take its keys from every
+    /// app, so the user picks them (Settings › Screenshots).
+    #[serde(default)]
+    pub snip_keys: SnipKeys,
     /// Where screen recordings are saved; empty = the save location.
     #[serde(default)]
     pub recording_dir: String,
@@ -396,6 +450,7 @@ impl Default for Settings {
             screenshot_format: default_screenshot_format(),
             screenshot_quality: default_screenshot_quality(),
             screenshot_copy: true,
+            snip_keys: SnipKeys::default(),
             recording_dir: String::new(),
             recording_format: Default::default(),
             remux_mkv: true,

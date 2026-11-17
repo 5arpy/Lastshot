@@ -14,7 +14,7 @@
  *   makes it clickable again with "Turn off click-through" in its strip.
  *   The Pop-outs panel, the tray and the shortcut also turn it off.
  */
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import pro from "lastshot-pro";
 import Viewer, { DEFAULT_SETTINGS, type ViewerApi, type ViewerSettings } from "../viewer/Viewer";
 import { Btn, Icon } from "../viewer/ui";
@@ -30,6 +30,7 @@ import {
   closeFrame,
   DEFAULT_LOOK,
   frames,
+  inApp,
   isPictureType,
   lookCss,
   MANY_FRAMES,
@@ -330,6 +331,14 @@ function FrameChrome({
   }, [frame.clickThrough]);
 
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  // A click activates the frame anyway (WebView2); the app hands the keyboard
+  // straight back to the app you trace in, except while the menu is open
+  // (so it can close when you click elsewhere).
+  const menuOpen = !!menu;
+  useLayoutEffect(() => {
+    if (takesKeys || !inApp()) return;
+    void frames.keys(id, menuOpen).catch(() => undefined);
+  }, [menuOpen, takesKeys, id]);
   const [tools, setToolsState] = useState(readTools);
   const setTools = useCallback((on: boolean) => {
     setToolsState(on);
@@ -903,13 +912,14 @@ function FrameMenu({
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
   const [pos, setPos] = useState(at);
+  const [page, setPage] = useState<"main" | "view" | "look">("main");
   // Kept inside the window (it scrolls when the window is small).
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
     setPos({ x: Math.max(4, Math.min(at.x, window.innerWidth - r.width - 4)), y: Math.max(4, Math.min(at.y, window.innerHeight - r.height - 4)) });
-  }, [at]);
+  }, [at, page]);
   useEffect(() => {
     const down = (e: PointerEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) onClose();
@@ -952,6 +962,44 @@ function FrameMenu({
     </button>
   );
   const sep = (key: string) => <div key={key} className="my-1 h-px bg-white/10" />;
+  // Long lists live on their own page of the menu (a small pop-out has no
+  // room for them all), with a back row on top.
+  const more = (label: string, to: "view" | "look", testid: string): ReactNode => (
+    <button
+      key={label}
+      type="button"
+      role="menuitem"
+      data-testid={testid}
+      onClick={() => setPage(to)}
+      className="flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[11.5px] text-white/85 hover:bg-white/10"
+    >
+      <span className="w-3" />
+      <span className="flex-1">{label}</span>
+      <span className="text-[11px] text-white/40">›</span>
+    </button>
+  );
+  /** A row of small buttons (zoom, turn), each one menu action. */
+  const chips = (testid: string, list: [string, string, () => void, boolean, string?][]): ReactNode => (
+    <div key={testid} className="flex items-center gap-1 px-2 py-1" data-testid={testid}>
+      {list.map(([label, title, go, on, tid]) => (
+        <button
+          key={label}
+          type="button"
+          role="menuitem"
+          title={title}
+          aria-label={title}
+          data-testid={tid}
+          onClick={() => {
+            onClose();
+            go();
+          }}
+          className={cn("min-w-7 flex-1 rounded px-1.5 py-0.5 text-[11px]", on ? "bg-[#5d72db] text-white" : "bg-white/10 text-white/85 hover:bg-white/20")}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
   const a = media?.api ?? null;
   const run = (cmd: FrameCmd) => media?.run(cmd);
   return (
@@ -966,69 +1014,101 @@ function FrameMenu({
       onContextMenu={(e) => e.preventDefault()}
       data-testid="frame-menu"
     >
-      {frame.clickThrough && [item("Turn off click-through", () => patch({ clickThrough: false }), { testid: "frame-menu-through-off" }), sep("ct")]}
-      {video && [
-        item(video.paused ? "Play" : "Pause", () => (video.paused ? void video.play().catch(() => undefined) : video.pause())),
-        item(video.muted ? "Sound on" : "Mute", () => {
-          video.muted = !video.muted;
-        }),
-        sep("v"),
-      ]}
-      {a && [
-        item("Fit", () => a.fit(), { on: a.fitted(), testid: "frame-menu-fit" }),
-        item("100 %", () => a.zoom100()),
-        item("Zoom in", () => a.zoomBy(1.5), { hint: "wheel" }),
-        item("Zoom out", () => a.zoomBy(1 / 1.5)),
-        item("Turn right 90°", () => a.turn(90), { testid: "frame-menu-turn" }),
-        item("Turn left 90°", () => a.turn(-90)),
-        item("Mirror left↔right", () => a.mirror()),
-        item("Flip upside down", () => a.flipV()),
-        item("Grey", () => run("gray")),
-        item("Grid", () => run("grid")),
-        item("Undo", () => void a.undo()),
-        item("Reset the view", () => a.resetAll()),
-        sep("view"),
-        item("Copy picture", () => void a.copyFrame()),
-        item("Save picture as PNG", () => void a.saveFrame()),
-        sep("pic"),
-      ]}
-      <div className="flex items-center gap-1 px-2 py-1 text-[11px] text-white/60" data-testid="frame-menu-opacity">
-        <span className="flex-1">Opacity</span>
-        {[100, 75, 50, 25].map((o) => (
+      {page !== "main" ? (
+        <>
           <button
-            key={o}
             type="button"
-            onClick={() => patch({ opacity: o / 100 })}
-            className={cn(
-              "rounded px-1.5 py-0.5 font-mono text-[10px]",
-              Math.round(frame.opacity * 100) === o ? "bg-[#5d72db] text-white" : "bg-white/10 text-white/80 hover:bg-white/20",
-            )}
+            onClick={() => setPage("main")}
+            className="flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[11.5px] text-white/60 hover:bg-white/10"
+            data-testid="frame-menu-back"
           >
-            {o}
+            <span className="w-3 text-center text-[10px]">‹</span>
+            <span className="flex-1">{page === "look" ? "Look" : "View"}</span>
           </button>
-        ))}
-      </div>
-      <LookRows
-        look={{ ...DEFAULT_LOOK, ...(frame.look ?? {}) }}
-        set={(l) => patch({ look: l })}
-        variant="menu"
-        typed={frame.kind === "board"}
-        onTypeElsewhere={() => {
-          onClose();
-          void frames.showPanel();
-        }}
-      />
-      {item("Edge shadow", () => patch({ look: { ...DEFAULT_LOOK, ...(frame.look ?? {}), shadow: !frame.look?.shadow } }), { on: !!frame.look?.shadow, testid: "frame-menu-shadow" })}
-      {item("Use this look for new pop-outs", () => void frames.setDefaultLook({ ...DEFAULT_LOOK, ...(frame.look ?? {}) }).catch(() => undefined), { testid: "frame-menu-look-default" })}
-      {sep("look")}
-      {item("Always on top", () => patch({ onTop: !frame.onTop }), { on: frame.onTop })}
-      {!frame.clickThrough && item("Click-through", () => patch({ clickThrough: true }), { hint: hotkey || undefined, testid: "frame-menu-through" })}
-      {item(full ? "Leave full screen" : "Full screen", toggleFull, { on: full, hint: "double-click" })}
-      {media && item("View tools in the strip", () => setTools(!tools), { on: tools, testid: "frame-menu-tools" })}
-      {sep("frame")}
-      {item("Pop-outs panel in Lastshot", () => void frames.showPanel())}
-      {item("Hide", () => patch({ hidden: true }))}
-      {item("Close", close, { danger: true })}
+          {sep("back")}
+          {page === "view" &&
+            a && [
+              item("Grey", () => run("gray")),
+              item("Grid", () => run("grid")),
+              item("Undo", () => void a.undo()),
+              item("Reset the view", () => a.resetAll()),
+              sep("vt"),
+              item("View tools in the strip", () => setTools(!tools), { on: tools, testid: "frame-menu-tools" }),
+            ]}
+          {page === "look" && (
+            <>
+              <LookRows
+                look={{ ...DEFAULT_LOOK, ...(frame.look ?? {}) }}
+                set={(l) => patch({ look: l })}
+                variant="menu"
+                // While the menu is open the frame keeps the keyboard, so
+                // colours can be typed here too.
+                typed
+              />
+              {item("Edge shadow", () => patch({ look: { ...DEFAULT_LOOK, ...(frame.look ?? {}), shadow: !frame.look?.shadow } }), { on: !!frame.look?.shadow, testid: "frame-menu-shadow" })}
+              {item("Use this look for new pop-outs", () => void frames.setDefaultLook({ ...DEFAULT_LOOK, ...(frame.look ?? {}) }).catch(() => undefined), { testid: "frame-menu-look-default" })}
+            </>
+          )}
+        </>
+      ) : (
+        <>
+          {frame.clickThrough && [item("Turn off click-through", () => patch({ clickThrough: false }), { testid: "frame-menu-through-off" }), sep("ct")]}
+          {video && [
+            item(video.paused ? "Play" : "Pause", () => (video.paused ? void video.play().catch(() => undefined) : video.pause())),
+            item(video.muted ? "Sound on" : "Mute", () => {
+              video.muted = !video.muted;
+            }),
+            sep("v"),
+          ]}
+          {a && (
+            <>
+              {chips("frame-menu-zoom", [
+                ["Fit", "Fit", () => a.fit(), a.fitted(), "frame-menu-fit"],
+                ["100 %", "100 %", () => a.zoom100(), false],
+                ["−", "Zoom out (or the wheel, or Ctrl+drag left / up on the picture)", () => a.zoomBy(1 / 1.5), false],
+                ["+", "Zoom in (or the wheel, or Ctrl+drag right / down on the picture)", () => a.zoomBy(1.5), false],
+              ])}
+              {chips("frame-menu-turn-row", [
+                ["⟲", "Turn left 90°", () => a.turn(-90), false],
+                ["⟳", "Turn right 90°", () => a.turn(90), false, "frame-menu-turn"],
+                ["↔", "Mirror left↔right", () => a.mirror(), false],
+                ["↕", "Flip upside down", () => a.flipV(), false],
+              ])}
+              {more("View", "view", "frame-menu-view")}
+              {sep("view")}
+              {item("Copy picture", () => void a.copyFrame())}
+              {item("Save picture as PNG", () => void a.saveFrame())}
+              {sep("pic")}
+            </>
+          )}
+          <div className="flex items-center gap-1 px-2 py-1 text-[11px] text-white/60" data-testid="frame-menu-opacity">
+            <span className="flex-1">Opacity</span>
+            {[100, 75, 50, 25].map((o) => (
+              <button
+                key={o}
+                type="button"
+                onClick={() => patch({ opacity: o / 100 })}
+                className={cn(
+                  "rounded px-1.5 py-0.5 font-mono text-[10px]",
+                  Math.round(frame.opacity * 100) === o ? "bg-[#5d72db] text-white" : "bg-white/10 text-white/80 hover:bg-white/20",
+                )}
+              >
+                {o}
+              </button>
+            ))}
+          </div>
+          {more("Look: background, outline", "look", "frame-menu-look")}
+          {sep("look")}
+          {item("Always on top", () => patch({ onTop: !frame.onTop }), { on: frame.onTop })}
+          {!frame.clickThrough && item("Click-through", () => patch({ clickThrough: true }), { hint: hotkey || undefined, testid: "frame-menu-through" })}
+          {item(full ? "Leave full screen" : "Full screen", toggleFull, { on: full, hint: "double-click" })}
+          {!a && media && item("View tools in the strip", () => setTools(!tools), { on: tools, testid: "frame-menu-tools" })}
+          {sep("frame")}
+          {item("Pop-outs panel in Lastshot", () => void frames.showPanel())}
+          {item("Hide", () => patch({ hidden: true }))}
+          {item("Close", close, { danger: true })}
+        </>
+      )}
     </div>
   );
 }

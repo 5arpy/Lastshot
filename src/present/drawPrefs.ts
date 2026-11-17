@@ -52,10 +52,13 @@ export function clampFade(s: unknown): number {
   return Number.isFinite(n) && n > 0 ? Math.min(FADE_MAX, Math.round(n * 10) / 10) : 0;
 }
 
-/** The next pen width up (dir 1) or down (-1) from any width. */
+/** Where `]` and Ctrl+wheel go past the presets (marker-like strokes), in bigger steps. */
+export const STEP_WIDTHS = [...PEN_WIDTHS, 32, 40, 48, 64];
+
+/** The next pen width up (dir 1) or down (-1) from any width (a typed one too). */
 export function stepWidth(w: number, dir: number): number {
-  if (dir > 0) return PEN_WIDTHS.find((x) => x > w + 1e-9) ?? PEN_WIDTHS[PEN_WIDTHS.length - 1];
-  return [...PEN_WIDTHS].reverse().find((x) => x < w - 1e-9) ?? PEN_WIDTHS[0];
+  if (dir > 0) return STEP_WIDTHS.find((x) => x > w + 1e-9) ?? Math.max(w, STEP_WIDTHS[STEP_WIDTHS.length - 1]);
+  return [...STEP_WIDTHS].reverse().find((x) => x < w - 1e-9) ?? STEP_WIDTHS[0];
 }
 
 /** How visible a drawing is `ageMs` after it was made: whole, then fading over the last third, then 0 (gone). */

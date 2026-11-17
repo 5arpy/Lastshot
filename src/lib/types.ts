@@ -154,12 +154,20 @@ export interface SnipCapture {
   width: number;
   height: number;
   windows: SnipWindowRect[];
-  /** Tab the snip bar opens on: "shot" (screenshot) or "rec" (record an area). */
-  start_mode?: "shot" | "rec";
+  /**
+   * How the snip opens: "shot" (screenshot) or "rec" (record an area) tab;
+   * "text" / "colour" (copy text or a colour); "last" / "window" (snip the
+   * last area or the window in front at once, without showing the overlay).
+   */
+  start_mode?: "shot" | "rec" | "text" | "colour" | "last" | "window";
   /** The monitors in the picture (physical px, relative to it); black between them. */
   monitors?: SnipWindowRectNoTitle[];
   /** The monitor the cursor was on: the bar opens there. */
   home?: number;
+  /** The picture's corner on the desktop (physical px). */
+  origin?: [number, number];
+  /** The window that was in front, relative to the picture. */
+  active?: SnipWindowRect | null;
 }
 
 export type SnipWindowRectNoTitle = Omit<SnipWindowRect, "title">;
@@ -175,7 +183,31 @@ export interface PresentInfo {
 export interface SnipDone {
   path: string | null;
   copied: boolean;
+  /** A message instead of "Screenshot copied" (copied text, a colour). */
+  title?: string | null;
+  body?: string | null;
 }
+
+export interface OcrWord {
+  text: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+export interface OcrLine {
+  text: string;
+  words: OcrWord[];
+}
+/** Text read from a snip, in picture pixels. */
+export interface OcrResult {
+  lines: OcrLine[];
+  language: string;
+}
+
+export type SnipKeyAction = "draw" | "text" | "colour" | "last" | "window";
+/** The extra screenshot hotkeys ("" = none). */
+export type SnipKeys = Record<SnipKeyAction, string>;
 
 /** Result of splitting a clip in two at the playhead. */
 export interface SplitResult {
@@ -388,6 +420,8 @@ export interface AppSettings {
   screenshotQuality: number;
   /** Put screenshots on the clipboard. */
   screenshotCopy: boolean;
+  /** More screenshot hotkeys (none by default). */
+  snipKeys?: SnipKeys;
   /** Screen recording folder; empty = the save location. */
   recordingDir: string;
   /** Hides folder paths on screen. */

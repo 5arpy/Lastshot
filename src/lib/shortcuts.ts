@@ -219,7 +219,7 @@ export function registerShortcuts(scope: string, list: Shortcut[]): () => void {
 }
 
 /** Makes shortcuts known to Settings and the cheat sheet without running them here. */
-export function declareShortcuts(scope: string, list: Pick<Shortcut, "keys" | "label" | "id" | "group" | "context">[]): void {
+export function declareShortcuts(scope: string, list: Pick<Shortcut, "keys" | "label" | "id" | "group" | "context" | "mouse">[]): void {
   let changed = false;
   list.forEach((s) => (changed = remember(scope, s) || changed));
   if (changed) notify();
@@ -280,7 +280,7 @@ export function activeShortcuts(): (ShortcutInfo & { run: () => void })[] {
       const k = keyOf(r.scope, idOf(s));
       if (seen.has(k) || !usable(r, s)) continue;
       seen.add(k);
-      out.push({ scope: r.scope, id: idOf(s), label: s.label, group: s.group, context: s.context, defaultKeys: s.keys, keys: effectiveKeys(r.scope, s), active: true, run: s.run });
+      out.push({ scope: r.scope, id: idOf(s), label: s.label, group: s.group, context: s.context, mouse: s.mouse, defaultKeys: s.keys, keys: effectiveKeys(r.scope, s), active: true, run: s.run });
     }
   }
   return out;

@@ -38,7 +38,27 @@ export const VIEWER_KEYS: { id: string; keys: string; label: string; group: stri
   { id: "loop-clear", keys: "Shift+A", label: "Clear the A–B loop", group: "Video" },
   { id: "onion", keys: "N", label: "Onion skin: off · 1 · 2 frames", group: "Video" },
 ];
+/**
+ * Mouse gestures (listed, never rebound). Zoom and pan never need the wheel:
+ * Ctrl+drag zooms like the editor's ruler, Z+drag and Ctrl+Space+drag like
+ * Photoshop. `leftDrag`: only where a plain left drag is the viewer's own
+ * (not under the snip's drawing tools).
+ */
+export const VIEWER_GESTURES: { id: string; keys: string; label: string; leftDrag?: boolean }[] = [
+  { id: "g-wheel", keys: "Wheel", label: "Zoom at the pointer" },
+  { id: "g-ctrl-drag", keys: "Ctrl+drag", label: "Zoom around where you pressed (right or down = closer)", leftDrag: true },
+  { id: "g-z-drag", keys: "Z+drag", label: "Zoom around where you pressed (hold Z; Z+click zooms in, Z+Alt+click out)" },
+  { id: "g-ctrl-space-drag", keys: "Ctrl+Space+drag", label: "Zoom around where you pressed, with any tool" },
+  { id: "g-drag", keys: "Drag", label: "Pan", leftDrag: true },
+  { id: "g-space-drag", keys: "Space+drag", label: "Pan, with any tool" },
+  { id: "g-middle-drag", keys: "Middle-drag", label: "Pan" },
+  { id: "g-alt-wheel", keys: "Alt+Wheel", label: "Turn freely (Shift: 1°)" },
+];
 declareShortcuts("viewer", VIEWER_KEYS);
+declareShortcuts(
+  "viewer",
+  VIEWER_GESTURES.map(({ id, keys, label }) => ({ id, keys, label, group: "Mouse", mouse: true })),
+);
 export const vk = (id: string) => {
   const k = VIEWER_KEYS.find((x) => x.id === id);
   if (!k) throw new Error(`no viewer key ${id}`);

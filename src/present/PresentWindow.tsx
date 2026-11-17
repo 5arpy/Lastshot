@@ -3,11 +3,14 @@ import AnnotationLayer from "../annotate/AnnotationLayer";
 import { drawShape } from "../annotate/draw";
 import { TOOLS } from "../annotate/StyleControls";
 import { type Pt, type Shape, type Style, PALETTE, hit, moveBy, shapeId } from "../annotate/shapes";
-import { monitorsOf } from "../components/snipGeo";
+import { monitorAt, monitorsOf } from "../components/snipGeo";
 import { DRAW_TOOL_KEYS, drawKeymap } from "../editor/keys";
 import { DRAW_KEYS, keyOfLabel, matchKey, toRegistry } from "../editor/keyTables";
 import { isTauri, lastshot, showCurrentWindow } from "../lib/bridge";
 import { setShortcutOverrides } from "../lib/shortcuts";
+import { useShortcuts } from "../lib/useShortcuts";
+import { APP_SCOPE, ak } from "../lib/appKeys";
+import ShortcutsOverlay from "../components/ShortcutsOverlay";
 import type { PresentInfo } from "../lib/types";
 import { History } from "../timeline/history";
 import { cn } from "../utils/cn";
@@ -39,7 +42,8 @@ import {
  *   bar still takes clicks (a tool brings drawing back).
  * - C clears, I hides / shows the drawing, W / K a white or black board,
  *   1-7 colours, [ ] pen width, Ctrl+Z / Ctrl+Y, Ctrl+S snips the screen
- *   with the drawing. Esc deselects, then stops drawing.
+ *   with the drawing. Esc deselects, then stops drawing. F1 or ? lists
+ *   every key (all of them can be changed in Settings › Shortcuts).
  * - More (⋯): the board, and ink that fades away after a few seconds.
  * - The last drawing is kept when it closes: "Bring back" restores it.
  *
@@ -372,60 +376,75 @@ export default function PresentWindow() {
   }, [mouse]);
 
   // ------------------------------------------------------------ keyboard
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (editingRef.current) return; // typing in a text
-      const t = e.target as HTMLElement | null;
-      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return;
-      const done = () => {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-      };
-      if (e.key === "Escape") {
-        done();
+  const [sheet, setSheet] = useState<null | "keys" | "commands">(null);
+  const toggleSheet = useCallback((m: "keys" | "commands") => {
+    setMouse(false); // the list takes clicks
+    setSheet((s) => (s === m ? null : m));
+  }, []);
+  /** The screen the bar is on (CSS px), for the key list. */
+  const sheetBox = () => {
+    const r = barRef.current?.getBoundingClientRect();
+    const m = r ? mons[monitorAt(mons, (r.left + r.width / 2) * scale, (r.top + r.height / 2) * scale)] : undefined;
+    return m ? { left: m.x / scale, top: m.y / scale, width: m.w / scale, height: m.h / scale } : { left: work.x, top: work.y, width: work.w, height: work.h };
+  };
+  const drawList = toRegistry(
+    drawKeymap({
+      undo,
+      redo,
+      selectAll: () => {
+        setPrefs({ tool: "select" });
+        setPickedState(shapesRef.current.map((s) => s.id));
+      },
+      duplicate: () => {
+        const ids = new Set(picked);
+        const copies = shapesRef.current.filter((x) => ids.has(x.id)).map((x) => ({ ...moveBy(x, 16 * scale, 16 * scale), id: shapeId(), locked: false }));
+        if (!copies.length) return;
+        commitShapes([...shapesRef.current, ...copies], "once", "Duplicate");
+        setPickedState(copies.map((c) => c.id));
+      },
+      del: () => {
+        const ids = new Set(picked);
+        commitShapes(shapesRef.current.filter((s) => !ids.has(s.id) || s.locked), "once", "Delete");
+        setPickedState([]);
+      },
+      nudge: (dx, dy) => editPicked((s) => moveBy(s, dx * scale, dy * scale), "Nudge"),
+      tool: (x) => chooseTool(x as DrawTool),
+      clear,
+      ink: () => setHidden((h) => !h),
+      mouse: () => setMouse((m) => !m),
+      board: (b) => setPrefs({ board: toggleBoard(prefsRef.current.board, b) }),
+      width: (dir) => chooseWidth(stepWidth(prefsRef.current.style.width, dir)),
+      colour: (n) => PALETTE[n] && chooseColour(PALETTE[n]),
+      snip: () => void snip(),
+      picked: () => picked.length > 0,
+      escape: () => {
         if (menu) setMenu(null);
         else if (picked.length) setPickedState([]);
         else close();
-        return;
-      }
-      const list = drawKeymap({
-        undo,
-        redo,
-        selectAll: () => {
-          setPrefs({ tool: "select" });
-          setPickedState(shapesRef.current.map((s) => s.id));
-        },
-        duplicate: () => {
-          const ids = new Set(picked);
-          const copies = shapesRef.current.filter((x) => ids.has(x.id)).map((x) => ({ ...moveBy(x, 16 * scale, 16 * scale), id: shapeId(), locked: false }));
-          if (!copies.length) return;
-          commitShapes([...shapesRef.current, ...copies], "once", "Duplicate");
-          setPickedState(copies.map((c) => c.id));
-        },
-        del: () => {
-          const ids = new Set(picked);
-          commitShapes(shapesRef.current.filter((s) => !ids.has(s.id) || s.locked), "once", "Delete");
-          setPickedState([]);
-        },
-        nudge: (dx, dy) => editPicked((s) => moveBy(s, dx * scale, dy * scale), "Nudge"),
-        tool: (x) => chooseTool(x as DrawTool),
-        clear,
-        ink: () => setHidden((h) => !h),
-        mouse: () => setMouse((m) => !m),
-        board: (b) => setPrefs({ board: toggleBoard(prefsRef.current.board, b) }),
-        width: (dir) => chooseWidth(stepWidth(prefsRef.current.style.width, dir)),
-        colour: (n) => PALETTE[n] && chooseColour(PALETTE[n]),
-        snip: () => void snip(),
-        picked: () => picked.length > 0,
-      });
-      const hit = matchKey("draw", toRegistry(list), e);
+      },
+    }),
+  );
+  // Registered too, so F1 / ? and the command list show (and run) them.
+  useShortcuts("draw", drawList, !!info);
+  useShortcuts(APP_SCOPE, [
+    { ...ak("cheat-sheet"), run: () => toggleSheet("keys") },
+    { ...ak("commands"), run: () => toggleSheet("commands") },
+  ]);
+  // Capture phase, so the drawing's keys win over the page's.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (editingRef.current || sheet) return; // typing in a text, or the key list is open
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return;
+      const hit = matchKey("draw", drawList, e);
       if (!hit) return;
-      done();
+      e.preventDefault();
+      e.stopImmediatePropagation();
       hit.run();
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [menu, picked, scale, undo, redo, clear, close, commitShapes, editPicked, chooseTool, chooseColour, chooseWidth, setPrefs, snip]);
+  });
 
   // ------------------------------------------------------------ eraser
   // Drag over drawings to remove them: one undo step per drag.
@@ -853,16 +872,41 @@ export default function PresentWindow() {
                   />
                 </div>
               </div>
-              <div className="text-[11px] leading-snug text-white/45">
-                Keys: Settings › Shortcuts › Draw on screen. Esc stops drawing; “Bring back last” restores it.
-              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setMenu(null);
+                  toggleSheet("keys");
+                }}
+                data-testid="draw-keys"
+                className="flex w-full items-center gap-1.5 rounded-md border border-white/10 px-2 py-1 text-left hover:bg-white/10"
+              >
+                All keys (change them in Settings › Shortcuts)<span className="ml-auto text-white/40">F1</span>
+              </button>
             </div>
           )}
         </div>
-        <button type="button" className={btn} title="Stop drawing (Esc)" onClick={close} data-testid="draw-close">
+        <button type="button" className={btn} title={tip("Stop drawing", "Drop the selection, or stop drawing")} onClick={close} data-testid="draw-close">
           {svg(ICON.close)}
         </button>
       </div>
+
+      {sheet && (
+        <>
+          <div className="absolute inset-0 z-[89]" onPointerDown={(e) => (e.stopPropagation(), setSheet(null))} />
+          {/* On the screen the bar is on (the list is "fixed" inside this box). */}
+          <div className="absolute z-[90]" style={{ ...sheetBox(), transform: "translateZ(0)" }} data-testid="draw-sheet">
+            <ShortcutsOverlay
+              mode={sheet}
+              onClose={() => setSheet(null)}
+              onEdit={() => {
+                void window.__TAURI__?.core.invoke("shell_open_tab", { tab: "settings", payload: { section: "shortcuts" } }).catch(() => undefined);
+                close();
+              }}
+            />
+          </div>
+        </>
+      )}
 
       {error && (
         <div className="absolute bottom-6 left-1/2 z-30 -translate-x-1/2 rounded-lg bg-[#3a1d22] px-3 py-2 text-[12px] text-white shadow-2xl">

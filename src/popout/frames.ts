@@ -175,6 +175,8 @@ export const frames = {
   open: (req: OpenFrame) => invoke<Frame>("frame_open", { req }),
   list: () => (inApp() ? invoke<Frame[]>("frame_list") : Promise.resolve([] as Frame[])),
   update: (id: string, patch: FramePatch) => invoke<Frame>("frame_update", { id, patch }),
+  /** A picture or clip frame keeps the keyboard only while its menu is open (`on`). */
+  keys: (id: string, on: boolean) => invoke<void>("frame_keys", { id, on }),
   setRect: (id: string, x: number, y: number, w: number, h: number) =>
     invoke<void>("frame_set_rect", { id, x: Math.round(x), y: Math.round(y), w: Math.max(1, Math.round(w)), h: Math.max(1, Math.round(h)) }),
   fullscreen: (id: string, on?: boolean) => invoke<boolean>("frame_fullscreen", { id, on }),

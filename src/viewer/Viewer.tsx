@@ -4,6 +4,8 @@
  *
  * - Wheel zooms at the cursor (fit … 6400 %), nearest-neighbour above 100 %.
  * - Drag (or Space+drag, or the middle button) pans.
+ * - Ctrl+drag, Z+drag or Ctrl+Space+drag zooms around where it was pressed
+ *   (right or down = closer), so the wheel is never needed.
  * - Ctrl+wheel steps frames, Alt+wheel turns the picture.
  * - Keys: 0 fit · 1 100 % · 2 fill · [ ] turn · H mirror · M value check ·
  *   G grid · C colour picker · D measure · W compare · E colour · Ctrl+0 reset;
@@ -71,7 +73,7 @@ import { copyPng, copyText, savePng, stampName } from "./io";
 import { Btn, Chip, I, Icon, Pop, Sep, Slider } from "./ui";
 import { cn } from "../utils/cn";
 import { onShortcutsChange, splitKeys, effectiveKeys, type Shortcut } from "../lib/shortcuts";
-import { vk } from "./keys";
+import { VIEWER_GESTURES, vk } from "./keys";
 import { useShortcuts } from "../lib/useShortcuts";
 
 export interface ViewerSettings {
@@ -194,6 +196,8 @@ export interface ViewerProps {
 
 type Drag =
   | { kind: "pan"; x0: number; y0: number; v0: View; moved: boolean; tap: boolean }
+  /** Scrubby zoom around `at` (Photoshop's Z+drag, the editor's Ctrl+drag). */
+  | { kind: "zoom"; x0: number; y0: number; v0: View; at: Pt; moved: boolean; byZ: boolean }
   | { kind: "measure"; a: Pt }
   | { kind: "crop"; a: Pt }
   | { kind: "wipe" }
@@ -317,6 +321,9 @@ export default function Viewer(props: ViewerProps) {
   const [time, setTime] = useState(0);
   const dragRef = useRef<Drag | null>(null);
   const spaceRef = useRef(false);
+  /** Z is held: a drag zooms. */
+  const zRef = useRef(false);
+  const [zHeld, setZHeld] = useState(false);
 
   const say = useCallback(
     (msg: string) => {
@@ -598,8 +605,9 @@ export default function Viewer(props: ViewerProps) {
   // ---------------------------------------------------------------- actions
   const fit = useCallback(() => {
     userMoved.current = false;
-    setView(fitView(content, stage, { ...viewRef.current }));
-  }, [content, stage, setView]);
+    // The host's home place when it has one (the snip: as on the screen).
+    setView(placeHome(content, stage, { ...viewRef.current }));
+  }, [content, stage, setView, placeHome]);
   const zoom100 = useCallback(() => move(actualView(stage, viewRef.current, dpr)), [stage, dpr, move]);
   const fill = useCallback(() => move(fillView(content, stage, viewRef.current)), [content, stage, move]);
   const resetAll = useCallback(() => {
@@ -784,9 +792,17 @@ export default function Viewer(props: ViewerProps) {
   const onPointerDown = (e: React.PointerEvent) => {
     if (e.button === 1) e.preventDefault();
     const p = stagePt(e);
-    const panning = e.button === 1 || (e.button === 0 && spaceRef.current);
-    if (panning) spaceTap.current = false;
+    // Z+drag, Ctrl+Space+drag (any tool), or Ctrl+drag where nothing else
+    // takes the left button: zoom.
+    const zooming =
+      e.button === 0 && (zRef.current || (spaceRef.current && e.ctrlKey) || (e.ctrlKey && leftDragPans && !props.pointer && !measuring && !cropping));
+    const panning = !zooming && (e.button === 1 || (e.button === 0 && spaceRef.current));
+    if (panning || zooming) spaceTap.current = false;
     (e.currentTarget as Element).setPointerCapture(e.pointerId);
+    if (zooming) {
+      dragRef.current = { kind: "zoom", x0: e.clientX, y0: e.clientY, v0: viewRef.current, at: p, moved: false, byZ: zRef.current };
+      return;
+    }
     if (panning) {
       dragRef.current = { kind: "pan", x0: e.clientX, y0: e.clientY, v0: viewRef.current, moved: false, tap: false };
       return;
@@ -820,6 +836,14 @@ export default function Viewer(props: ViewerProps) {
     const d = dragRef.current;
     const p = stagePt(e);
     if (!d) return updateHover(p);
+    if (d.kind === "zoom") {
+      const dx = e.clientX - d.x0;
+      const dy = e.clientY - d.y0;
+      if (!d.moved && Math.hypot(dx, dy) < 3) return;
+      d.moved = true;
+      move(zoomAt(d.v0, d.at, Math.exp((dx + dy) * 0.008), dpr, fitView(content, stage).scale / 4));
+      return;
+    }
     if (d.kind === "pan") {
       const dx = e.clientX - d.x0;
       const dy = e.clientY - d.y0;
@@ -853,7 +877,10 @@ export default function Viewer(props: ViewerProps) {
     dragRef.current = null;
     if (!d) return;
     const p = stagePt(e);
-    if (d.kind === "pan" && !d.moved && d.tap) {
+    if (d.kind === "zoom" && !d.moved && d.byZ) {
+      // Z+click zooms in at that point, Z+Alt+click out (Photoshop).
+      move(zoomAt(viewRef.current, d.at, e.altKey ? 0.5 : 2, dpr, fitView(content, stage).scale / 4));
+    } else if (((d.kind === "pan" && d.tap) || d.kind === "zoom") && !d.moved) {
       if (inspector && hover?.rgba) {
         const h = hex(hover.rgba[0], hover.rgba[1], hover.rgba[2]);
         void copyText(h);
@@ -977,7 +1004,9 @@ export default function Viewer(props: ViewerProps) {
     { ...vk("loop-clear"), when: hasVideo, run: () => patch({ ab: { a: null, b: null } }) },
     { ...vk("onion"), when: hasVideo, run: () => patch({ onion: ((settingsRef.current.onion + 1) % 3) as 0 | 1 | 2 }) },
   ];
-  useShortcuts("viewer", shortcuts, keys);
+  // The mouse gestures, for the cheat sheet (never matched to keys).
+  const gestures: Shortcut[] = VIEWER_GESTURES.filter((g) => leftDragPans || !g.leftDrag).map(({ id, keys, label }) => ({ id, keys, label, group: "Mouse", mouse: true, run: () => undefined }));
+  useShortcuts("viewer", [...shortcuts, ...gestures], keys);
   // Tooltips follow rebinding.
   const [, setKeysVersion] = useState(0);
   useEffect(() => onShortcutsChange(() => setKeysVersion((n) => n + 1)), []);
@@ -993,12 +1022,20 @@ export default function Viewer(props: ViewerProps) {
   useEffect(() => {
     if (!keys) return;
     const down = (e: KeyboardEvent) => {
+      if (e.code === "KeyZ" && !e.ctrlKey && !e.metaKey && !e.altKey && !isTyping(e.target) && !zRef.current) {
+        zRef.current = true;
+        setZHeld(true);
+      }
       if (e.code !== "Space" || isTyping(e.target)) return;
       spaceRef.current = true;
       if (!e.repeat) spaceTap.current = true;
       if (spacePlays && video) e.preventDefault();
     };
     const up = (e: KeyboardEvent) => {
+      if (e.code === "KeyZ" && zRef.current) {
+        zRef.current = false;
+        setZHeld(false);
+      }
       if (e.code !== "Space") return;
       spaceRef.current = false;
       const tap = spaceTap.current;
@@ -1010,6 +1047,8 @@ export default function Viewer(props: ViewerProps) {
       }
     };
     const blur = () => {
+      zRef.current = false;
+      setZHeld(false);
       spaceRef.current = false;
       spaceTap.current = false;
     };
@@ -1357,7 +1396,7 @@ export default function Viewer(props: ViewerProps) {
           {rowBar && hint}
         </div>
     ) : null;
-  const cursor = dragRef.current?.kind === "pan" && dragRef.current.moved ? "grabbing" : measuring || cropping || inspector || props.pointer ? "crosshair" : leftDragPans ? "grab" : "default";
+  const cursor = zHeld || dragRef.current?.kind === "zoom" ? "zoom-in" : dragRef.current?.kind === "pan" && dragRef.current.moved ? "grabbing" : measuring || cropping || inspector || props.pointer ? "crosshair" : leftDragPans ? "grab" : "default";
 
   const stageEl = (
     <div
@@ -1505,6 +1544,7 @@ function AdjustPanel({ value, onChange }: { value: Adjust; onChange: (a: Adjust)
 function Help({ video, list }: { video: boolean; list: Shortcut[] }) {
   const mouse: [string, string][] = [
     ["Wheel", "zoom at the cursor"],
+    ["Ctrl / Z / Ctrl+Space + drag", "zoom (right or down = closer)"],
     ["Drag · Space+drag · middle", "pan"],
     ["Alt+wheel", "turn freely (Shift: 1°)"],
     ["Double-click", "fit ↔ 100 %"],

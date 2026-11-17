@@ -138,7 +138,9 @@ describe("keys", () => {
       const seen = new Map<string, string>();
       for (const s of list) {
         if (s.when || s.mouse) continue;
-        const k = normKeys(s.keys);
+        // One key may do different things in different phases (the snip's
+        // "pick" and "rec" keys never run while marking up).
+        const k = `${normKeys(s.keys)}${s.context && s.context !== "area" ? ` [${s.context}]` : ""}`;
         if (seen.has(k)) expect(`${k}: ${seen.get(k)}`).toBe(`${k}: ${s.label}`);
         seen.set(k, s.label);
       }

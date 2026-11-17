@@ -767,6 +767,12 @@ mod imp {
             if let Some(ep) = microphone.as_ref() {
                 let _ = ep.client.Stop();
             }
+            // Release every COM object before COM goes: after the last
+            // CoUninitialize the AAC encoder's DLL can be unloaded, and
+            // releasing it then crashes the app (seen in engine restarts).
+            drop(encoder);
+            drop(loopback);
+            drop(microphone);
             let _ = MFShutdown();
             CoUninitialize();
         }

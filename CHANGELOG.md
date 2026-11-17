@@ -30,6 +30,8 @@ All notable changes to **Lastshot** (and, before 1.7.1, to **ClipFlow**, which L
 ### Changed
 
 - **Deleting clips moves them to the Recycle Bin**, so they can be restored. Automatic cleanup of old clips still frees the space for good.
+- **The control bar's *Draw* opens Draw on screen**, the same pen, shapes, text and keys as from the snip bar, over the recorded screen (the drawings are in the recording; press *Draw* again or Esc to close it). The bar's own small drawing tools are gone.
+- **Shortcuts for *Mark a moment* and *Mute the mic in the recording*** (Settings › Shortcuts; none until you set one, Backspace takes one off again). The control bar's tooltips show them, like Pause.
 
 ### Fixed
 

@@ -40,11 +40,11 @@ import {
   type ContentInfo,
   type Frame,
   type FrameCmd,
-  type FrameLook,
   type FrameViewState,
   type Layout,
 } from "./frames";
 import { dragRect, snapRect, snapTargets, type Edge, type R } from "./snap";
+import LookRows from "./LookRows";
 import { postToEditor } from "../editor/inbox";
 
 const SNAP_PX = 10;
@@ -1008,7 +1008,16 @@ function FrameMenu({
           </button>
         ))}
       </div>
-      <LookRows look={{ ...DEFAULT_LOOK, ...(frame.look ?? {}) }} set={(l) => patch({ look: l })} />
+      <LookRows
+        look={{ ...DEFAULT_LOOK, ...(frame.look ?? {}) }}
+        set={(l) => patch({ look: l })}
+        variant="menu"
+        typed={frame.kind === "board"}
+        onTypeElsewhere={() => {
+          onClose();
+          void frames.showPanel();
+        }}
+      />
       {item("Edge shadow", () => patch({ look: { ...DEFAULT_LOOK, ...(frame.look ?? {}), shadow: !frame.look?.shadow } }), { on: !!frame.look?.shadow, testid: "frame-menu-shadow" })}
       {item("Use this look for new pop-outs", () => void frames.setDefaultLook({ ...DEFAULT_LOOK, ...(frame.look ?? {}) }).catch(() => undefined), { testid: "frame-menu-look-default" })}
       {sep("look")}
@@ -1020,64 +1029,6 @@ function FrameMenu({
       {item("Pop-outs panel in Lastshot", () => void frames.showPanel())}
       {item("Hide", () => patch({ hidden: true }))}
       {item("Close", close, { danger: true })}
-    </div>
-  );
-}
-
-const SWATCHES = ["#1e1f24", "#000000", "#ffffff", "#808080", "#5d72db", "#e5484d"];
-
-/** The menu's background and outline rows: presets, swatches and a typed colour. */
-function LookRows({ look, set }: { look: FrameLook; set: (l: FrameLook) => void }) {
-  const chip = (label: string, on: boolean, run: () => void, testid?: string, swatch?: string) => (
-    <button
-      key={label}
-      type="button"
-      title={label}
-      data-testid={testid}
-      onClick={run}
-      className={cn("rounded px-1.5 py-0.5 font-mono text-[10px]", on ? "bg-[#5d72db] text-white" : "bg-white/10 text-white/80 hover:bg-white/20")}
-    >
-      {swatch ? <span className="block h-2.5 w-2.5 rounded-sm border border-white/40" style={{ background: swatch }} /> : label}
-    </button>
-  );
-  const hex = (v: string) => (/^#?[0-9a-f]{6}$/i.test(v.trim()) ? "#" + v.trim().replace("#", "").toLowerCase() : null);
-  const typed = (cur: string, apply: (c: string) => void, label: string) => (
-    <input
-      key={label}
-      defaultValue={cur}
-      aria-label={label}
-      title={`${label}: type #rrggbb, Enter`}
-      onKeyDown={(e) => {
-        e.stopPropagation();
-        if (e.key === "Enter") {
-          const c = hex((e.target as HTMLInputElement).value);
-          if (c) apply(c);
-        }
-      }}
-      className="w-[58px] rounded border border-white/15 bg-black/30 px-1 font-mono text-[10px] text-white/85 focus:border-white/40 focus:outline-none"
-    />
-  );
-  return (
-    <div className="px-2 py-1 text-[11px] text-white/60" data-testid="frame-menu-look">
-      <div className="mb-1 flex flex-wrap items-center gap-1">
-        <span className="w-[62px]">Background</span>
-        {(["none", "dark", "light", "checker"] as const).map((b) => chip(b === "none" ? "None" : b[0].toUpperCase() + b.slice(1), look.bg === b, () => set({ ...look, bg: b }), `frame-bg-${b}`))}
-      </div>
-      <div className="mb-1 flex flex-wrap items-center gap-1 pl-[66px]">
-        {SWATCHES.map((c) => chip(c, look.bg === "custom" && look.color === c, () => set({ ...look, bg: "custom", color: c }), undefined, c))}
-        {typed(look.bg === "custom" ? look.color : "", (c) => set({ ...look, bg: "custom", color: c }), "Background colour")}
-      </div>
-      <div className="mb-1 flex flex-wrap items-center gap-1">
-        <span className="w-[62px]">Outline</span>
-        {[0, 1, 2, 4].map((w) => chip(w === 0 ? "Off" : `${w}px`, look.border === w, () => set({ ...look, border: w }), `frame-border-${w}`))}
-      </div>
-      {look.border > 0 && (
-        <div className="flex flex-wrap items-center gap-1 pl-[66px]">
-          {chip("Auto", !look.borderColor, () => set({ ...look, borderColor: "" }), "frame-border-auto")}
-          {SWATCHES.slice(1).map((c) => chip(c, look.borderColor === c, () => set({ ...look, borderColor: c }), undefined, c))}
-          {typed(look.borderColor, (c) => set({ ...look, borderColor: c }), "Outline colour")}
-        </div>
-      )}
     </div>
   );
 }

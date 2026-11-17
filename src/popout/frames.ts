@@ -54,6 +54,14 @@ export interface FrameLook {
 }
 
 export const DEFAULT_LOOK: FrameLook = { bg: "none", color: "#1e1f24", border: 1, borderColor: "", shadow: false };
+/** One-click colours for the background and the outline (any other is typed). */
+export const LOOK_SWATCHES = ["#1e1f24", "#000000", "#ffffff", "#808080", "#5d72db", "#e5484d"];
+
+/** "#rrggbb" from a typed colour ("ff8800", "#FF8800", " #f80 " is not one), else null. */
+export function hexColor(v: string): string | null {
+  const t = v.trim().replace(/^#/, "");
+  return /^[0-9a-f]{6}$/i.test(t) ? "#" + t.toLowerCase() : null;
+}
 
 const CHECKER = "repeating-conic-gradient(#8a8a8a 0% 25%, #b9b9b9 0% 50%) 50% / 16px 16px";
 

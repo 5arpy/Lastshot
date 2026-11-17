@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS } from "../viewer/Viewer";
-import { badgesOf, DEFAULT_LOOK, ECHO_MS, lookCss, MANY_FRAMES, pickEcho, popOutMany, viewFlags, type Frame } from "./frames";
+import { badgesOf, DEFAULT_LOOK, ECHO_MS, hexColor, LOOK_SWATCHES, lookCss, MANY_FRAMES, pickEcho, popOutMany, viewFlags, type Frame } from "./frames";
 import { ago } from "./FramesPanel";
 
 const frame = (p: Partial<Frame>): Frame => ({
@@ -105,5 +105,13 @@ describe("frame look", () => {
     expect(lookCss({ border: 0, shadow: true }).boxShadow).toBe("inset 0 0 18px 2px rgba(0,0,0,0.55)");
     expect(lookCss({ ...DEFAULT_LOOK, border: 0 })).toEqual({ background: undefined, boxShadow: undefined });
     expect(lookCss({ border: 40, borderColor: "#000000" }).boxShadow).toBe("inset 0 0 0 12px #000000");
+  });
+  it("reads typed colours", () => {
+    expect(hexColor("ff8800")).toBe("#ff8800");
+    expect(hexColor(" #FF8800 ")).toBe("#ff8800");
+    expect(hexColor("#f80")).toBeNull();
+    expect(hexColor("red")).toBeNull();
+    expect(hexColor("")).toBeNull();
+    for (const c of LOOK_SWATCHES) expect(hexColor(c)).toBe(c);
   });
 });

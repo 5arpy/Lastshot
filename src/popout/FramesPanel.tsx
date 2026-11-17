@@ -12,7 +12,8 @@ import NumberField from "../components/NumberField";
 import { cn } from "../utils/cn";
 import ShowOverPicker from "./ShowOverPicker";
 import { openApps } from "./showOver";
-import { frames, pickEcho, popOutMany, popOutPicturePath, viewFlags, type ClosedFrame, type Frame, type FrameCmd } from "./frames";
+import { DEFAULT_LOOK, frames, pickEcho, popOutMany, popOutPicturePath, viewFlags, type ClosedFrame, type Frame, type FrameCmd } from "./frames";
+import LookRows from "./LookRows";
 
 /** What the panel's view buttons can do for image and clip frames. */
 const MEDIA_CMDS: FrameCmd[] = ["zoomOut", "zoomIn", "fit", "actual", "flipH", "flipV", "gray", "grid"];
@@ -291,7 +292,7 @@ export default function FramesPanel({
             </div>
           )}
           {list.map((f) => (
-            <FrameRow key={f.id} f={f} upd={upd} cmd={cmd} fail={fail} apps={apps} known={known} />
+            <FrameRow key={f.id} f={f} upd={upd} cmd={cmd} fail={fail} apps={apps} known={known} onLook={() => onToast("ok", "Look saved", "New pop-outs start with this background and outline.")} />
           ))}
 
           {closed.length > 0 && (
@@ -336,6 +337,7 @@ function FrameRow({
   fail,
   apps,
   known,
+  onLook,
 }: {
   apps: { exe: string; title: string }[];
   /** Apps picked on any frame (they stay offered while closed). */
@@ -344,6 +346,8 @@ function FrameRow({
   upd: (f: Frame, p: Parameters<typeof frames.update>[1]) => void;
   cmd: (f: Frame, c: FrameCmd) => void;
   fail: (e: unknown) => void;
+  /** After this frame's look became the default for new pop-outs. */
+  onLook?: () => void;
 }) {
   const flags = viewFlags(f);
   const [full, setFull] = useState(false);
@@ -459,6 +463,25 @@ function FrameRow({
           title="Full screen on its screen"
         >
           Full screen
+        </button>
+      </div>
+
+      {/* The look, with typed colours: a picture frame's own menu cannot take typing. */}
+      <LookRows look={{ ...DEFAULT_LOOK, ...(f.look ?? {}) }} set={(l) => upd(f, { look: l })} variant="panel" typed />
+      <div className="mt-1 pl-14">
+        <button
+          type="button"
+          className={cn(chip(false), "font-medium")}
+          data-testid="frame-row-look-default"
+          title="New pop-outs start with this background, outline and shadow"
+          onClick={() =>
+            void frames
+              .setDefaultLook({ ...DEFAULT_LOOK, ...(f.look ?? {}) })
+              .then(() => onLook?.())
+              .catch(fail)
+          }
+        >
+          Use this look for new pop-outs
         </button>
       </div>
 

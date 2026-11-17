@@ -1,6 +1,6 @@
 [package]
 name = "lastshot"
-version = "1.9.0"
+version = "1.9.1"
 description = "Lastshot - free instant replay & snipping tool for Windows. No account, fully local."
 authors = ["5arpy", "jaimitus", "drexjgobgt"]
 license = "MIT"

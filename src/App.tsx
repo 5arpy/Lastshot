@@ -40,7 +40,7 @@ import type {
 import { cn } from "./utils/cn";
 import { screenshotsDir, setStreamerMode, shownPath } from "./lib/pathDisplay";
 
-const APP_VERSION = "1.9.0";
+const APP_VERSION = "1.9.1";
 
 /**
  * How long the privacy-gate state must stay put before it actually flips the

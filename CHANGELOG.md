@@ -2,6 +2,13 @@
 
 All notable changes to **Lastshot** (and, before 1.7.1, to **ClipFlow**, which Lastshot is forked from) are documented here. The project follows [Keep a Changelog](https://keepachangelog.com/) and [Semantic Versioning](https://semver.org/).
 
+## [1.9.1] - 2026-11-17
+
+### Fixed
+
+- **Lastshot starts on every PC.** A build could need Microsoft's Visual C++ runtime (`vcruntime140.dll`) and then failed to start (error 0xC0000135) on a PC without it. The runtime is now always built into the exe, and every release build is checked for it.
+- **No crash when the recorder restarts.** Changing a setting or a display change restarts the recorder; that could occasionally crash the app while it shut down the sound encoder.
+
 ## [1.9.0] - 2026-11-15
 
 ### Added

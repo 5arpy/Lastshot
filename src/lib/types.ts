@@ -63,6 +63,11 @@ export interface EngineStats {
   capture_method?: string;
   /** Something to know that is not an error (e.g. a black screen). */
   notice?: string | null;
+  /** Engine clock, for latency tests: QPC at engine time 0 and QPC ticks per second. */
+  clock_origin_qpc?: number;
+  qpc_freq?: number;
+  /** Engine time (100 ns) of the first frame of the last instant replay saved. */
+  last_save_start_hns?: number;
 }
 
 export interface ClipMetadata {
@@ -391,6 +396,8 @@ export interface RecordingStatus {
   ended: string | null;
   /** Seconds until the time or size limit or a full disk, whichever comes first. */
   seconds_left: number | null;
+  /** Engine time (100 ns) at file time 0, for latency tests. */
+  start_hns?: number | null;
 }
 
 /** What the control bar and Home show. */

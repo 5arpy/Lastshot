@@ -29,7 +29,7 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -389,6 +389,16 @@ pub struct EngineStats {
     /// Something the user should know that is not an error (black screen).
     #[serde(default)]
     pub notice: Option<String>,
+    /// The engine clock: QPC value at engine time 0, and QPC ticks per
+    /// second. Engine time t (100 ns) = clock_origin_qpc + t * qpc_freq / 1e7
+    /// in QPC; latency tests read it with the files' start_hns.
+    #[serde(default)]
+    pub clock_origin_qpc: i64,
+    #[serde(default)]
+    pub qpc_freq: i64,
+    /// Engine time of the first frame of the last instant replay saved.
+    #[serde(default)]
+    pub last_save_start_hns: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -494,6 +504,14 @@ impl QpcClock {
         ((qpc - self.origin) as i128 * HNS_PER_SECOND as i128 / self.freq as i128) as i64
     }
 
+    pub fn origin_qpc(&self) -> i64 {
+        self.origin
+    }
+
+    pub fn freq(&self) -> i64 {
+        self.freq
+    }
+
     pub fn now_hns(&self) -> i64 {
         let mut now = 0i64;
         unsafe {
@@ -518,6 +536,14 @@ impl QpcClock {
 
     pub fn to_hns(&self, qpc: i64) -> i64 {
         qpc
+    }
+
+    pub fn origin_qpc(&self) -> i64 {
+        0
+    }
+
+    pub fn freq(&self) -> i64 {
+        HNS_PER_SECOND
     }
 
     pub fn now_hns(&self) -> i64 {
@@ -796,6 +822,9 @@ struct SharedState {
     frames_encoded: AtomicU64,
     encode_ns_total: AtomicU64,
     submit_ns_total: AtomicU64,
+    clock_origin_qpc: AtomicI64,
+    qpc_freq: AtomicI64,
+    last_save_start_hns: AtomicI64,
     started_at: Mutex<Option<Instant>>,
     state: RwLock<EngineState>,
     last_error: RwLock<Option<String>>,
@@ -833,6 +862,9 @@ impl SharedState {
             frames_encoded: AtomicU64::new(0),
             encode_ns_total: AtomicU64::new(0),
             submit_ns_total: AtomicU64::new(0),
+            clock_origin_qpc: AtomicI64::new(0),
+            qpc_freq: AtomicI64::new(0),
+            last_save_start_hns: AtomicI64::new(0),
             started_at: Mutex::new(None),
             state: RwLock::new(EngineState::Idle),
             last_error: RwLock::new(None),
@@ -949,6 +981,8 @@ pub struct RecordingStatus {
     pub ended: Option<String>,
     /// Seconds until a limit or a full disk stops it, whichever comes first.
     pub seconds_left: Option<f32>,
+    /// Engine time (100 ns, see EngineStats::clock_origin_qpc) at file time 0.
+    pub start_hns: Option<i64>,
 }
 
 /// What a recording is told at start.
@@ -971,6 +1005,8 @@ pub struct RecShared {
     pub ended: parking_lot::Mutex<Option<String>>,
     /// Milliseconds left before a limit or a full disk; -1 = none.
     pub left_ms: std::sync::atomic::AtomicI64,
+    /// Engine time at file time 0; i64::MIN until the first frame.
+    pub start_hns: std::sync::atomic::AtomicI64,
 }
 
 /// How a recording thread ended.
@@ -1122,6 +1158,9 @@ impl CaptureEngine {
             last_error: self.shared.last_error.read().clone(),
             capture_method: self.shared.capture_method.read().clone(),
             notice: self.shared.notice.read().clone(),
+            clock_origin_qpc: self.shared.clock_origin_qpc.load(Ordering::Relaxed),
+            qpc_freq: self.shared.qpc_freq.load(Ordering::Relaxed),
+            last_save_start_hns: self.shared.last_save_start_hns.load(Ordering::Relaxed),
         }
     }
 
@@ -1153,6 +1192,8 @@ impl CaptureEngine {
         self.shared.set_state(EngineState::Starting);
 
         let clock = Arc::new(QpcClock::new());
+        self.shared.clock_origin_qpc.store(clock.origin_qpc(), Ordering::Relaxed);
+        self.shared.qpc_freq.store(clock.freq(), Ordering::Relaxed);
 
         // Audio first: WASAPI needs a couple of hundred ms to spin up its
         // endpoint, and starting it early keeps A/V aligned from frame zero.
@@ -1299,7 +1340,11 @@ impl CaptureEngine {
         let paused = Arc::new(AtomicBool::new(false));
         let pause_pts = Arc::new(std::sync::atomic::AtomicI64::new(i64::MAX));
         let written = Arc::new(std::sync::atomic::AtomicI64::new(0));
-        let info = Arc::new(RecShared { left_ms: std::sync::atomic::AtomicI64::new(-1), ..Default::default() });
+        let info = Arc::new(RecShared {
+            left_ms: std::sync::atomic::AtomicI64::new(-1),
+            start_hns: std::sync::atomic::AtomicI64::new(i64::MIN),
+            ..Default::default()
+        });
         let ring = Arc::clone(&self.shared.ring);
         let (t_stop, t_paused, t_pause_pts, t_written, t_info, t_path) = (
             Arc::clone(&stop),
@@ -1356,6 +1401,10 @@ impl CaptureEngine {
             seconds_left: match r.info.left_ms.load(Ordering::Relaxed) {
                 ms if ms >= 0 => Some(ms as f32 / 1000.0),
                 _ => None,
+            },
+            start_hns: match r.info.start_hns.load(Ordering::Relaxed) {
+                i64::MIN => None,
+                t => Some(t),
             },
         };
         Some(status)
@@ -1578,6 +1627,9 @@ impl CaptureEngine {
             (Some(a), Some(b)) => (b.pts_hns + b.duration_hns - a.pts_hns).max(0),
             _ => 0,
         };
+        if let Some(first) = video.first() {
+            self.shared.last_save_start_hns.store(first.pts_hns, Ordering::Relaxed);
+        }
         let has_audio = !audio.is_empty();
         let size_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
 
@@ -4095,7 +4147,10 @@ fn record_loop(
                     }
                     let offset = match segs.last() {
                         Some(prev) => prev.offset + (p.pts_hns - prev.end.unwrap_or(end_raw)),
-                        None => p.pts_hns,
+                        None => {
+                            info.start_hns.store(p.pts_hns, Ordering::Relaxed);
+                            p.pts_hns
+                        }
                     };
                     segs.push(RecSegment { start: p.pts_hns, end: None, offset });
                     need_key = false;

@@ -6,7 +6,7 @@
  * ten times as far.
  */
 import { useEffect, useRef, useState } from "react";
-import { parseNum, showNum, stepNum } from "../lib/numdraft";
+import { parseNum, parseNumOr, showNum, stepNum } from "../lib/numdraft";
 
 export interface NumberFieldProps {
   value: number;
@@ -14,6 +14,12 @@ export interface NumberFieldProps {
   max: number;
   step: number;
   onChange: (v: number) => void;
+  /** What an emptied field commits (e.g. 0 = off). Without it, empty puts the value back. */
+  emptyValue?: number;
+  /** Shown while the field is empty. */
+  placeholder?: string;
+  /** Takes the focus when it appears (e.g. right after "Custom…" was picked). */
+  autoFocus?: boolean;
   disabled?: boolean;
   /** Decimals shown. */
   digits?: number;
@@ -23,7 +29,7 @@ export interface NumberFieldProps {
   testid?: string;
 }
 
-export default function NumberField({ value, min, max, step, onChange, disabled, digits = 2, className, title, testid, ...rest }: NumberFieldProps) {
+export default function NumberField({ value, min, max, step, onChange, emptyValue, placeholder, autoFocus, disabled, digits = 2, className, title, testid, ...rest }: NumberFieldProps) {
   const [draft, setDraftState] = useState(showNum(value, digits));
   const draftRef = useRef(draft);
   const setDraft = (s: string) => {
@@ -31,8 +37,8 @@ export default function NumberField({ value, min, max, step, onChange, disabled,
     setDraftState(s);
   };
   const editing = useRef(false);
-  const latest = useRef({ value, onChange, min, max, step, digits, disabled });
-  latest.current = { value, onChange, min, max, step, digits, disabled };
+  const latest = useRef({ value, onChange, min, max, step, digits, disabled, emptyValue });
+  latest.current = { value, onChange, min, max, step, digits, disabled, emptyValue };
 
   // The outside value shows, except while the user is typing.
   useEffect(() => {
@@ -40,8 +46,8 @@ export default function NumberField({ value, min, max, step, onChange, disabled,
   }, [value, digits]);
 
   const commit = () => {
-    const { value: v0, onChange: f, min: lo, max: hi, digits: d } = latest.current;
-    const v = parseNum(draftRef.current, lo, hi);
+    const { value: v0, onChange: f, min: lo, max: hi, digits: d, emptyValue: empty } = latest.current;
+    const v = parseNumOr(draftRef.current, lo, hi, empty);
     setDraft(showNum(v ?? v0, d));
     if (v !== null && v !== v0) f(v);
   };
@@ -83,6 +89,8 @@ export default function NumberField({ value, min, max, step, onChange, disabled,
       title={title}
       data-testid={testid}
       value={draft}
+      placeholder={placeholder}
+      autoFocus={autoFocus}
       disabled={disabled}
       spellCheck={false}
       autoComplete="off"

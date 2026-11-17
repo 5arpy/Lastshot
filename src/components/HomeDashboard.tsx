@@ -4,6 +4,8 @@ import SourcePicker, { sourceLabel } from "./SourcePicker";
 import { formatBytes } from "../lib/format";
 import { cn } from "../utils/cn";
 import { clockTime } from "./ControlBar";
+import { recordLimitText, timeLeftText } from "../lib/recordOptions";
+import { useCountdown } from "../lib/useCountdown";
 
 interface Props {
   stats: EngineStats;
@@ -21,6 +23,8 @@ interface Props {
   onStartRecording: () => void;
   onStopRecording: () => void;
   onPauseRecording: (paused: boolean) => void;
+  /** Stops the countdown before a recording (the recording does not start). */
+  onCancelCountdown: () => void;
   /** Opens the snip bar on Record: pick an area to record. */
   onRecordArea: () => void;
   /** Records the full screen or one window / app. */
@@ -140,6 +144,7 @@ export default function HomeDashboard({
   onSelectDuration,
   onStopRecording,
   onPauseRecording,
+  onCancelCountdown,
   onRecordArea,
   onRecordSource,
   onMarker,
@@ -153,6 +158,11 @@ export default function HomeDashboard({
   const on = stats.state === "buffering" || stats.state === "flushing";
   const starting = stats.state === "starting" || stats.state === "recovering";
   const rec = bar?.recording ?? null;
+  const countdown = useCountdown(rec ? null : bar?.countdown);
+  const pauseKey = bar?.hotkeyPause || settings.hotkeyPause;
+  // Time left ticks with the recording clock between the backend's updates.
+  const secondsLeft =
+    rec?.seconds_left != null ? Math.max(0, rec.seconds_left - Math.max(0, recordingSeconds - rec.seconds)) : null;
   const err = (stats.audio_error ?? "").toLowerCase();
   const micProblem = stats.audio_mic && /mic/.test(err) ? stats.audio_error : null;
   const pcProblem = stats.audio_system && stats.audio_error && !micProblem ? stats.audio_error : null;
@@ -278,23 +288,48 @@ export default function HomeDashboard({
             bar?.finishing != null
               ? `Cutting the recording to the area… ${Math.round(bar.finishing * 100)}%`
               : rec
-                ? `Recording ${bar?.area ? `an area (${bar.area})` : settings.captureSource?.kind === "window" ? sourceLabel(settings.captureSource) : "the whole screen"} · ${formatBytes(bar?.bytes ?? 0)}. Press the shortcut again to stop.`
-                : `Now: ${sourceLabel(settings.captureSource)}. Or one window / app, or an area. No time limit.`
+                ? `Recording ${bar?.area ? `an area (${bar.area})` : settings.captureSource?.kind === "window" ? sourceLabel(settings.captureSource) : "the whole screen"} · ${formatBytes(rec.bytes ?? bar?.bytes ?? 0)}. Press the shortcut again to stop.`
+                : countdown != null
+                  ? "Switch to your game: the recording starts when the count reaches zero."
+                  : `Now: ${sourceLabel(settings.captureSource)}. Or one window / app, or an area. ${recordLimitText(settings.recordMaxMinutes, settings.recordMaxGb)}${settings.recordCountdown > 0 ? ` Starts after a ${settings.recordCountdown} s countdown.` : ""}`
           }
           hotkey={settings.hotkeyRecord}
-          tone={rec ? "live" : "plain"}
+          tone={rec || countdown != null ? "live" : "plain"}
         >
-          {rec ? (
+          {countdown != null && !rec ? (
+            <div className="flex items-center gap-2" data-testid="record-countdown">
+              <span className="flex flex-1 items-center gap-2 text-[15px] font-semibold text-ink" aria-live="polite">
+                <span className="h-3 w-3 animate-pulse rounded-full bg-red-500" />
+                Recording in <span className="font-mono text-[20px] tabular-nums">{countdown}</span>…
+              </span>
+              <button
+                type="button"
+                onClick={onCancelCountdown}
+                className="rounded-lg border border-line bg-surface-2 px-3 py-2 text-[12px] font-medium text-ink hover:border-red-500/50 hover:text-danger"
+              >
+                Cancel
+              </button>
+            </div>
+          ) : rec ? (
             <>
             <div className="flex items-center gap-2">
               <span className="flex flex-1 items-center gap-2 font-mono text-[18px] font-semibold tabular-nums text-ink">
                 <span className={cn("h-3 w-3 rounded-full", rec.paused ? "bg-amber-400" : "animate-pulse bg-red-500")} />
                 {clockTime(recordingSeconds)}
                 {rec.paused && <span className="text-[11px] font-medium text-warn">paused</span>}
+                {!rec.paused && secondsLeft != null && (
+                  <span
+                    className={cn("font-sans text-[11px] font-medium", secondsLeft < 60 ? "text-warn" : "text-ink-3")}
+                    title="Then it stops and saves by itself (time or size limit, or a full drive)"
+                  >
+                    {timeLeftText(secondsLeft)}
+                  </span>
+                )}
               </span>
               <button
                 type="button"
                 onClick={() => onPauseRecording(!rec.paused)}
+                title={pauseKey ? `Shortcut: ${pauseKey}` : undefined}
                 className="rounded-lg border border-line bg-surface-2 px-3 py-2 text-[12px] font-medium text-ink hover:border-line-3"
               >
                 {rec.paused ? "Resume" : "Pause"}
@@ -308,6 +343,11 @@ export default function HomeDashboard({
                 Stop &amp; save
               </button>
             </div>
+            {rec.notice && (
+              <div role="status" className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-warn">
+                {rec.notice}
+              </div>
+            )}
             <div className="flex items-center gap-2 text-[11px]">
               <button
                 type="button"

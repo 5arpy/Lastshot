@@ -13,6 +13,15 @@ export function parseNum(s: string, min: number, max: number): number | null {
   return Math.min(max, Math.max(min, v));
 }
 
+/**
+ * Like parseNum, but an emptied field means `empty` (e.g. 0 = off) when the
+ * field has one; without it, empty is "not a number" and the old value stays.
+ */
+export function parseNumOr(s: string, min: number, max: number, empty?: number): number | null {
+  if (empty !== undefined && !s.trim()) return empty;
+  return parseNum(s, min, max);
+}
+
 /** One step up (dir 1) or down (-1) from `v`, on the step grid, clamped. */
 export function stepNum(v: number, step: number, dir: 1 | -1, min: number, max: number): number {
   const n = Math.round((v + dir * step) / step) * step;

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { lastshot, type HotkeyStatus } from "../lib/bridge";
+import { DEFAULT_SETTINGS, lastshot, type HotkeyStatus } from "../lib/bridge";
 import type {
   AppSettings,
   AudioDevice,
@@ -17,6 +17,8 @@ import ShortcutsSettings from "./ShortcutsSettings";
 import { acceleratorFromEvent } from "../lib/accelerator";
 import { screenshotsDir, shownPath } from "../lib/pathDisplay";
 import { getTheme, onThemeChange, setTheme, type ThemeChoice } from "../lib/theme";
+import { OS_HOTKEYS, osHotkeyClash, type OsHotkeyAction } from "../lib/osHotkeys";
+import { CountdownRow, ScreenRecordingMore, VideoQualityRows } from "./RecordingSettings";
 
 interface Props {
   settings: AppSettings;
@@ -293,7 +295,14 @@ export default function SettingsPanel({
   profiles,
   diagnostics,
 }: Props) {
-  const [recording, setRecording] = useState<"save" | "toggle" | "snip" | "record" | null>(null);
+  const [recording, setRecording] = useState<OsHotkeyAction | null>(null);
+  /** Keys that could not be used (another Windows-wide hotkey has them). */
+  const [hotkeyErr, setHotkeyErr] = useState<{ action: OsHotkeyAction; text: string } | null>(null);
+  useEffect(() => {
+    if (!hotkeyErr) return;
+    const t = setTimeout(() => setHotkeyErr(null), 6000);
+    return () => clearTimeout(t);
+  }, [hotkeyErr]);
   const [theme, setThemeState] = useState<ThemeChoice>(getTheme);
   useEffect(() => onThemeChange(setThemeState), []);
   const [hotkeyStatus, setHotkeyStatus] = useState<HotkeyStatus | null>(null);
@@ -306,9 +315,8 @@ export default function SettingsPanel({
       alive = false;
       off?.();
     };
-  }, [settings.hotkeySave, settings.hotkeyToggle, settings.hotkeySnip, settings.hotkeyRecord]);
+  }, [settings.hotkeySave, settings.hotkeyToggle, settings.hotkeySnip, settings.hotkeyRecord, settings.hotkeyPause]);
   const retryHotkeys = () => void lastshot.retryHotkeys().then(setHotkeyStatus).catch(() => undefined);
-  const [bitrate, setBitrate] = useState(settings.bitrateKbps);
   const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([]);
   const [scanningDevices, setScanningDevices] = useState(false);
 
@@ -322,10 +330,6 @@ export default function SettingsPanel({
       monitors[0];
     return isIntegratedAdapter(active?.adapter);
   }, [stats.integrated_gpu, monitors, settings.monitorIndex]);
-
-  useEffect(() => {
-    setBitrate(settings.bitrateKbps);
-  }, [settings.bitrateKbps]);
 
   const refreshAudioDevices = async () => {
     setScanningDevices(true);
@@ -353,21 +357,55 @@ export default function SettingsPanel({
         return;
       }
       if (!accel) return;
-      const patch =
-        recording === "save"
-          ? { hotkeySave: accel }
-          : recording === "toggle"
-            ? { hotkeyToggle: accel }
-            : recording === "record"
-              ? { hotkeyRecord: accel }
-              : { hotkeySnip: accel };
-      onChange(patch);
+      const hk = OS_HOTKEYS.find((o) => o.action === recording)!;
       setRecording(null);
+      const clash = osHotkeyClash(settings, hk.field, accel);
+      if (clash) {
+        setHotkeyErr({ action: recording, text: `${accel} is already the shortcut for ${clash.label}. Pick other keys.` });
+        return;
+      }
+      setHotkeyErr(null);
+      if (settings[hk.field] !== accel) onChange({ [hk.field]: accel } as Partial<AppSettings>);
     };
+    // Clicking elsewhere or leaving the window stops listening.
+    const cancel = () => setRecording(null);
     window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [recording, onChange]);
+    window.addEventListener("mousedown", cancel);
+    window.addEventListener("blur", cancel);
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("mousedown", cancel);
+      window.removeEventListener("blur", cancel);
+    };
+  }, [recording, onChange, settings]);
 
+  /** A Windows-wide hotkey: click to record, a red badge when another app has it. */
+  const hotkey = (action: OsHotkeyAction) => {
+    const field = OS_HOTKEYS.find((o) => o.action === action)!.field;
+    return (
+      <div className="flex flex-col items-end gap-1">
+        <div className="flex items-center gap-2">
+          <HotkeyRecorder
+            value={withDefaults[field]}
+            recording={recording === action}
+            onStart={() => {
+              setHotkeyErr(null);
+              setRecording(action);
+            }}
+          />
+          <HotkeyBadge status={hotkeyStatus} action={action} onRetry={retryHotkeys} />
+        </div>
+        {hotkeyErr?.action === action && (
+          <span role="alert" className="max-w-[260px] text-right text-[11px] text-danger">
+            {hotkeyErr.text}
+          </span>
+        )}
+      </div>
+    );
+  };
+
+  // The recording options never see a missing field (a backend from before they existed).
+  const withDefaults = useMemo(() => ({ ...DEFAULT_SETTINGS, ...settings }), [settings]);
   const projectedRam = ((settings.bufferSeconds * settings.bitrateKbps * 1000) / 8) * 1.6;
   // Game Mode caps the *effective* rate without destroying the saved
   // preference. Integrated GPUs share the die with the game and are capped harder.
@@ -389,32 +427,7 @@ export default function SettingsPanel({
         description="What gets kept in memory, ready to save with a hotkey."
         advanced={
           <>
-            <Row label="Video codec" hint="HEVC is smaller at the same quality, but some apps and phones cannot play it.">
-              <Choice
-                options={[
-                  { value: "h264" as const, label: "H.264" },
-                  { value: "hevc" as const, label: "HEVC" },
-                ]}
-                value={settings.codec}
-                onPick={(c) => onChange({ codec: c })}
-              />
-            </Row>
-            <Row
-              label={`Bitrate: ${(bitrate / 1000).toFixed(0)} Mbit/s`}
-              hint={`Memory used by the buffer: about ${formatBytes(projectedRam)}.`}
-            >
-              <input
-                type="range"
-                className="cf-range w-44"
-                min={3000}
-                max={60000}
-                step={1000}
-                value={bitrate}
-                onChange={(e) => setBitrate(Number(e.target.value))}
-                onPointerUp={() => onChange({ bitrateKbps: bitrate })}
-                onKeyUp={() => onChange({ bitrateKbps: bitrate })}
-              />
-            </Row>
+            <VideoQualityRows settings={withDefaults} stats={stats} onChange={onChange} />
             <Row
               label="Save power under pressure (ECO)"
               hint="Shortens the buffer on low battery or when RAM runs low."
@@ -459,7 +472,8 @@ export default function SettingsPanel({
             )}
             <div className="flex flex-wrap items-center justify-between gap-2 py-3">
               <span className="text-[11px] text-ink-3">
-                Frame rate, codec and screen apply after a restart. Buffer length and bitrate change live.
+                Frame rate, codec, the encoder options and screen apply after a restart. Buffer length and bitrate change
+                live.
               </span>
               <button
                 type="button"
@@ -666,64 +680,24 @@ export default function SettingsPanel({
         title="Shortcuts"
         description="These work everywhere, also inside full-screen games. Click one, then press the new keys."
       >
-        <Row label="Save replay">
-          <div className="flex items-center gap-2">
-            <HotkeyRecorder
-              value={settings.hotkeySave}
-              recording={recording === "save"}
-              onStart={() => setRecording("save")}
-            />
-            <HotkeyBadge status={hotkeyStatus} action="save" onRetry={retryHotkeys} />
-          </div>
-        </Row>
-        <Row label="Start / stop screen recording">
-          <div className="flex items-center gap-2">
-            <HotkeyRecorder
-              value={settings.hotkeyRecord}
-              recording={recording === "record"}
-              onStart={() => setRecording("record")}
-            />
-            <HotkeyBadge status={hotkeyStatus} action="record" onRetry={retryHotkeys} />
-          </div>
-        </Row>
-        <Row label="Take a screenshot">
-          <div className="flex items-center gap-2">
-            <HotkeyRecorder
-              value={settings.hotkeySnip}
-              recording={recording === "snip"}
-              onStart={() => setRecording("snip")}
-            />
-            <HotkeyBadge status={hotkeyStatus} action="snip" onRetry={retryHotkeys} />
-          </div>
-        </Row>
-        <Row label="Turn instant replay on / off">
-          <div className="flex items-center gap-2">
-            <HotkeyRecorder
-              value={settings.hotkeyToggle}
-              recording={recording === "toggle"}
-              onStart={() => setRecording("toggle")}
-            />
-            <HotkeyBadge status={hotkeyStatus} action="toggle" onRetry={retryHotkeys} />
-          </div>
-        </Row>
+        <Row label="Save replay">{hotkey("save")}</Row>
+        <Row label="Start / stop screen recording">{hotkey("record")}</Row>
+        <Row label="Pause / resume screen recording">{hotkey("pause")}</Row>
+        <Row label="Take a screenshot">{hotkey("snip")}</Row>
+        <Row label="Turn instant replay on / off">{hotkey("toggle")}</Row>
       </Section>
 
       {/* --------------------------------------------------- Screen recording */}
       <Section
         id="screen"
         title="Screen recording"
-        description="Records until you stop it. Uses the same quality as instant replay (frame rate here, bitrate under Instant replay › Advanced), and the same sound settings."
+        description="Records until you stop it, or until a limit under More options. Uses the same quality and frame rate as instant replay (Instant replay › Advanced), and the same sound settings."
+        advancedLabel="More options"
+        advanced={<ScreenRecordingMore settings={withDefaults} onChange={onChange} />}
       >
-        <Row label="Start / stop shortcut">
-          <div className="flex items-center gap-2">
-            <HotkeyRecorder
-              value={settings.hotkeyRecord}
-              recording={recording === "record"}
-              onStart={() => setRecording("record")}
-            />
-            <HotkeyBadge status={hotkeyStatus} action="record" onRetry={retryHotkeys} />
-          </div>
-        </Row>
+        <Row label="Start / stop shortcut">{hotkey("record")}</Row>
+        <Row label="Pause / resume shortcut">{hotkey("pause")}</Row>
+        <CountdownRow value={withDefaults.recordCountdown} onChange={(v) => onChange({ recordCountdown: v })} />
         <FolderRow
           label="Save recordings to"
           hint={settings.recordingDir ? "Recordings here still show up in Clips." : "The save location (same as replays)."}
@@ -769,16 +743,7 @@ export default function SettingsPanel({
 
       {/* -------------------------------------------------------- Screenshots */}
       <Section id="snip" title="Screenshots" description="Drag a box, click a window, or press F for the whole screen. Then draw on it, and press Enter.">
-        <Row label="Shortcut">
-          <div className="flex items-center gap-2">
-            <HotkeyRecorder
-              value={settings.hotkeySnip}
-              recording={recording === "snip"}
-              onStart={() => setRecording("snip")}
-            />
-            <HotkeyBadge status={hotkeyStatus} action="snip" onRetry={retryHotkeys} />
-          </div>
-        </Row>
+        <Row label="Shortcut">{hotkey("snip")}</Row>
         <Row label="Copy to the clipboard" hint="Ready to paste with Ctrl+V.">
           <Toggle
             on={settings.screenshotCopy}

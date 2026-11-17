@@ -165,7 +165,8 @@ export function Choice<T extends string | number>({
   value,
   onPick,
 }: {
-  options: { value: T; label: string }[];
+  /** `title` explains an option on hover; `dim` marks one that will not work as picked (still selectable). */
+  options: { value: T; label: string; title?: string; dim?: boolean }[];
   value: T;
   onPick: (v: T) => void;
 }) {
@@ -175,12 +176,15 @@ export function Choice<T extends string | number>({
         <button
           key={String(o.value)}
           type="button"
+          aria-pressed={value === o.value}
+          title={o.title}
           onClick={() => onPick(o.value)}
           className={cn(
             "rounded border px-2.5 py-1 font-mono text-[11px] transition-colors",
             value === o.value
               ? "border-accent bg-accent font-semibold text-white"
               : "border-line bg-surface-2 text-ink-3 hover:text-ink",
+            o.dim && value !== o.value && "border-dashed opacity-60",
           )}
         >
           {o.label}

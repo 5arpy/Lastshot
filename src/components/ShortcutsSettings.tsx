@@ -34,6 +34,7 @@ import "../popout/frameKeys";
 import "../editor/keyTables";
 import { cn } from "../utils/cn";
 import { Keys } from "./ShortcutsOverlay";
+import { OS_HOTKEYS, osCombo, type OsHotkeyField } from "../lib/osHotkeys";
 
 const MODIFIER_KEYS = new Set(["Control", "Alt", "Shift", "Meta", "CapsLock", "NumLock", "ScrollLock", "AltGraph"]);
 const ORDER = [APP_SCOPE, "clips", "viewer", "frame", "editor", "snip"];
@@ -54,14 +55,8 @@ const rank = (s: string) => {
 };
 
 /** The global hotkeys: Windows hands them to Lastshot first, even in games. */
-const OS_KEYS = [
-  { field: "hotkeySave", label: "Save a replay" },
-  { field: "hotkeyRecord", label: "Start / stop screen recording" },
-  { field: "hotkeySnip", label: "Take a screenshot" },
-  { field: "hotkeyToggle", label: "Instant replay on / off" },
-] as const;
-type OsField = (typeof OS_KEYS)[number]["field"];
-const osCombo = (accel: string) => normalizeCombo(accel.replace(/\bWin\b/g, "Meta"));
+const OS_KEYS = OS_HOTKEYS;
+type OsField = OsHotkeyField;
 
 const keyOf = (s: { scope: string; id: string }) => `${s.scope}:${s.id}`;
 

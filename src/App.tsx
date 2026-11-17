@@ -1936,7 +1936,8 @@ export default function App() {
               <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 fill-none stroke-current" strokeWidth="1.5">
                 <path d="M2 4h8v7H2zM6 2h8v7" />
               </svg>
-              Pop-outs
+              {/* Icons only on a narrow window (Interface size 125-150 % on a small window), so the tabs keep their room. */}
+              <span className="max-[860px]:hidden">Pop-outs</span>
               {frameCount > 0 && <span className="rounded-full bg-accent/25 px-1.5 font-mono text-[10px] text-accent-fg">{frameCount}</span>}
             </button>
           )}
@@ -1959,7 +1960,7 @@ export default function App() {
             <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 fill-none stroke-current" strokeWidth="1.5">
               <path d="M2 5V3.5A1.5 1.5 0 0 1 3.5 2H5M11 2h1.5A1.5 1.5 0 0 1 14 3.5V5M14 11v1.5a1.5 1.5 0 0 1-1.5 1.5H11M5 14H3.5A1.5 1.5 0 0 1 2 12.5V11" />
             </svg>
-            Screenshot
+            <span className="max-[860px]:hidden">Screenshot</span>
           </button>
           <button
             type="button"
@@ -1970,7 +1971,7 @@ export default function App() {
             <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 fill-none stroke-current" strokeWidth="1.5">
               <path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 1.5H12.5A1.5 1.5 0 0 1 14 6v6.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12.5v-8z" />
             </svg>
-            <span className="font-sans">Folder</span>
+            <span className="font-sans max-[860px]:hidden">Folder</span>
           </button>
         </div>
       </nav>

@@ -40,6 +40,15 @@ pub fn is_test_instance() -> bool {
     std::env::var_os("LASTSHOT_TEST_INSTANCE").is_some()
 }
 
+/// Test copies keep every window far off screen, without a taskbar button or
+/// the focus, so they never cover the user's work. Inside a disposable VM
+/// (the Windows Sandbox test harness) `LASTSHOT_TEST_ONSCREEN=1` shows them
+/// like the real app instead, so a test can see and click them. Only read
+/// together with `LASTSHOT_TEST_INSTANCE`.
+pub fn test_offscreen() -> bool {
+    is_test_instance() && std::env::var("LASTSHOT_TEST_ONSCREEN").as_deref() != Ok("1")
+}
+
 /// Whether a feature that lives in the window must run while in the tray.
 pub fn window_needed_in_background(s: &crate::settings::Settings) -> bool {
     s.auto_switch_profiles || s.privacy_pause_when_unfocused || s.autosave_on_game_exit || s.adaptive_eco
@@ -58,7 +67,7 @@ pub fn ensure_main(app: &AppHandle, visible: bool) -> Option<tauri::WebviewWindo
     let mut conf = conf;
     conf.visible = visible;
     conf.create = true;
-    let test = is_test_instance();
+    let test = test_offscreen();
     if test {
         // Test copies never cover the user's screen or take the focus: made
         // hidden, moved far off screen, then shown without activation.

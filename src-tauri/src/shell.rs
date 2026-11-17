@@ -295,7 +295,7 @@ fn screens(app: &AppHandle) -> Vec<(i32, i32, u32, u32)> {
 pub fn cursor(app: &AppHandle) -> Option<(i32, i32)> {
     // Test copies use the pretend cursor only: a test window must never
     // follow the user's mouse onto the screen.
-    if test_instance() {
+    if crate::startup::test_offscreen() {
         return *TEST_CURSOR.lock();
     }
     app.cursor_position().ok().map(|p| (p.x.round() as i32, p.y.round() as i32))
@@ -306,7 +306,7 @@ pub fn cursor(app: &AppHandle) -> Option<(i32, i32)> {
 /// no: Windows then flashes the taskbar button, which is the polite answer.
 /// Test copies never take the focus.
 pub fn bring_to_front(win: &WebviewWindow) {
-    if test_instance() {
+    if crate::startup::test_offscreen() {
         show_quietly(win);
         return;
     }
@@ -354,7 +354,7 @@ fn build(app: &AppHandle, label: &str, at: Option<(i32, i32)>, size: (f64, f64),
     if let Some(w) = app.get_webview_window(label) {
         return Ok(w);
     }
-    let test = test_instance();
+    let test = crate::startup::test_offscreen();
     let (w, h) = (size.0.max(MIN_W), size.1.max(MIN_H));
     let win = tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::default())
         .title("Lastshot")

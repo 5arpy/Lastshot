@@ -2,7 +2,7 @@ import { type ReactNode, type Ref, useCallback, useEffect, useImperativeHandle, 
 import { EPS, type Item, type Marker, type Timeline, type Track, end, newId, timelineEnd, withLinked } from "./model";
 import { type EditOpts, type Move, type PlaceMode, itemsInBox, moveItems, patchMarker, place, rollEdit, slipItem, splitAt, trimItem } from "./ops";
 import { nearest, snapPoints, snapSpan } from "./snap";
-import { type TlView, edgeNear, edgePx, endRoom, rulerLabel, tickStep, timeToX, viewOfSpan, xToTime, zoomAt } from "./view";
+import { type TlView, autoScrollSpeed, edgeNear, edgePx, endRoom, rulerLabel, tickStep, timeToX, viewOfSpan, xToTime, zoomAt } from "./view";
 
 /**
  * Timeline engine: the view. Generic over the item type, so the audio editor
@@ -51,6 +51,8 @@ export interface Hit {
 export interface TimelineApi {
   hit: (clientX: number, clientY: number) => Hit;
   lanesWidth: () => number;
+  /** A drag (move, trim, scrub, box...) is in progress. */
+  dragging: () => boolean;
 }
 
 /** Where a right-click landed. */
@@ -69,6 +71,8 @@ export interface TimelineViewProps<I extends Item> {
   view: TlView;
   onView: (v: TlView) => void;
   snapping: boolean;
+  /** Edge auto-scroll while dragging: speed factor (1 normal, 0 off). */
+  edgeScroll?: number;
   /** select; blade cuts on click; slip drags what a clip shows (Y). */
   tool: "select" | "blade" | "slip";
   /** Ripple trims (and Ctrl while trimming). */
@@ -184,6 +188,21 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
   // ------------------------------------------------------------ geometry
   const laneX = (clientX: number) => clientX - (lanesRef.current?.getBoundingClientRect().left ?? 0);
   const timeAt = (clientX: number) => Math.max(0, xToTime(pRef.current.view, laneX(clientX)));
+  const rulerEl = useRef<HTMLDivElement | null>(null);
+  /** The point is on the ruler (by position: the playhead's grab strip lies over it). */
+  const inRuler = (clientX: number, clientY: number) => {
+    const r = rulerEl.current?.getBoundingClientRect();
+    return !!r && clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom;
+  };
+  /** The marker at that point of the ruler (within its 12 px flag), if any. */
+  const markerAt = (clientX: number, clientY: number) => {
+    if (!inRuler(clientX, clientY)) return null;
+    const P = pRef.current;
+    const t = timeAt(clientX);
+    let best: Marker | null = null;
+    for (const m of P.tl.markers) if (Math.abs(m.t - t) * P.view.pxPerSec <= 7 && (!best || Math.abs(m.t - t) < Math.abs(best.t - t))) best = m;
+    return best;
+  };
   const rowAt = (clientY: number): { track: Track | null; below: boolean } => {
     const body = bodyRef.current;
     if (!body) return { track: null, below: false };
@@ -200,6 +219,7 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
         return { ...r, t: timeAt(cx) };
       },
       lanesWidth: () => width,
+      dragging: () => !!drag.current,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [rows, width],
@@ -212,6 +232,7 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
       if (!el) return;
       const x = timeToX(pRef.current.view, t);
       el.style.transform = `translateX(${HEAD + x}px)`;
+      el.dataset.t = String(t); // the exact time, for tests and tools (the timecode shows frames)
       el.style.display = x < -2 || x > width + 2 ? "none" : "block";
     };
     place(p.clock.time);
@@ -234,14 +255,16 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
     g.clearRect(0, 0, width, RULER_H);
     const step = tickStep(v.pxPerSec);
     const minor = step / (step >= 60 ? 6 : step >= 1 ? 5 : 2);
-    const t0 = Math.floor(v.scroll / minor) * minor;
+    const i0 = Math.floor(v.scroll / minor);
     const t1 = v.scroll + width / v.pxPerSec;
     g.strokeStyle = line;
     g.fillStyle = ink;
     g.font = "10px ui-monospace, Consolas, monospace";
     g.textBaseline = "top";
     g.beginPath();
-    for (let t = t0; t <= t1 + minor; t += minor) {
+    // By index, not t += minor: adding 0.2 five times gives 10.9999999,
+    // which drew "0:10" under the 11 s tick (every label a second behind).
+    for (let i = i0, t = i0 * minor; t <= t1 + minor; i++, t = i * minor) {
       const x = Math.round(timeToX(v, t)) + 0.5;
       const major = Math.abs(t / step - Math.round(t / step)) < 1e-6;
       g.moveTo(x, major ? 10 : 18);
@@ -336,21 +359,30 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
   // ------------------------------------------------------------ auto-scroll at the sides while dragging
   const lastPtr = useRef<Ptr | null>(null);
   const autoRaf = useRef(0);
+  // When the pointer entered the edge zone and the last step's time (the
+  // loop restarts on every pointer move; these keep the timing continuous).
+  const autoT = useRef<{ since: number; last: number } | null>(null);
   const autoScroll = () => {
     cancelAnimationFrame(autoRaf.current);
-    const step = () => {
+    const step = (now: number) => {
       const P = pRef.current;
       const ptr = lastPtr.current;
       const d = drag.current;
       const lanes = lanesRef.current;
-      if (!ptr || !d || !lanes || (d.kind !== "move" && d.kind !== "trim" && d.kind !== "marquee" && d.kind !== "scrub")) return;
+      const stop = () => void (autoT.current = null);
+      if (!ptr || !d || !lanes || (d.kind !== "move" && d.kind !== "trim" && d.kind !== "marquee" && d.kind !== "scrub")) return stop();
       const r = lanes.getBoundingClientRect();
       const x = ptr.clientX - r.left;
       const push = x < AUTO_PX ? x - AUTO_PX : x > r.width - AUTO_PX ? x - (r.width - AUTO_PX) : 0;
-      if (!push || (push < 0 && P.view.scroll <= 0)) return;
-      // Faster the further out, up to ~half a screen a second.
-      const px = Math.max(-24, Math.min(24, push * 0.4));
-      P.onView({ ...P.view, scroll: Math.max(0, P.view.scroll + px / P.view.pxPerSec) });
+      const k = P.edgeScroll ?? 1;
+      if (!push || !k || (push < 0 && P.view.scroll <= 0)) return stop();
+      // Speed by elapsed time (same at any refresh rate), capped; a stalled
+      // frame never jumps more than 50 ms worth.
+      const a = autoT.current ?? (autoT.current = { since: now, last: now });
+      const dt = Math.min(0.05, Math.max(0, (now - a.last) / 1000));
+      a.last = now;
+      const px = autoScrollSpeed(push, AUTO_PX, r.width, (now - a.since) / 1000) * dt * k;
+      if (px) P.onView({ ...P.view, scroll: Math.max(0, P.view.scroll + px / P.view.pxPerSec) });
       requestAnimationFrame(() => {
         if (d.kind === "scrub") P.clock.seek(timeAt(ptr.clientX));
         else laneMove(ptr);
@@ -763,7 +795,7 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
       if (!P.onContext) return;
       e.preventDefault();
       const el = e.target as HTMLElement;
-      const area = el.closest?.("[data-ruler]") ? "ruler" : e.clientX - (rootRef.current?.getBoundingClientRect().left ?? 0) < HEAD ? "header" : "lanes";
+      const area = el.closest?.("[data-ruler]") || inRuler(e.clientX, e.clientY) ? "ruler" : e.clientX - (rootRef.current?.getBoundingClientRect().left ?? 0) < HEAD ? "header" : "lanes";
       const it = area === "lanes" ? (itemOf(e.target) ?? undefined) : undefined;
       if (it && !P.selection.has(it.id)) P.onSelection(withLinked(P.tl, [it.id]));
       P.onContext(e, { item: it, track: area === "ruler" ? null : rowAt(e.clientY).track, t: timeAt(e.clientX), area });
@@ -773,7 +805,18 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
   );
 
   return (
-    <div ref={rootRef} className="relative flex h-full min-h-0 flex-col select-none" onContextMenu={contextAt}>
+    <div
+      ref={rootRef}
+      className="relative flex h-full min-h-0 flex-col select-none"
+      onContextMenu={contextAt}
+      // Double-click a marker: name it. Found by position, because the click
+      // lands on the ruler (pointer capture) or on the playhead's grab strip
+      // (a new marker sits right under the playhead).
+      onDoubleClick={(e) => {
+        const m = markerAt(e.clientX, e.clientY);
+        if (m) p.onMarkerEdit?.(m);
+      }}
+    >
       {/* Overview: the whole edit, the shown part as a box */}
       <div className="flex shrink-0 border-b border-line bg-surface-2" style={{ height: OVERVIEW_H }}>
         <div className="shrink-0 border-r border-line" style={{ width: HEAD }} />
@@ -793,6 +836,7 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
       <div className="flex shrink-0 border-b border-line bg-surface" style={{ height: RULER_H }}>
         <div className="shrink-0 border-r border-line" style={{ width: HEAD }} />
         <div
+          ref={rulerEl}
           data-ruler
           className="relative flex-1 cursor-text overflow-hidden"
           onPointerDown={onRulerDown}
@@ -809,7 +853,6 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
                 key={m.id}
                 data-marker={m.id}
                 title={`${m.label || "Marker"} · ${fmt(m.t)} · drag to move, double-click to name, right-click to delete`}
-                onDoubleClick={() => p.onMarkerEdit?.(m)}
                 className="absolute top-0 z-10 flex h-full cursor-ew-resize flex-col items-center"
                 style={{ left: x - 6, width: 12 }}
               >
@@ -842,6 +885,9 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
           <div
             ref={lanesRef}
             data-lanes
+            // The shown view, for tests and tools (zoom in px per second, scroll in seconds).
+            data-pps={v.pxPerSec}
+            data-scroll={v.scroll}
             className={`relative flex-1 overflow-hidden ${p.tool === "blade" ? "cursor-crosshair" : p.tool === "slip" ? "cursor-col-resize" : hoverEdge ? "cursor-ew-resize" : ""}`}
             onPointerDown={onLaneDown}
             onPointerMove={onLaneMove}
@@ -851,7 +897,8 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
               // On a clip edge: the playhead goes to that cut. On a clip: its settings.
               const edge = edgeAt(e.clientX, e.clientY);
               if (edge) return p.clock.seek(edge.t);
-              const it = itemOf(e.target);
+              // The target is the lanes (pointer capture), so look under the pointer.
+              const it = itemOf(document.elementFromPoint(e.clientX, e.clientY));
               if (it) p.onItemDoubleClick?.(it);
             }}
           >
@@ -931,7 +978,7 @@ export default function TimelineView<I extends Item>(p: TimelineViewProps<I>) {
       </div>
 
       {/* Playhead over ruler and tracks */}
-      <div ref={playRef} className="pointer-events-none absolute bottom-0 left-0 z-30 w-px bg-red-500" style={{ top: OVERVIEW_H }}>
+      <div ref={playRef} data-playhead className="pointer-events-none absolute bottom-0 left-0 z-30 w-px bg-red-500" style={{ top: OVERVIEW_H }}>
         <span className="absolute -left-[5px] top-0 h-0 w-0 border-x-[5.5px] border-t-[8px] border-x-transparent border-t-red-500" />
         {/* Grab the line anywhere along its height to scrub. */}
         <span

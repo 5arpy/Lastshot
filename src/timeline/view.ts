@@ -109,7 +109,8 @@ export function tickStep(pxPerSec: number, minPx = 72): number {
 /** Ruler text for a time; finer steps show tenths or frames. */
 export function rulerLabel(t: number, step: number, fps = 60): string {
   const neg = t < 0;
-  const s = Math.abs(t);
+  // 10.9999999 (float steps) is 11, not "0:10".
+  const s = Math.round(Math.abs(t) * 1e6) / 1e6;
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
   const sec = Math.floor(s % 60);
@@ -178,3 +179,21 @@ export function edgeNear<I extends Item>(items: I[], t: number, tol: number): { 
 
 /** Edge hit size in pixels: a little wider when zoomed far out. */
 export const edgePx = (pxPerSec: number) => (pxPerSec < 5 ? 10 : 8);
+
+/**
+ * Edge auto-scroll while dragging, in px per second (signed). `push` is how
+ * far the pointer is into the edge zone (negative = left side) and keeps
+ * growing past the edge of the lanes. Slow when just touching the zone
+ * (~80 px/s), ~500 px/s at the very edge, faster the further out, never more
+ * than about one view width a second. Ramps up over the first 0.4 s so a
+ * brief touch of the edge barely moves the view. Time-based, so it is the
+ * same at 60 Hz and 144 Hz (callers multiply by the frame time).
+ */
+export function autoScrollSpeed(push: number, zone: number, width: number, heldSec: number): number {
+  if (!push || zone <= 0) return 0;
+  const depth = Math.abs(push);
+  const max = Math.min(1600, Math.max(400, width));
+  const v = Math.min(max, 80 + (Math.min(depth, zone) / zone) * 420 + Math.max(0, depth - zone) * 8);
+  const ramp = Math.min(1, 0.35 + (Math.max(0, heldSec) / 0.4) * 0.65);
+  return Math.sign(push) * v * ramp;
+}

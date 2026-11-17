@@ -33,7 +33,7 @@ import {
 } from "../timeline/ops";
 import { History } from "../timeline/history";
 import TimelineView, { type ContextHit, type EditPhase, type TimelineApi } from "../timeline/TimelineView";
-import { type TlView, clampScroll, clampZoom, easeView, fitView, follow, keyZoomAnchor, parseTime, timecode, zoomAt } from "../timeline/view";
+import { type TlView, clampScroll, clampZoom, easeView, fitView, follow, keyZoomAnchor, parseTime, reveal, timecode, zoomAt } from "../timeline/view";
 import { cn } from "../utils/cn";
 import { editorApi } from "./api";
 import { drawFrame } from "./compose";
@@ -283,6 +283,8 @@ export default function EditorView(props: EditorProps) {
   );
   useEffect(() => () => cancelAnimationFrame(glide.current), []);
   const [followMode, setFollowMode] = usePersist<"off" | "page" | "smooth">("follow", "page");
+  // Edge auto-scroll while dragging a clip, a trim, a box or the playhead.
+  const [edgeScroll, setEdgeScroll] = usePersist<number>("edgeScroll", 1);
   const followRef = useRef(followMode);
   followRef.current = followMode;
   const [flash, setFlash] = useState<string | null>(null);
@@ -319,11 +321,28 @@ export default function EditorView(props: EditorProps) {
   }, []);
 
   // Keep the playhead in view while playing: a page at a time, or smoothly.
+  // A jump while stopped (typed time, Home / End, markers, J / L steps) that
+  // lands off screen brings the playhead back into view (Premiere does too).
+  const wasPlaying = useRef(false);
+  const lastT = useRef(player.time);
   useEffect(
     () =>
       player.subscribe((t, pl) => {
         const mode = followRef.current;
-        if (!pl || mode === "off") return;
+        const playedBefore = wasPlaying.current;
+        const moved = Math.abs(t - lastT.current) > 1e-6;
+        wasPlaying.current = pl;
+        lastT.current = t;
+        if (!pl) {
+          // Edits also notify (same time): never move the view for those.
+          if (!moved || playedBefore || tlApi.current?.dragging()) return;
+          const w = tlApi.current?.lanesWidth() ?? 800;
+          const v = viewRef.current;
+          const x = (t - v.scroll) * v.pxPerSec;
+          if (x < 0 || x > w) setView(reveal(v, t, w));
+          return;
+        }
+        if (mode === "off") return;
         const w = tlApi.current?.lanesWidth() ?? 800;
         const v = viewRef.current;
         const next = follow(v, t, w, mode);
@@ -1324,6 +1343,16 @@ export default function EditorView(props: EditorProps) {
           { sep: true, label: "" },
           { label: "Zoom to fit", key: "\\", run: fit },
           { label: followMode === "off" ? "Follow the playhead: off" : followMode === "page" ? "Follow the playhead: by page" : "Follow the playhead: smooth", key: "Shift+F", run: actions.toggleFollow },
+          {
+            label: "Scroll at the edges while dragging",
+            sub: [
+              { label: "Off", value: 0 },
+              { label: "Slow", value: 0.5 },
+              { label: "Normal", value: 1 },
+              { label: "Fast", value: 2 },
+              { label: "Very fast", value: 4 },
+            ].map((o) => ({ label: o.label, checked: edgeScroll === o.value, run: () => setEdgeScroll(o.value) })),
+          },
         ],
       });
       return;
@@ -1730,6 +1759,7 @@ export default function EditorView(props: EditorProps) {
             view={view}
             onView={setView}
             snapping={p.snapping}
+            edgeScroll={edgeScroll}
             tool={tool === "blade" || tool === "slip" ? tool : "select"}
             ripple={p.ripple}
             editOpts={editOpts}
@@ -1832,7 +1862,9 @@ function Transport({
     [player, fps],
   );
   return (
-    <div className="flex h-10 shrink-0 items-center gap-1 border-t border-line bg-surface px-2">
+    // Wraps onto a second row when the preview column is narrow (it used to
+    // run under the inspector at 1040 px wide).
+    <div className="flex min-h-10 shrink-0 flex-wrap items-center gap-x-1 gap-y-0.5 border-t border-line bg-surface px-2 py-1">
       <Btn title={k("Go to start")} onClick={actions.home}>
         <Ico d="M4 3v10M13 3L6 8l7 5z" />
       </Btn>
@@ -1874,7 +1906,7 @@ function Transport({
         title="Playhead. Type a time (1:05.10) or +2 / -0.5 to jump"
         className="ml-1 w-[86px] rounded border border-transparent bg-transparent px-1 font-mono text-[12px] text-ink hover:border-line focus:border-accent focus:outline-none"
       />
-      <span className="font-mono text-[11px] text-ink-4">/ {timecode(length, fps)}</span>
+      <span className="whitespace-nowrap font-mono text-[11px] text-ink-4">/ {timecode(length, fps)}</span>
       <Sep />
       <Btn title={k("Mark in")} onClick={actions.markIn} wide>
         I
@@ -1886,7 +1918,7 @@ function Transport({
         type="button"
         onClick={onRangeMenu}
         title="Range: what export and loop use. Last 5/10/15/30 s, cut out, keep only"
-        className={cn("h-7 rounded-md px-2 font-mono text-[10.5px]", hasRange ? "bg-accent/15 text-accent-fg" : "text-ink-3 hover:bg-surface-4 hover:text-ink")}
+        className={cn("h-7 whitespace-nowrap rounded-md px-2 font-mono text-[10.5px]", hasRange ? "bg-accent/15 text-accent-fg" : "text-ink-3 hover:bg-surface-4 hover:text-ink")}
       >
         {hasRange ? `${timecode(range.start, fps)} → ${timecode(range.end, fps)}` : "Range ▾"}
       </button>
@@ -1914,7 +1946,7 @@ function Transport({
         <option value="title">Safe areas</option>
         <option value="vertical">Shorts / TikTok UI</option>
       </select>
-      <span className="ml-1 font-mono text-[10px] text-ink-4">
+      <span className="ml-1 whitespace-nowrap font-mono text-[10px] text-ink-4">
         {outputSize(p).w}×{outputSize(p).h}
       </span>
     </div>

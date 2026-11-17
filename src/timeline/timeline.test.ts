@@ -370,7 +370,7 @@ describe("slip and roll", () => {
   });
 });
 
-import { clampScroll, easeView, edgeNear, endRoom, follow, keyZoomAnchor, viewOfSpan } from "./view";
+import { autoScrollSpeed, clampScroll, easeView, edgeNear, endRoom, follow, keyZoomAnchor, rulerLabel, viewOfSpan } from "./view";
 
 describe("navigation math", () => {
   it("leaves room after the last clip (30 %, at least 10 s)", () => {
@@ -420,5 +420,38 @@ describe("navigation math", () => {
     expect(edgeNear(items, 2, 0.2)).toBeNull();
     // A tiny clip keeps its middle for moving.
     expect(edgeNear([items[2]], 10.05, 0.2)).toBeNull();
+  });
+});
+
+describe("ruler labels", () => {
+  it("a tick reached by float steps reads its own second", () => {
+    let t = 9.8;
+    for (let k = 0; k < 6; k++) t += 0.2; // 10.999999999999998
+    expect(rulerLabel(t, 1)).toBe("0:11");
+    expect(rulerLabel(59.99999999, 1)).toBe("1:00");
+    expect(rulerLabel(10.5, 0.5)).toBe("0:10.5");
+  });
+});
+
+describe("edge auto-scroll speed", () => {
+  it("is time-based, grows with depth and is capped", () => {
+    const zone = 28, w = 1000;
+    expect(autoScrollSpeed(0, zone, w, 1)).toBe(0);
+    // Just inside the zone: slow; at the edge ~500 px/s; left side negative.
+    expect(autoScrollSpeed(2, zone, w, 1)).toBeLessThan(120);
+    expect(autoScrollSpeed(zone, zone, w, 1)).toBeCloseTo(500);
+    expect(autoScrollSpeed(-zone, zone, w, 1)).toBeCloseTo(-500);
+    // Further out is faster, but never more than one view width a second (and 1600 px/s).
+    expect(autoScrollSpeed(zone + 40, zone, w, 1)).toBeGreaterThan(autoScrollSpeed(zone, zone, w, 1));
+    expect(autoScrollSpeed(zone + 400, zone, w, 1)).toBe(1000);
+    expect(autoScrollSpeed(zone + 4000, zone, 3000, 1)).toBe(1600);
+    expect(autoScrollSpeed(zone + 400, zone, 200, 1)).toBe(400);
+    // Ramps in over the first 0.4 s.
+    expect(autoScrollSpeed(zone, zone, w, 0)).toBeCloseTo(175);
+    expect(autoScrollSpeed(zone, zone, w, 0.2)).toBeLessThan(500);
+    expect(autoScrollSpeed(zone, zone, w, 0.4)).toBeCloseTo(500);
+    // Same distance per second at 60 Hz and 144 Hz.
+    const run = (hz: number) => { let x = 0; for (let k = 0; k < hz; k++) x += autoScrollSpeed(zone, zone, w, 1) / hz; return x; };
+    expect(run(60)).toBeCloseTo(run(144));
   });
 });

@@ -681,7 +681,7 @@ fn build_window(app: &AppHandle, f: &Frame) -> Result<WebviewWindow, String> {
 /// instances always far off screen so nothing ever covers the user's work.
 fn initial_rect(app: &AppHandle, nw: u32, nh: u32, at: Option<(i32, i32)>) -> (i32, i32, u32, u32) {
     let count = store().lock().file.frames.len() as i32;
-    if test_instance() {
+    if crate::startup::test_offscreen() {
         let (w, h) = fit_size(nw, nh, 640, 480, 120);
         return (-20000 - count * 700, 100, w, h);
     }
@@ -1370,7 +1370,7 @@ pub async fn frame_reopen(app: AppHandle, key: String) -> Result<Frame, String> 
     let mut f = tauri::async_runtime::spawn_blocking(move || restore_in(&r2, &key)).await.map_err(|e| e.to_string())??;
     f.click_through = false;
     f.hidden = false;
-    if test_instance() || !on_some_screen(f.x, f.y, f.w, &screens(&app)) {
+    if crate::startup::test_offscreen() || !on_some_screen(f.x, f.y, f.w, &screens(&app)) {
         (f.x, f.y, f.w, f.h) = initial_rect(&app, f.w, f.h, None);
     }
     if !f.src.is_empty() {

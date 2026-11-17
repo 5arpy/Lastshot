@@ -180,7 +180,14 @@ export class Player {
     }
     el.src = this.urlOf(it.path);
     el.addEventListener("loadeddata", () => this.onFrame?.());
-    el.addEventListener("seeked", () => this.onFrame?.());
+    el.addEventListener("seeked", () => {
+      this.onFrame?.();
+      // Chromium can fire "seeked" before the new frame can be drawn (seen
+      // with software decoding: the preview kept the old picture until the
+      // next seek). Draw again once the frame is really there.
+      if (el instanceof HTMLVideoElement && "requestVideoFrameCallback" in el) el.requestVideoFrameCallback(() => this.onFrame?.());
+      window.setTimeout(() => this.onFrame?.(), 120);
+    });
     const e: Entry = { el, path: it.path, item: it, gain: null, pan: null, eq: [], source: null, lastUse: performance.now() };
     this.wire(e);
     return e;

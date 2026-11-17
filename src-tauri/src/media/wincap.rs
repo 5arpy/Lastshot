@@ -51,9 +51,9 @@ mod imp {
     };
     use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetAncestor, GetWindow, GetWindowLongPtrW, GetWindowTextLengthW,
-        GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, GA_ROOT,
-        GWL_EXSTYLE, GW_OWNER, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+        EnumWindows, GetAncestor, GetWindow, GetWindowLongPtrW, GetWindowThreadProcessId,
+        InternalGetWindowText, IsIconic, IsWindow, IsWindowVisible, GA_ROOT, GWL_EXSTYLE, GW_OWNER,
+        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     };
 
     fn e(err: windows::core::Error) -> String {
@@ -78,7 +78,12 @@ mod imp {
         }
         let me = unsafe { GetCurrentProcessId() };
         all.into_iter()
-            .filter_map(|h| info(h).filter(|w| w.pid != me))
+            .filter(|&h| {
+                let mut pid = 0u32;
+                unsafe { GetWindowThreadProcessId(h, Some(&mut pid)) };
+                pid != me
+            })
+            .filter_map(info)
             .collect()
     }
 
@@ -108,12 +113,15 @@ mod imp {
             if cloaked != 0 {
                 return None;
             }
-            let len = GetWindowTextLengthW(hwnd);
-            if len <= 0 {
+            // The title as Windows keeps it. GetWindowText would send the
+            // window a message when it is one of ours, which waits for its
+            // thread: the capture thread looks for windows while the UI
+            // thread may be waiting for it (quit), and that never ends.
+            let mut buf = [0u16; 512];
+            let n = InternalGetWindowText(hwnd, &mut buf);
+            if n <= 0 {
                 return None;
             }
-            let mut buf = vec![0u16; len as usize + 1];
-            let n = GetWindowTextW(hwnd, &mut buf);
             let title = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
             if title.trim().is_empty() || title == "Program Manager" {
                 return None;

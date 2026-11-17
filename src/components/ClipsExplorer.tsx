@@ -520,34 +520,48 @@ function ClipsExplorer(props: Props) {
     return undefined;
   };
   const repairText = (v: number) => (v < 0 ? "Checking…" : `${Math.round(v * 100)}%`);
-  /** Checks the file first; repairs or converts it only when that helps. */
-  const repair = (path: string) => {
-    if (repairOf(path) !== undefined) return;
+  /** Checks one file first; repairs or converts it only when that helps. */
+  const repairOne = async (path: string, alone: boolean) => {
     const convert = /\.mkv$/i.test(path);
     setRepairs((m) => new Map(m).set(path, -1));
-    void (async () => {
-      try {
-        const d = await lastshot.diagnoseClip(path);
-        if (d.need === "nothing") return onToast("ok", "This file is fine", d.message || `${X.baseName(path)} plays as it is.`);
-        if (d.need === "unfixable") return onToast("err", "This file can't be repaired", d.message);
-        setRepairs((m) => new Map(m).set(path, 0));
-        const r = await lastshot.repairClip(path);
-        onToast("ok", d.need === "remux" ? "Converted to MP4" : "Repaired", r.message || X.baseName(r.path));
-        if (r.newFile) {
-          anchorRef.current = r.path;
-          setFocus(r.path);
-          onSelection([r.path], r.path);
-        }
-        refresh();
-      } catch (err) {
-        onToast("err", convert ? "Could not convert the file" : "Could not repair the file", friendly(err));
-      } finally {
-        setRepairs((m) => {
-          const n = new Map(m);
-          for (const k of n.keys()) if (X.samePath(k, path)) n.delete(k);
-          return n;
-        });
+    try {
+      const d = await lastshot.diagnoseClip(path);
+      if (d.need === "nothing") {
+        if (alone) onToast("ok", "This file is fine", d.message || `${X.baseName(path)} plays as it is.`);
+        return;
       }
+      if (d.need === "unfixable") return onToast("err", `${X.baseName(path)} can't be repaired`, d.message);
+      setRepairs((m) => new Map(m).set(path, 0));
+      const r = await lastshot.repairClip(path);
+      onToast("ok", d.need === "remux" ? "Converted to MP4" : "Repaired", r.message || X.baseName(r.path));
+      if (r.newFile && alone) {
+        anchorRef.current = r.path;
+        setFocus(r.path);
+        onSelection([r.path], r.path);
+      }
+      refresh();
+    } catch (err) {
+      onToast("err", convert ? `Could not convert ${X.baseName(path)}` : `Could not repair ${X.baseName(path)}`, friendly(err));
+    } finally {
+      setRepairs((m) => {
+        const n = new Map(m);
+        for (const k of n.keys()) if (X.samePath(k, path)) n.delete(k);
+        return n;
+      });
+    }
+  };
+  /** One file or a selection (like OBS's remux list), one file at a time so the disk is not shared. */
+  const repair = (paths: string[]) => {
+    const todo = paths.filter((p) => repairOf(p) === undefined);
+    if (!todo.length) return;
+    // Queued files show "Checking…" until their turn.
+    setRepairs((m) => {
+      const n = new Map(m);
+      for (const p of todo) n.set(p, -1);
+      return n;
+    });
+    void (async () => {
+      for (const p of todo) await repairOne(p, todo.length === 1);
     })();
   };
 
@@ -1000,11 +1014,16 @@ function ClipsExplorer(props: Props) {
         : []),
       ...(clip || (t.kind === "file" && fileKind(t.name) === "video")
         ? [
-            {
-              label: /\.mkv$/i.test(path) ? "Convert to MP4" : "Repair / convert to MP4",
-              run: () => repair(path),
-              off: many > 1 || repairOf(path) !== undefined,
-            },
+            (() => {
+              const videos = many > 1 ? selection.filter((p) => fileKind(X.baseName(p)) === "video") : [path];
+              const allMkv = videos.every((p) => /\.mkv$/i.test(p));
+              const what = allMkv ? "Convert" : "Repair / convert";
+              return {
+                label: videos.length > 1 ? `${what} ${videos.length} videos to MP4` : allMkv ? "Convert to MP4" : "Repair / convert to MP4",
+                run: () => repair(videos),
+                off: videos.every((p) => repairOf(p) !== undefined),
+              };
+            })(),
           ]
         : []),
       "-",

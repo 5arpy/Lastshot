@@ -3,7 +3,7 @@
  * screen recording options (Screen recording › More options). The best
  * choice is the default and the main control; every value can be typed.
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { lastshot } from "../lib/bridge";
 import type { AppSettings, EncoderBackend, EncoderCaps, EncoderPreset, EngineStats, RateControl, VideoCodec } from "../lib/types";
 import { formatBytes } from "../lib/format";
@@ -450,12 +450,17 @@ export function RecordFileNameRow({ value, format, onCommit }: { value: string; 
 
 // ------------------------------------------------------- screen recording
 
-/** Screen recording › More options: format, name, limits, and the disk reserve under Advanced. */
-export function ScreenRecordingMore({ settings, onChange }: { settings: AppSettings; onChange: Patch }) {
+/**
+ * Screen recording › More options: `top` (countdown, pause key), format,
+ * name, limits, and the disk reserve under Advanced. The section itself
+ * keeps only what most people change: the key, the folder, the bar.
+ */
+export function ScreenRecordingMore({ settings, onChange, top }: { settings: AppSettings; onChange: Patch; top?: ReactNode }) {
   const [advOpen, toggleAdv] = useAdvanced("screen-disk");
   const mkv = settings.recordingFormat === "mkv";
   return (
     <>
+      {top}
       <Row
         label="File format"
         hint={

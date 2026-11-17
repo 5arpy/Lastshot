@@ -691,13 +691,22 @@ export default function SettingsPanel({
       <Section
         id="screen"
         title="Screen recording"
-        description="Records until you stop it, or until a limit under More options. Uses the same quality and frame rate as instant replay (Instant replay › Advanced), and the same sound settings."
+        description="Records until you stop it. More options has the countdown, pause key, file format and name, and limits. Quality, frame rate and sound are the same as for instant replay."
         advancedLabel="More options"
-        advanced={<ScreenRecordingMore settings={withDefaults} onChange={onChange} />}
+        advanced={
+          <ScreenRecordingMore
+            settings={withDefaults}
+            onChange={onChange}
+            top={
+              <>
+                <CountdownRow value={withDefaults.recordCountdown} onChange={(v) => onChange({ recordCountdown: v })} />
+                <Row label="Pause / resume shortcut">{hotkey("pause")}</Row>
+              </>
+            }
+          />
+        }
       >
         <Row label="Start / stop shortcut">{hotkey("record")}</Row>
-        <Row label="Pause / resume shortcut">{hotkey("pause")}</Row>
-        <CountdownRow value={withDefaults.recordCountdown} onChange={(v) => onChange({ recordCountdown: v })} />
         <FolderRow
           label="Save recordings to"
           hint={settings.recordingDir ? "Recordings here still show up in Clips." : "The save location (same as replays)."}

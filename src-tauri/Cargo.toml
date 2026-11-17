@@ -152,16 +152,19 @@ pro = []
 incremental = true
 
 [profile.release]
-# Speed-optimised: the DXGI capture loop, colour converter and ring buffer
-# hot paths benefit far more from inlining/vectorisation than a 1-2 MB
-# binary size saving. Installer size increase is negligible for a desktop app.
-opt-level = 3
+# Size-optimised: the free exe must stay under 10,000,000 bytes. Measured on
+# the recording sprint (2026-11-17, same code): opt-level 3 gave 10.29 MB,
+# "s" gives 7.96 MB, and the hot paths did not move (encode submit
+# 0.33-0.38 ms per frame, GPU submit 0.02 ms, 60.0 fps, process CPU 40-68 ms
+# per second in both): the capture, colour conversion and encode work runs
+# on the GPU, the CPU side is COM calls and copies. Go back to 3 only with a
+# measurement that shows a hot path needs it.
+opt-level = "s"
 lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
 
-# Dependencies (Tauri, serde, tokio, image...) are not on the media hot
-# paths, which live in this crate and keep opt-level 3: build them for size.
+# Dependencies (Tauri, serde, tokio, image...) are built for size too.
 [profile.release.package."*"]
 opt-level = "s"

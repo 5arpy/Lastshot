@@ -716,6 +716,10 @@ fn build_window(app: &AppHandle, f: &Frame) -> Result<WebviewWindow, String> {
     // Never an Alt+Tab or taskbar entry: a frame cannot take the focus, so
     // Alt+Tab landing on it looked like Alt+Tab doing nothing.
     crate::recording::hide_from_alt_tab(&win);
+    // A click still activates a WebView2 window: hand the keyboard back.
+    if f.kind != "board" {
+        crate::frame_quiet::install(&win);
+    }
     place(&win, f.x, f.y, f.w, f.h);
     #[cfg(feature = "pro-board")]
     crate::pro_board::on_window(&win, f);
@@ -1082,6 +1086,15 @@ pub fn frame_cursor(app: AppHandle) -> Result<(f64, f64), String> {
 
 /// Moves / resizes a frame's content (physical px), e.g. while dragging its
 /// edges; its tools stay outside.
+/// The frame's page opened (`on`) or closed its menu or a typed field: a
+/// picture or clip frame keeps the keyboard only meanwhile.
+#[tauri::command]
+pub fn frame_keys(app: AppHandle, id: String, on: bool) -> Result<(), String> {
+    let win = window(&app, &id).ok_or("That frame is closed")?;
+    crate::frame_quiet::set_keys(&win, on);
+    Ok(())
+}
+
 #[tauri::command]
 pub fn frame_set_rect(app: AppHandle, id: String, x: i32, y: i32, w: u32, h: u32) -> Result<(), String> {
     let win = window(&app, &id).ok_or("That frame is closed")?;

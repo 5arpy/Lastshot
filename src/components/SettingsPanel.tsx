@@ -6,6 +6,8 @@ import type {
   EngineStats,
   MonitorInfo,
   PowerState,
+  SnipKeyAction,
+  SnipKeys,
   UpdateProgress,
 } from "../lib/types";
 import { formatBytes } from "../lib/format";
@@ -95,6 +97,94 @@ function HotkeyRecorder({
         value.toUpperCase()
       )}
     </button>
+  );
+}
+
+/**
+ * The extra screenshot shortcuts (none by default; one click takes the
+ * suggested keys). They work from any app, like the main Screenshot key.
+ */
+const SNIP_KEY_ROWS: { action: SnipKeyAction; label: string; hint: string; suggest: string }[] = [
+  { action: "draw", label: "Draw on screen", hint: "Pen, arrows and a spotlight over the live screen.", suggest: "Alt+Shift+D" },
+  { action: "text", label: "Copy text from the screen", hint: "Drag a box over text; it is copied (Windows' own text recognition).", suggest: "Alt+Shift+T" },
+  { action: "colour", label: "Pick a colour from the screen", hint: "Click a pixel; its colour is copied (HEX, RGB or HSL).", suggest: "Alt+Shift+I" },
+  { action: "last", label: "Snip the last area again", hint: "Copies the same area at once, without the overlay.", suggest: "Alt+Shift+S" },
+  { action: "window", label: "Snip the window in front", hint: "Copies the active window at once.", suggest: "Alt+Shift+W" },
+];
+
+function SnipKeyRows({
+  keys,
+  recording,
+  onRecord,
+  onSet,
+  status,
+  onRetry,
+  error,
+}: {
+  keys: SnipKeys | undefined;
+  recording: string | null;
+  onRecord: (a: SnipKeyAction) => void;
+  onSet: (a: SnipKeyAction, accel: string) => void;
+  status: HotkeyStatus | null;
+  onRetry: () => void;
+  error: string | null;
+}) {
+  const [open, setOpen] = useState(() => !!keys && Object.values(keys).some(Boolean));
+  const set = SNIP_KEY_ROWS.filter((r) => keys?.[r.action]).length;
+  return (
+    <>
+      <Row label="More shortcuts" hint="Text, colour, Draw on screen, the last area or the window in front, straight from any app.">
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          aria-expanded={open}
+          className="rounded border border-line bg-surface-2 px-2.5 py-1 text-[11px] text-ink-2 hover:text-ink"
+          data-testid="snip-keys-toggle"
+        >
+          {open ? "Hide" : set ? `${set} set · show` : "Show"}
+        </button>
+      </Row>
+      {open &&
+        SNIP_KEY_ROWS.map((r) => {
+          const v = keys?.[r.action] ?? "";
+          const rec = recording === `snip-${r.action}`;
+          return (
+            <Row key={r.action} label={r.label} hint={r.hint}>
+              <div className="flex flex-wrap items-center justify-end gap-1.5" data-testid={`snip-key-${r.action}`}>
+                {v || rec ? (
+                  <HotkeyRecorder value={v} recording={rec} onStart={() => onRecord(r.action)} />
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => onRecord(r.action)}
+                    title="Click, then press the new key combination"
+                    className="rounded border border-dashed border-line-3 px-3 py-1 text-[11px] text-ink-3 hover:border-accent/60 hover:text-ink"
+                  >
+                    Not set
+                  </button>
+                )}
+                {!v && !rec && (
+                  <button
+                    type="button"
+                    onClick={() => onSet(r.action, r.suggest)}
+                    title={`Use ${r.suggest}`}
+                    className="rounded border border-line bg-surface-2 px-2 py-1 font-mono text-[10.5px] text-ink-2 hover:text-ink"
+                  >
+                    Use {r.suggest}
+                  </button>
+                )}
+                {v && (
+                  <button type="button" onClick={() => onSet(r.action, "")} title="Remove this shortcut" className="rounded px-1.5 py-1 text-[11px] text-ink-3 hover:text-ink">
+                    ✕
+                  </button>
+                )}
+                <HotkeyBadge status={status} action={`snip-${r.action}`} onRetry={onRetry} />
+              </div>
+            </Row>
+          );
+        })}
+      {open && error && <div className="px-1 pb-1 text-[11px] text-danger">{error}</div>}
+    </>
   );
 }
 
@@ -293,7 +383,12 @@ export default function SettingsPanel({
   profiles,
   diagnostics,
 }: Props) {
-  const [recording, setRecording] = useState<"save" | "toggle" | "snip" | "record" | null>(null);
+  const [recording, setRecording] = useState<"save" | "toggle" | "snip" | "record" | `snip-${SnipKeyAction}` | null>(null);
+  const [snipKeyErr, setSnipKeyErr] = useState<string | null>(null);
+  const setSnipKey = (action: SnipKeyAction, accel: string) => {
+    setSnipKeyErr(null);
+    void lastshot.setSnipHotkey(action, accel).catch((e) => setSnipKeyErr(String(e)));
+  };
   const [theme, setThemeState] = useState<ThemeChoice>(getTheme);
   useEffect(() => onThemeChange(setThemeState), []);
   const [hotkeyStatus, setHotkeyStatus] = useState<HotkeyStatus | null>(null);
@@ -353,6 +448,11 @@ export default function SettingsPanel({
         return;
       }
       if (!accel) return;
+      if (recording.startsWith("snip-")) {
+        setSnipKey(recording.slice(5) as SnipKeyAction, accel);
+        setRecording(null);
+        return;
+      }
       const patch =
         recording === "save"
           ? { hotkeySave: accel }
@@ -779,6 +879,15 @@ export default function SettingsPanel({
             <HotkeyBadge status={hotkeyStatus} action="snip" onRetry={retryHotkeys} />
           </div>
         </Row>
+        <SnipKeyRows
+          keys={settings.snipKeys}
+          recording={recording}
+          onRecord={(a) => setRecording(`snip-${a}`)}
+          onSet={setSnipKey}
+          status={hotkeyStatus}
+          onRetry={retryHotkeys}
+          error={snipKeyErr}
+        />
         {monitors.length > 1 && (
         <Row
           label="Screens"

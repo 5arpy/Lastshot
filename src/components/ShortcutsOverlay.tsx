@@ -20,8 +20,9 @@ export const scopeName = (s: string) => SCOPE_NAMES[s] ?? s.charAt(0).toUpperCas
 
 type Row = ShortcutInfo & { run?: () => void };
 
-export function Keys({ keys, dim }: { keys: string; dim?: boolean }) {
-  const list = splitKeys(keys);
+export function Keys({ keys, dim, mouse }: { keys: string; dim?: boolean; mouse?: boolean }) {
+  // Gestures stay as written ("Ctrl+Space+drag" is no key combo).
+  const list = mouse ? keys.split("|").map((k) => k.trim()).filter(Boolean) : splitKeys(keys);
   if (!list.length) return <span className="text-[11px] text-ink-4">No key</span>;
   return (
     <span className="flex flex-wrap justify-end gap-1">
@@ -159,7 +160,7 @@ export default function ShortcutsOverlay({
                     {r.label}
                     {mode === "commands" && <span className="ml-2 text-[10px] text-ink-4">{scopeName(r.scope)}</span>}
                   </span>
-                  <Keys keys={r.keys} dim={!r.active} />
+                  <Keys keys={r.keys} dim={!r.active} mouse={r.mouse} />
                 </button>
               </div>
             );

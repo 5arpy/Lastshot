@@ -26,7 +26,13 @@ describe("draw on screen", () => {
     expect(stepWidth(4, -1)).toBe(2);
     expect(stepWidth(5, 1)).toBe(6);
     expect(stepWidth(5, -1)).toBe(4);
-    expect(stepWidth(24, 1)).toBe(24);
+    // Past the 24 px preset in bigger steps, up to 64; a typed 100 stays.
+    expect(stepWidth(24, 1)).toBe(32);
+    expect(stepWidth(48, 1)).toBe(64);
+    expect(stepWidth(64, 1)).toBe(64);
+    expect(stepWidth(100, 1)).toBe(100);
+    expect(stepWidth(100, -1)).toBe(64);
+    expect(stepWidth(32, -1)).toBe(24);
     expect(stepWidth(2, -1)).toBe(2);
   });
 

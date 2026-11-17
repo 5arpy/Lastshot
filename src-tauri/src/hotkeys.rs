@@ -97,9 +97,18 @@ pub fn used_by(app: &AppHandle, accel: &str, me: &str) -> Option<&'static str> {
         ("mic", "Mic mute", mic),
         ("frames", "Pop-out frames click-through", crate::frames::frame_get_hotkey()),
     ];
+    // The extra screenshot keys (Settings › Screenshots), "snip-<action>".
+    let extra = st.settings.read().snip_keys.all();
+    let me_extra = me.strip_prefix("snip-");
     all.into_iter()
         .find(|(id, _, k)| *id != me && !k.is_empty() && parse(k).map(|s| s == want).unwrap_or(false))
         .map(|(_, name, _)| name)
+        .or_else(|| {
+            extra
+                .into_iter()
+                .find(|(id, _, k)| Some(*id) != me_extra && !k.is_empty() && parse(k).map(|s| s == want).unwrap_or(false))
+                .map(|(_, name, _)| name)
+        })
 }
 
 /// The single handler wired into the plugin builder.
@@ -145,6 +154,8 @@ pub fn on_shortcut(app: &AppHandle, shortcut: &Shortcut, state: ShortcutState) {
         crate::audio_guard::toggle_mic(app);
     } else if crate::frames::is_hotkey(shortcut) {
         crate::frames::on_hotkey(app);
+    } else {
+        crate::snip::on_hotkey(app, shortcut);
     }
 }
 

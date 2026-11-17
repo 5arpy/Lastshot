@@ -48,6 +48,8 @@ base64 = "0.22.1"
 
 # Thumbnail encoding only - no decoders pulled in, keeps the binary tiny.
 image = { version = "0.25.5", default-features = false, features = ["png"] }
+# Snip: QR codes in a snip. Small, (MIT OR Apache-2.0) AND ISC.
+rqrr = { version = "0.10", default-features = false }
 
 # ------------------------------------------------- Windows Graphics / Media
 # Everything below is compiled only on Windows targets. The feature list is
@@ -70,6 +72,9 @@ features = [
     # Pop-out frames: hold Ctrl+Alt over a click-through frame (polled with
     # GetAsyncKeyState only while the cursor is over one; no hooks).
     "Win32_UI_Input_KeyboardAndMouse",
+    # Pop-out frames: who had the foreground before a click (foreground
+    # WinEvent, out of context; not an input hook).
+    "Win32_UI_Accessibility",
     "Win32_Graphics_Gdi",
     # Studio picture layers (decoded with the built-in WIC codecs).
     "Win32_Graphics_Imaging",
@@ -116,6 +121,13 @@ features = [
     "Win32_System_Variant",
     # Audio tab → Devices: device meters and the microphone mute.
     "Win32_Media_Audio_Endpoints",
+    # Snip: text recognition with the OCR engine built into Windows.
+    "Media_Ocr",
+    "Foundation_Collections",
+    "Graphics_Imaging",
+    "Globalization",
+    "Storage_Streams",
+    "Security_Cryptography",
 ]
 
 [target.'cfg(windows)'.dependencies]

@@ -19,6 +19,7 @@ pub mod editor_media;
 pub mod explorer_fs;
 pub mod foreground;
 pub mod frames;
+mod frame_quiet;
 pub mod hotkey_guard;
 #[cfg(feature = "pro-board")]
 pub mod pro_board;
@@ -37,6 +38,7 @@ pub mod settings;
 pub mod shell;
 pub mod share;
 pub mod snip;
+mod ocr;
 pub mod snip_geo;
 pub mod present;
 pub mod startup;
@@ -201,6 +203,8 @@ pub fn run() {
 
             // Pop-out frames: reopen the ones that were open, own shortcut.
             frames::init(&handle);
+            // The extra screenshot hotkeys (none unless the user set them).
+            snip::init_hotkeys(&handle);
 
             if std::env::var("LASTSHOT_TEST_INSTANCE").as_deref() == Ok("1") {
                 /* no global shortcuts in test instances */
@@ -471,6 +475,7 @@ pub fn run() {
             frames::frame_list,
             frames::frame_update,
             frames::frame_set_rect,
+            frames::frame_keys,
             frames::frame_chrome,
             frames::frame_fullscreen,
             frames::frame_raise,
@@ -486,6 +491,12 @@ pub fn run() {
             frames::frame_set_hotkey,
             frames::frame_default_look,
             snip::snip_draw,
+            snip::snip_ocr,
+            snip::snip_qr,
+            snip::ocr_languages,
+            snip::snip_copy_text,
+            snip::snip_delay,
+            snip::set_snip_hotkey,
             present::present_info,
             present::present_through,
             present::present_close,

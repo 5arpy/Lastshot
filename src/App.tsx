@@ -561,7 +561,9 @@ export default function App() {
     attach(
       lastshot.onSnipDone((d) => {
         if (!primary) return;
-        if (d.copied && d.path) {
+        if (d.title) {
+          pushToast("ok", d.title, d.body ?? (d.copied ? "Paste it with Ctrl+V." : ""));
+        } else if (d.copied && d.path) {
           pushToast("ok", "Screenshot copied", `Paste it with Ctrl+V. Also saved as ${d.path.split("\\").pop()}.`);
         } else if (d.copied) {
           pushToast("ok", "Screenshot copied", "Paste it with Ctrl+V.");

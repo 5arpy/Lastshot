@@ -13,6 +13,7 @@
 //! Test copies never grab the real screen: they snip a made-up desktop
 //! (`LASTSHOT_TEST_SCREEN`, see `snip_geo::TestScreen`).
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
@@ -56,12 +57,24 @@ pub struct SnipCapture {
     pub monitors: Vec<MonRect>,
     /// The monitor the cursor was on: the bar opens there.
     pub home: usize,
+    /// Where the picture's corner is on the desktop (physical px): the last
+    /// area is remembered in desktop pixels.
+    pub origin: [i32; 2],
+    /// The window that was in front, relative to the picture (the "window in
+    /// front" hotkey snips it).
+    pub active: Option<WinRect>,
+    /// The frozen screens as RGB, for text and QR reading (never sent).
+    #[serde(skip)]
+    pub pixels: Arc<Vec<u8>>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct SnipDone {
     pub path: Option<String>,
     pub copied: bool,
+    /// A message instead of "Screenshot copied" (copied text, a colour).
+    pub title: Option<String>,
+    pub body: Option<String>,
 }
 
 struct Pending {
@@ -85,6 +98,12 @@ pub fn begin(app: AppHandle) {
 /// otherwise be in the picture. It is hidden first and shown again after.
 /// `mode`: "shot" or "rec", the tab the snip bar opens on.
 pub fn begin_with(app: AppHandle, hide_main: bool, mode: &'static str) {
+    begin_full(app, hide_main, mode, false);
+}
+
+/// `restore`: Lastshot's window was hidden by an earlier snip (a delayed
+/// one) and comes back when this one closes.
+fn begin_full(app: AppHandle, hide_main: bool, mode: &'static str, restore: bool) {
     tauri::async_runtime::spawn(async move {
         if let Some(w) = app.get_webview_window(SNIP_LABEL) {
             // The overlay shows itself once its page has painted. One that is
@@ -107,11 +126,12 @@ pub fn begin_with(app: AppHandle, hide_main: bool, mode: &'static str) {
         }
 
         let main = app.get_webview_window("main");
-        let restore_main = hide_main
-            && main
-                .as_ref()
-                .map(|w| w.is_visible().unwrap_or(false))
-                .unwrap_or(false);
+        let restore_main = restore
+            || hide_main
+                && main
+                    .as_ref()
+                    .map(|w| w.is_visible().unwrap_or(false))
+                    .unwrap_or(false);
         if restore_main {
             if let Some(w) = main.as_ref() {
                 let _ = w.hide();
@@ -120,7 +140,11 @@ pub fn begin_with(app: AppHandle, hide_main: bool, mode: &'static str) {
             tokio::time::sleep(Duration::from_millis(220)).await;
         }
 
-        let scope = app.state::<AppState>().settings.read().snip_scope.clone();
+        let mut scope = app.state::<AppState>().settings.read().snip_scope.clone();
+        // The last area and the window in front may be on any screen.
+        if mode == "last" || mode == "window" {
+            scope = "all".into();
+        }
         // Test copies snip a made-up desktop, never the user's screen.
         let test_screen = crate::startup::test_offscreen() || std::env::var_os("LASTSHOT_TEST_SCREEN").is_some();
         let grabbed = tauri::async_runtime::spawn_blocking(move || {
@@ -232,7 +256,7 @@ fn test_capture(scope: &str) -> Result<(SnipCapture, (i32, i32, u32, u32)), Stri
             rgb.extend_from_slice(&test_pixel(&mons, (area.x + x, area.y + y)));
         }
     }
-    let windows = t
+    let windows: Vec<WinRect> = t
         .windows
         .iter()
         .filter_map(|w| {
@@ -241,8 +265,21 @@ fn test_capture(scope: &str) -> Result<(SnipCapture, (i32, i32, u32, u32)), Stri
         })
         .collect();
     let image = png_data_url(&rgb, area.w as u32, area.h as u32)?;
+    // The front window of the made-up desktop is "in front".
+    let active = windows.first().cloned();
     Ok((
-        SnipCapture { image, width: area.w as u32, height: area.h as u32, windows, start_mode: "shot".into(), monitors, home },
+        SnipCapture {
+            image,
+            width: area.w as u32,
+            height: area.h as u32,
+            windows,
+            start_mode: "shot".into(),
+            monitors,
+            home,
+            origin: [area.x, area.y],
+            active,
+            pixels: Arc::new(rgb),
+        },
         (area.x, area.y, area.w as u32, area.h as u32),
     ))
 }
@@ -295,10 +332,18 @@ pub async fn snip_draw(app: AppHandle) -> Result<(), String> {
 }
 
 /// Starts a snip from Lastshot's own window (the window hides itself first).
-/// `mode`: "shot" (default) or "rec" to record an area.
+/// `mode`: "shot" (default), "rec" to record an area, "text", "colour",
+/// "last" (the last area at once) or "window" (the window in front at once).
 #[tauri::command]
 pub fn start_snip(app: AppHandle, mode: Option<String>) {
-    let mode = if mode.as_deref() == Some("rec") { "rec" } else { "shot" };
+    let mode = match mode.as_deref() {
+        Some("rec") => "rec",
+        Some("text") => "text",
+        Some("colour") => "colour",
+        Some("last") => "last",
+        Some("window") => "window",
+        _ => "shot",
+    };
     begin_with(app, true, mode);
 }
 
@@ -389,6 +434,163 @@ pub fn snip_cancel(app: AppHandle) {
     close_overlay(&app);
 }
 
+/// The frozen screens (RGB) and their size.
+fn frozen_pixels() -> Result<(Arc<Vec<u8>>, u32, u32), String> {
+    let p = PENDING.lock();
+    let p = p.as_ref().ok_or("nothing to read")?;
+    Ok((p.capture.pixels.clone(), p.capture.width, p.capture.height))
+}
+
+/// The text in an area of the frozen screens (Windows' own OCR).
+#[tauri::command]
+pub async fn snip_ocr(region: SnipRegion, lang: Option<String>) -> Result<crate::ocr::OcrResult, String> {
+    let (px, w, h) = frozen_pixels()?;
+    let a = crate::ocr::Area::clamp(region.x, region.y, region.w, region.h, w, h).ok_or("That area is empty.")?;
+    tauri::async_runtime::spawn_blocking(move || crate::ocr::recognize(&px, w, a, lang.as_deref()))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// The QR codes in an area of the frozen screens: their text.
+#[tauri::command]
+pub async fn snip_qr(region: SnipRegion) -> Result<Vec<String>, String> {
+    let (px, w, h) = frozen_pixels()?;
+    let Some(a) = crate::ocr::Area::clamp(region.x, region.y, region.w, region.h, w, h) else { return Ok(Vec::new()) };
+    tauri::async_runtime::spawn_blocking(move || crate::ocr::decode_qr(&px, w, a)).await.map_err(|e| e.to_string())
+}
+
+/// The languages Windows can read text in.
+#[tauri::command]
+pub async fn ocr_languages() -> Vec<crate::ocr::OcrLanguage> {
+    tauri::async_runtime::spawn_blocking(crate::ocr::languages).await.unwrap_or_default()
+}
+
+/// Copies text (recognised text, a colour), closes the overlay and says so
+/// with `title` / `body`. Test copies never touch the clipboard.
+#[tauri::command]
+pub fn snip_copy_text(app: AppHandle, text: String, title: String, body: Option<String>) -> Result<(), String> {
+    let copied = if crate::startup::test_offscreen() {
+        false
+    } else {
+        imp::copy_text(&text)?;
+        true
+    };
+    close_overlay(&app);
+    let _ = app.emit(EVT_SNIP_DONE, SnipDone { path: None, copied, title: Some(title), body });
+    Ok(())
+}
+
+/// Snips again after `secs` seconds (time to open a menu or hover a
+/// tooltip). The overlay closes meanwhile; Lastshot's window stays hidden
+/// if the snip hid it.
+#[tauri::command]
+pub async fn snip_delay(app: AppHandle, secs: u32, mode: Option<String>) -> Result<(), String> {
+    let restore = PENDING.lock().take().map(|p| p.restore_main).unwrap_or(false);
+    if let Some(w) = app.get_webview_window(SNIP_LABEL) {
+        let _ = w.close();
+    }
+    let mode = if mode.as_deref() == Some("rec") { "rec" } else { "shot" };
+    tokio::time::sleep(Duration::from_secs(secs.clamp(1, 60) as u64)).await;
+    begin_full(app, false, mode, restore);
+    Ok(())
+}
+
+/// Draw on screen without a snip first (its own hotkey): over the snip's
+/// screens (Settings › Screenshots › Screens).
+pub fn draw_now(app: &AppHandle) {
+    let app = app.clone();
+    // Async: a window made on the main thread here would block WebView2.
+    tauri::async_runtime::spawn(async move {
+        let scope = app.state::<AppState>().settings.read().snip_scope.clone();
+        let test = crate::startup::test_offscreen() || std::env::var_os("LASTSHOT_TEST_SCREEN").is_some();
+        let area = if test {
+            let t = TestScreen::parse(std::env::var("LASTSHOT_TEST_SCREEN").ok().as_deref());
+            let mons = t.rects();
+            let chosen = scope.strip_prefix("monitor:").and_then(|n| n.parse::<usize>().ok()).and_then(|i| mons.get(i).copied());
+            snip_area(&mons, &scope, (t.cursor[0], t.cursor[1]), chosen).ok_or_else(|| "no monitors".to_string())
+        } else {
+            imp::area_now(&scope)
+        };
+        match area {
+            Ok(SnipArea { area, monitors, home }) => {
+                if let Err(e) = crate::present::open(&app, (area.x, area.y, area.w as u32, area.h as u32), monitors, home) {
+                    let _ = app.emit(EVT_ERROR, format!("Could not open Draw on screen: {e}"));
+                }
+            }
+            Err(e) => {
+                let _ = app.emit(EVT_ERROR, format!("Could not open Draw on screen: {e}"));
+            }
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// More screenshot hotkeys (Settings › Screenshots), none by default
+// ---------------------------------------------------------------------------
+
+/// Registers the extra screenshot hotkeys with the shortcut guard.
+pub fn init_hotkeys(app: &AppHandle) {
+    let Some(st) = app.try_state::<AppState>() else { return };
+    let keys = st.settings.read().snip_keys.clone();
+    for (action, _, k) in keys.all() {
+        if !k.is_empty() {
+            if let Err(e) = crate::hotkey_guard::set(app, &format!("snip-{action}"), &k) {
+                log::warn!("[snip] shortcut {k}: {e}");
+            }
+        }
+    }
+}
+
+/// Runs the extra screenshot action bound to `shortcut`, if any.
+pub fn on_hotkey(app: &AppHandle, shortcut: &tauri_plugin_global_shortcut::Shortcut) -> bool {
+    let Some(st) = app.try_state::<AppState>() else { return false };
+    let keys = st.settings.read().snip_keys.clone();
+    let Some((action, _, _)) = keys
+        .all()
+        .into_iter()
+        .find(|(_, _, k)| !k.is_empty() && crate::hotkeys::parse(k).map(|s| &s == shortcut).unwrap_or(false))
+    else {
+        return false;
+    };
+    match action {
+        "draw" => draw_now(app),
+        "text" => begin_with(app.clone(), false, "text"),
+        "colour" => begin_with(app.clone(), false, "colour"),
+        "last" => begin_with(app.clone(), false, "last"),
+        "window" => begin_with(app.clone(), false, "window"),
+        _ => return false,
+    }
+    true
+}
+
+/// Sets one extra screenshot hotkey ("" removes it). Returns the keys set.
+#[tauri::command]
+pub fn set_snip_hotkey(app: AppHandle, state: State<'_, AppState>, action: String, hotkey: String) -> Result<String, String> {
+    let hotkey = hotkey.trim().to_string();
+    let id = format!("snip-{action}");
+    let old = state.settings.read().snip_keys.get(&action).cloned().ok_or("unknown screenshot action")?;
+    if hotkey == old {
+        return Ok(hotkey);
+    }
+    if !hotkey.is_empty() {
+        crate::hotkeys::validate(&hotkey)?;
+        if let Some(other) = crate::hotkeys::used_by(&app, &hotkey, &id) {
+            return Err(format!("'{hotkey}' is already the shortcut for {other}"));
+        }
+    }
+    if let Err(e) = crate::hotkey_guard::set(&app, &id, &hotkey) {
+        log::warn!("[snip] shortcut {hotkey}: {e}");
+    }
+    let mut s = state.settings.write();
+    if let Some(k) = s.snip_keys.get_mut(&action) {
+        *k = hotkey.clone();
+    }
+    s.save()?;
+    // Every window's copy of the settings follows (Settings shows the key).
+    let _ = app.emit(crate::commands::EVT_SETTINGS, &*s);
+    Ok(hotkey)
+}
+
 /// Receives the finished snip (`data:image/png;base64,...`), copies it and/or
 /// saves it, then closes the overlay.
 #[tauri::command]
@@ -444,7 +646,7 @@ pub async fn snip_finish(
         if copy {
             imp::copy_png(&bytes)?;
         }
-        Ok(SnipDone { path, copied: copy })
+        Ok(SnipDone { path, copied: copy, ..Default::default() })
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -516,7 +718,9 @@ mod imp {
             }
 
             let bgra = grab(x, y, w, h)?;
-            let windows = list_windows(RECT { left: x, top: y, right: x + w, bottom: y + h });
+            let area = RECT { left: x, top: y, right: x + w, bottom: y + h };
+            let windows = list_windows(area);
+            let active = front_window(area);
 
             // BGRA -> RGB for a compact PNG.
             let mut rgb = Vec::with_capacity((w * h * 3) as usize);
@@ -525,7 +729,18 @@ mod imp {
             }
             let image = png_data_url(&rgb, w as u32, h as u32)?;
             Ok((
-                SnipCapture { image, width: w as u32, height: h as u32, windows, start_mode: "shot".into(), monitors: mons, home },
+                SnipCapture {
+                    image,
+                    width: w as u32,
+                    height: h as u32,
+                    windows,
+                    start_mode: "shot".into(),
+                    monitors: mons,
+                    home,
+                    origin: [x, y],
+                    active,
+                    pixels: Arc::new(rgb),
+                },
                 (x, y, w as u32, h as u32),
             ))
         }
@@ -598,6 +813,47 @@ mod imp {
             return Err("GetDIBits failed".into());
         }
         Ok(buf)
+    }
+
+    /// The window in front (not Lastshot's own), clipped to the area.
+    unsafe fn front_window(mon: RECT) -> Option<WinRect> {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_invalid() {
+            return None;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid == std::process::id() {
+            return None;
+        }
+        let mut r = RECT::default();
+        if DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &mut r as *mut _ as *mut _, std::mem::size_of::<RECT>() as u32).is_err()
+            && GetWindowRect(hwnd, &mut r).is_err()
+        {
+            return None;
+        }
+        let (left, top) = (r.left.max(mon.left), r.top.max(mon.top));
+        let (right, bottom) = (r.right.min(mon.right), r.bottom.min(mon.bottom));
+        if right - left < 8 || bottom - top < 8 {
+            return None;
+        }
+        let len = GetWindowTextLengthW(hwnd).max(0) as usize;
+        let mut title = vec![0u16; len + 1];
+        let n = GetWindowTextW(hwnd, &mut title);
+        Some(WinRect {
+            x: left - mon.left,
+            y: top - mon.top,
+            w: right - left,
+            h: bottom - top,
+            title: String::from_utf16_lossy(&title[..n.max(0) as usize]),
+        })
+    }
+
+    /// The scope's screens now (no picture): Draw on screen's hotkey.
+    pub fn area_now(scope: &str) -> Result<SnipArea, String> {
+        let mut pt = POINT::default();
+        unsafe { GetCursorPos(&mut pt).map_err(|e| e.to_string())? };
+        snip_area(&monitors(), scope, (pt.x, pt.y), chosen_monitor(scope)).ok_or_else(|| "could not read the monitors".into())
     }
 
     unsafe extern "system" fn collect(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -732,6 +988,22 @@ mod imp {
         }
     }
 
+    /// Puts text on the clipboard (CF_UNICODETEXT).
+    pub fn copy_text(text: &str) -> Result<(), String> {
+        let mut wide: Vec<u16> = text.encode_utf16().collect();
+        wide.push(0);
+        let bytes = unsafe { std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2) };
+        unsafe {
+            OpenClipboard(None).map_err(|e| format!("OpenClipboard: {e}"))?;
+            let r = (|| -> Result<(), String> {
+                EmptyClipboard().map_err(|e| format!("EmptyClipboard: {e}"))?;
+                put(13 /* CF_UNICODETEXT */, bytes)
+            })();
+            let _ = CloseClipboard();
+            r
+        }
+    }
+
     unsafe fn put(format: u32, data: &[u8]) -> Result<(), String> {
         let hmem = GlobalAlloc(GMEM_MOVEABLE, data.len()).map_err(|e| format!("GlobalAlloc: {e}"))?;
         let ptr = GlobalLock(hmem);
@@ -756,6 +1028,12 @@ mod imp {
         Err("requires Windows".into())
     }
     pub fn copy_png(_png: &[u8]) -> Result<(), String> {
+        Err("snipping requires Windows".into())
+    }
+    pub fn copy_text(_text: &str) -> Result<(), String> {
+        Err("snipping requires Windows".into())
+    }
+    pub fn area_now(_scope: &str) -> Result<SnipArea, String> {
         Err("snipping requires Windows".into())
     }
 }

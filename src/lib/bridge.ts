@@ -29,6 +29,8 @@ import type {
   PresentInfo,
   SnipCapture,
   SnipDone,
+  SnipKeyAction,
+  OcrResult,
   BarState,
   DrawCommand,
   MediaInfo,
@@ -945,6 +947,29 @@ export const lastshot = {
   /** Draw on screen: closes the snip and opens the drawing window over the same screens. */
   async snipDraw(): Promise<void> {
     await invoke("snip_draw");
+  },
+  /** The text in an area of the frozen screens (Windows' own OCR). */
+  async snipOcr(region: { x: number; y: number; w: number; h: number }, lang?: string): Promise<OcrResult> {
+    return invoke<OcrResult>("snip_ocr", { region, lang: lang ?? null });
+  },
+  /** The QR codes in an area of the frozen screens. */
+  async snipQr(region: { x: number; y: number; w: number; h: number }): Promise<string[]> {
+    return invoke<string[]>("snip_qr", { region });
+  },
+  async ocrLanguages(): Promise<{ tag: string; name: string }[]> {
+    return invoke("ocr_languages");
+  },
+  /** Copies text, closes the snip and shows `title` / `body` as the toast. */
+  async snipCopyText(text: string, title: string, body?: string): Promise<void> {
+    await invoke("snip_copy_text", { text, title, body: body ?? null });
+  },
+  /** Closes the snip and snips again after `secs` seconds. */
+  async snipDelay(secs: number, mode: "shot" | "rec"): Promise<void> {
+    await invoke("snip_delay", { secs, mode });
+  },
+  /** One of the extra screenshot hotkeys ("" removes it); returns the keys set. */
+  async setSnipHotkey(action: SnipKeyAction, hotkey: string): Promise<string> {
+    return invoke<string>("set_snip_hotkey", { action, hotkey });
   },
   async presentInfo(): Promise<PresentInfo> {
     return invoke<PresentInfo>("present_info");

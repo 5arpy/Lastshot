@@ -9,7 +9,7 @@ import { registerShortcuts, type Shortcut } from "./shortcuts";
 export function useShortcuts(scope: string, list: Shortcut[], enabled = true): void {
   const ref = useRef(list);
   ref.current = list;
-  const shape = list.map((s) => `${s.id ?? s.label}\u0001${s.keys}\u0001${s.group ?? ""}\u0001${s.inText ? 1 : 0}\u0001${s.context ?? ""}`).join("\u0002");
+  const shape = list.map((s) => `${s.id ?? s.label}\u0001${s.keys}\u0001${s.group ?? ""}\u0001${s.inText ? 1 : 0}\u0001${s.context ?? ""}\u0001${s.mouse ? 1 : 0}`).join("\u0002");
   useEffect(() => {
     if (!enabled) return;
     const wrapped: Shortcut[] = ref.current.map((s, i) => ({
@@ -19,6 +19,7 @@ export function useShortcuts(scope: string, list: Shortcut[], enabled = true): v
       id: s.id,
       inText: s.inText,
       context: s.context,
+      mouse: s.mouse,
       run: () => ref.current[i]?.run(),
       when: () => {
         const w = ref.current[i]?.when;

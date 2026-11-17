@@ -308,12 +308,62 @@ export interface SnipActions {
   tool: (t: string) => void;
   /** Objects are selected. */
   picked: () => boolean;
+  /** Copies the text in the area (Windows' own text recognition). */
+  copyText: () => void;
+  /** Drops the selected objects or the tool, else cancels the snip. */
+  escape: () => void;
+  /** Moves the area (or with `resize`, sizes it from its right / bottom edge) by screen pixels. */
+  area: (dx: number, dy: number, resize: boolean) => void;
+  // Before an area is picked (context "pick").
+  screen: () => void;
+  allScreens: () => void;
+  hovered: () => void;
+  draw: () => void;
+  textMode: () => void;
+  colourMode: () => void;
+  lastArea: () => void;
+  magnifier: () => void;
+  hints: () => void;
+  cancel: () => void;
+  // Record mode, once the area is picked (context "rec").
+  record: () => void;
 }
 
-/** The snip's keys once a region is chosen (scope "snip"). */
+/**
+ * The snip's keys (scope "snip"). Context "pick": before an area is picked;
+ * "rec": the area is picked for a recording; none or "area": marking up a
+ * screenshot ("area": the arrows move the area while no object is selected).
+ */
 export function snipKeymap(a: SnipActions): Shortcut[] {
   const one = a.picked;
+  const none = () => !a.picked();
+  const arrows = [
+    ["ArrowLeft", -1, 0, "left", "narrower"],
+    ["ArrowRight", 1, 0, "right", "wider"],
+    ["ArrowUp", 0, -1, "up", "shorter"],
+    ["ArrowDown", 0, 1, "down", "taller"],
+  ] as const;
   return withIds("snip", [
+    { keys: "F", label: "This whole screen", group: "Pick", context: "pick", run: a.screen },
+    { keys: "Shift+F", label: "Every screen at once", group: "Pick", context: "pick", run: a.allScreens },
+    { keys: "Enter", label: "The window under the mouse", group: "Pick", context: "pick", run: a.hovered },
+    { keys: "L", label: "The last area again", group: "Pick", context: "pick", run: a.lastArea },
+    { keys: "T", label: "Copy text: drag a box over it", group: "Pick", context: "pick", run: a.textMode },
+    { keys: "C", label: "Pick a colour", group: "Pick", context: "pick", run: a.colourMode },
+    { keys: "D", label: "Draw on the screen", group: "Pick", context: "pick", run: a.draw },
+    { keys: "M", label: "Magnifier on / off", group: "Pick", context: "pick", run: a.magnifier },
+    { keys: "H", label: "Key hints on / off", group: "Pick", context: "pick", run: a.hints },
+    { keys: "Escape", label: "Cancel the snip", group: "Pick", context: "pick", run: a.cancel },
+    { keys: "Enter", label: "Start recording", group: "Record", context: "rec", run: a.record },
+    { keys: "Escape", label: "Cancel the recording", group: "Record", context: "rec", run: a.cancel },
+    { keys: "Escape", label: "Drop the selection, or cancel", group: "Edit", run: a.escape },
+    { keys: "Ctrl+Shift+C", label: "Copy the text in it", group: "File", run: a.copyText },
+    ...arrows.flatMap(([k, dx, dy, dir, size]) => [
+      { keys: k, label: `Move the area ${dir} 1 px`, group: "Area", context: "area", run: () => a.area(dx, dy, false), when: none },
+      { keys: `Shift+${k}`, label: `Move the area ${dir} 10 px`, group: "Area", context: "area", run: () => a.area(dx * 10, dy * 10, false), when: none },
+      { keys: `Ctrl+${k}`, label: `Area 1 px ${size}`, group: "Area", context: "area", run: () => a.area(dx, dy, true), when: none },
+      { keys: `Ctrl+Shift+${k}`, label: `Area 10 px ${size}`, group: "Area", context: "area", run: () => a.area(dx * 10, dy * 10, true), when: none },
+    ]),
     { keys: "Ctrl+Z", label: "Undo", group: "Edit", run: a.undo },
     { keys: "Ctrl+Y", label: "Redo", group: "Edit", run: a.redo },
     { keys: "Ctrl+Shift+Z", label: "Redo", group: "Edit", run: a.redo },
@@ -385,6 +435,8 @@ export interface DrawActions {
   /** The n-th palette colour (0-based). */
   colour: (n: number) => void;
   snip: () => void;
+  /** Esc: closes a menu, drops the selection, else stops drawing. */
+  escape: () => void;
   picked: () => boolean;
 }
 
@@ -406,6 +458,7 @@ export function drawKeymap(a: DrawActions): Shortcut[] {
     { keys: "W", label: "Whiteboard", group: "View", run: () => a.board("white") },
     { keys: "K", label: "Blackboard", group: "View", run: () => a.board("black") },
     { keys: "Ctrl+S", label: "Snip the screen with the drawing", group: "File", run: a.snip },
+    { keys: "Escape", label: "Drop the selection, or stop drawing", group: "File", run: a.escape },
     { keys: "[", label: "Thinner", group: "Style", run: () => a.width(-1) },
     { keys: "]", label: "Thicker", group: "Style", run: () => a.width(1) },
     ...colours.map((c, i) => ({ keys: String(i + 1), label: `Colour ${i + 1} (${c})`, group: "Style", run: () => a.colour(i) })),

@@ -46,6 +46,9 @@ pub fn enumerate_audio_devices() -> Vec<AudioDevice> {
     imp::enumerate_audio_devices()
 }
 
+/// Where the sound thread is (logged when a stop takes too long).
+pub static AUDIO_AT: super::recorder::Breadcrumb = super::recorder::Breadcrumb::new();
+
 pub struct AudioCapture {
     stop: Arc<AtomicBool>,
     handles: Vec<std::thread::JoinHandle<()>>,
@@ -112,11 +115,19 @@ impl AudioCapture {
         Ok(Self { stop, handles })
     }
 
-    pub fn stop(self) {
+    /// Stops the sound threads, waiting up to `wait` for them; returns the
+    /// ones still running then (the engine keeps them and joins them later).
+    pub fn stop_within(self, wait: std::time::Duration) -> Vec<std::thread::JoinHandle<()>> {
         self.stop.store(true, Ordering::Release);
+        let deadline = std::time::Instant::now() + wait;
+        let mut stuck = Vec::new();
         for h in self.handles {
-            let _ = h.join();
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if let Err(h) = super::recorder::join_within(h, left) {
+                stuck.push(h);
+            }
         }
+        stuck
     }
 }
 
@@ -611,6 +622,7 @@ mod imp {
 
             let poll_ms: u64 = if performance_mode { 10 } else { 8 };
 
+            AUDIO_AT.set("starting Media Foundation");
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
             if MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET).is_err() {
                 *status.lock() = Some("Media Foundation failed to start".into());
@@ -661,6 +673,7 @@ mod imp {
                 // (Re)open endpoints every second if closed or invalidated.
                 if last_attempt.elapsed() >= std::time::Duration::from_secs(1) {
                     last_attempt = std::time::Instant::now();
+                    AUDIO_AT.set("opening the sound devices");
                     // Per-app sound: the app (re)started or closed -> reopen
                     // so the stream follows it (or stops leaking it).
                     if !matches!(*super::APP_AUDIO.read(), super::super::procaudio::AppAudio::All) {
@@ -705,6 +718,7 @@ mod imp {
                     }
                 }
 
+                AUDIO_AT.set("capturing sound");
                 if loopback.is_none() && microphone.is_none() && encoder.is_none() {
                     // Nothing captured yet (device busy). Keep next_pts tracking live wall-clock
                     // so when devices arrive, audio does not start at t=0.
@@ -868,20 +882,24 @@ mod imp {
                 std::thread::sleep(std::time::Duration::from_millis(poll_ms));
             }
 
+            AUDIO_AT.set("stopping the sound devices");
             if let Some(ep) = loopback.as_ref() {
                 let _ = ep.client.Stop();
             }
             if let Some(ep) = microphone.as_ref() {
                 let _ = ep.client.Stop();
             }
+            AUDIO_AT.set("closing the sound encoder and devices");
             // Release every COM object before COM goes: after the last
             // CoUninitialize the AAC encoder's DLL can be unloaded, and
             // releasing it then crashes the app (seen in engine restarts).
             drop(encoder);
             drop(loopback);
             drop(microphone);
+            AUDIO_AT.set("shutting down Media Foundation (sound)");
             let _ = MFShutdown();
             CoUninitialize();
+            AUDIO_AT.set("ended");
         }
     }
 }

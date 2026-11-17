@@ -43,6 +43,47 @@ use serde::{Deserialize, Serialize};
 /// 100-nanosecond units: the native Media Foundation time base.
 pub const HNS_PER_SECOND: i64 = 10_000_000;
 
+/// How long a stop waits for the capture and sound threads. A thread still
+/// running then is set aside (joined once it ends) so the app never hangs.
+pub const STOP_WAIT: Duration = Duration::from_secs(5);
+
+/// Joins `h` if it ends within `wait`; gives it back otherwise.
+pub fn join_within<T>(h: std::thread::JoinHandle<T>, wait: Duration) -> Result<(), std::thread::JoinHandle<T>> {
+    let deadline = Instant::now() + wait;
+    while !h.is_finished() {
+        if Instant::now() >= deadline {
+            return Err(h);
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let _ = h.join();
+    Ok(())
+}
+
+/// What a recorder thread is doing right now ("closing the window
+/// capture") and since when. Read only when a stop takes too long, so the
+/// log names the call a stuck thread is in.
+pub struct Breadcrumb(parking_lot::Mutex<(&'static str, Option<Instant>)>);
+
+impl Breadcrumb {
+    pub const fn new() -> Self {
+        Self(parking_lot::Mutex::new(("not started", None)))
+    }
+    pub fn set(&self, what: &'static str) {
+        *self.0.lock() = (what, Some(Instant::now()));
+    }
+    pub fn describe(&self) -> String {
+        let (what, since) = *self.0.lock();
+        match since {
+            Some(t) => format!("{what}, for {} ms", t.elapsed().as_millis()),
+            None => what.to_string(),
+        }
+    }
+}
+
+/// Where the capture thread is.
+pub static CAPTURE_AT: Breadcrumb = Breadcrumb::new();
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EncoderVendor {
@@ -1033,6 +1074,10 @@ pub struct CaptureEngine {
     config: RwLock<RecorderConfig>,
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
     audio: Mutex<Option<crate::media::audio::AudioCapture>>,
+    /// Threads that did not end within `STOP_WAIT` of a stop: joined as soon
+    /// as they end; until then the engine does not start again (two capture
+    /// threads would share one state).
+    stalled: Mutex<Vec<std::thread::JoinHandle<()>>>,
     /// Written by the audio thread: the reason audio is unavailable, if any.
     audio_error: Arc<parking_lot::Mutex<Option<String>>>,
     /// Live mix levels (permille, 0-1000) shared with the audio thread.
@@ -1074,6 +1119,7 @@ impl CaptureEngine {
             config: RwLock::new(cfg),
             worker: Mutex::new(None),
             audio: Mutex::new(None),
+            stalled: Mutex::new(Vec::new()),
             audio_error: Arc::new(parking_lot::Mutex::new(None)),
             game_gain: Arc::new(AtomicU32::new(1000)),
             mic_gain: Arc::new(AtomicU32::new(1000)),
@@ -1170,6 +1216,11 @@ impl CaptureEngine {
     pub fn start(&self, cfg: RecorderConfig) -> RResult<EngineStats> {
         if self.is_running() {
             return Err(RecorderError::AlreadyRunning);
+        }
+        if let Some(stuck) = self.reap_stalled() {
+            return Err(RecorderError::Other(format!(
+                "The recorder's last capture has not ended yet ({stuck}). Try again in a moment; if it stays stuck, quit and restart Lastshot."
+            )));
         }
         std::fs::create_dir_all(&cfg.output_dir)?;
 
@@ -1279,24 +1330,71 @@ impl CaptureEngine {
     }
 
     pub fn stop(&self) {
+        let t0 = Instant::now();
         // A recording must be finalised before the ring goes away, or the
         // MP4 has no index and will not play.
         if self.recording.lock().is_some() {
             let _ = self.stop_recording();
         }
+        let t_rec = t0.elapsed();
         self.shared.stop_requested.store(true, Ordering::Release);
-        if let Some(a) = self.audio.lock().take() {
-            a.stop();
+        // Take the handles out first: the locks are not held while waiting,
+        // so a second stop (quit while a restart waits) never waits on them.
+        let audio = self.audio.lock().take();
+        let worker = self.worker.lock().take();
+        let t1 = Instant::now();
+        let mut stuck: Vec<String> = Vec::new();
+        if let Some(a) = audio {
+            for h in a.stop_within(STOP_WAIT) {
+                stuck.push(format!("sound thread: {}", crate::media::audio::AUDIO_AT.describe()));
+                self.stalled.lock().push(h);
+            }
         }
-        if let Some(h) = self.worker.lock().take() {
-            let _ = h.join();
+        let t_audio = t1.elapsed();
+        let t2 = Instant::now();
+        if let Some(h) = worker {
+            if let Err(h) = join_within(h, STOP_WAIT) {
+                stuck.push(format!("capture thread: {}", CAPTURE_AT.describe()));
+                self.stalled.lock().push(h);
+            }
         }
+        let t_capture = t2.elapsed();
         self.shared.running.store(false, Ordering::Release);
         self.shared.set_state(EngineState::Idle);
         self.shared.ring.lock().clear();
         *self.shared.effective_target_fps.write() = 0;
         *self.shared.effective_bitrate_kbps.write() = 0;
         *self.shared.integrated_gpu.write() = false;
+        let ms = |d: Duration| d.as_millis();
+        if stuck.is_empty() {
+            log::info!(
+                "[lastshot] engine stopped in {} ms (recording {} ms, sound {} ms, capture {} ms)",
+                ms(t0.elapsed()),
+                ms(t_rec),
+                ms(t_audio),
+                ms(t_capture)
+            );
+        } else {
+            let what = stuck.join("; ");
+            log::error!("[lastshot] engine stop: a thread did not end within {} s ({what})", STOP_WAIT.as_secs());
+            *self.shared.last_error.write() = Some(format!("The recorder did not stop cleanly ({what})."));
+        }
+    }
+
+    /// Joins stalled threads that have ended since; describes one that still
+    /// runs (None when there is none).
+    fn reap_stalled(&self) -> Option<String> {
+        let mut stalled = self.stalled.lock();
+        let mut i = 0;
+        while i < stalled.len() {
+            if stalled[i].is_finished() {
+                let _ = stalled.swap_remove(i).join();
+                log::info!("[lastshot] a stalled recorder thread has ended");
+            } else {
+                i += 1;
+            }
+        }
+        (!stalled.is_empty()).then(|| format!("capture: {}; sound: {}", CAPTURE_AT.describe(), crate::media::audio::AUDIO_AT.describe()))
     }
 
     // ------------------------------------------------------------ recording
@@ -3326,13 +3424,18 @@ mod win {
             if unsafe { !windows::Win32::UI::WindowsAndMessaging::IsWindow(self.hwnd).as_bool() }
                 || self.cap.as_ref().map(|c| c.is_closed()).unwrap_or(false)
             {
-                self.cap = None;
+                if self.cap.is_some() {
+                    CAPTURE_AT.set("closing the closed window's Graphics Capture");
+                    self.cap = None;
+                }
                 if self.last_retry.elapsed() >= Duration::from_secs(1) && !self.exe.is_empty() {
                     self.last_retry = Instant::now();
+                    CAPTURE_AT.set("looking for the app's window again");
                     if let Some(w) = crate::media::wincap::find_app_window(&self.exe) {
                         self.hwnd = windows::Win32::Foundation::HWND(w.hwnd as isize as *mut _);
                     }
                 }
+                CAPTURE_AT.set("reading the window");
             }
 
             let crop = match (self.method, screen) {
@@ -3384,7 +3487,9 @@ mod win {
 
             self.cropping_since = None;
             if self.cap.is_none() && unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(self.hwnd).as_bool() } {
+                CAPTURE_AT.set("starting Graphics Capture of the window");
                 self.cap = crate::media::wincap::WindowCapture::new(self.comp.device(), self.hwnd, self.cursor).ok();
+                CAPTURE_AT.set("reading the window");
             }
             let (cap, tex, comp) = (&mut self.cap, &mut self.tex, &self.comp);
             if let Some(c) = cap.as_mut() {
@@ -3454,11 +3559,13 @@ mod win {
         clock: Arc<super::QpcClock>,
     ) {
         use crate::media::watchdog::{is_black, BlackWatch, LumaProbe, WatchAction, BLACK_NOTICE};
+        CAPTURE_AT.set("starting Media Foundation");
         let _timer_guard = HighResTimerGuard::new();
-        let _session = match MfSession::new() {
+        let session = match MfSession::new() {
             Ok(s) => s,
             Err(e) => {
                 shared.fail(format!("Media Foundation unavailable: {e}"));
+                CAPTURE_AT.set("ended");
                 return;
             }
         };
@@ -3483,6 +3590,7 @@ mod win {
 
         'outer: while !shared.stop_requested.load(Ordering::Acquire) {
             // ---------------- build (or rebuild) the graphics stack -------
+            CAPTURE_AT.set("setting up the graphics card");
             let mode = if synthetic { ScreenMode::Synthetic } else { screen_mode(&cfg, dup_failures) };
             let dup_fallback = dup_failures >= DUP_FAILURES_TO_FALL_BACK
                 && match &cfg.source {
@@ -3551,6 +3659,7 @@ mod win {
                 (dst_w, dst_h)
             };
 
+            CAPTURE_AT.set("opening the window");
             let mut window = match &cfg.source {
                 CaptureSource::Window { hwnd, exe, method, .. } => {
                     match WindowSource::open(&gfx.device, &gfx.context, *hwnd, exe, cfg.max_height, cfg.capture_cursor, *method) {
@@ -3573,6 +3682,7 @@ mod win {
                 None => (gfx.src_width, gfx.src_height, gfx.src_format, dst_w, dst_h),
             };
 
+            CAPTURE_AT.set("setting up the encoder");
             let converter = match ColorConverter::new(
                 &gfx.device,
                 &gfx.context,
@@ -3682,8 +3792,21 @@ mod win {
             // ---------------------------- steady-state capture ------------
             loop {
                 if shared.stop_requested.load(Ordering::Acquire) {
+                    // Closed one by one, so a stuck stop names the part.
+                    CAPTURE_AT.set("closing the window capture");
+                    drop(probe_cap);
+                    drop(window);
+                    CAPTURE_AT.set("closing the preview and layers");
+                    drop(previewer);
+                    drop(layers);
+                    CAPTURE_AT.set("closing the encoder");
+                    drop(encoder);
+                    drop(converter);
+                    CAPTURE_AT.set("closing the graphics device");
+                    drop(gfx);
                     break 'outer;
                 }
+                CAPTURE_AT.set("waiting for the next frame");
 
                 if shared.force_device_reset.swap(false, Ordering::AcqRel) {
                     log::warn!("[lastshot] simulated device reset requested via IPC");
@@ -3714,6 +3837,7 @@ mod win {
                 }
 
                 let submit_start = Instant::now();
+                CAPTURE_AT.set("reading the screen");
 
                 // ---- the screen picture (full screen, or a window to crop)
                 let needs_screen = window.as_ref().map(|w| w.wants_screen()).unwrap_or(true);
@@ -3800,6 +3924,7 @@ mod win {
 
                 let texture: Option<ID3D11Texture2D> = match window.as_mut() {
                     Some(w) => {
+                        CAPTURE_AT.set("reading the window");
                         let t = w.frame(screen.as_ref(), &gfx.desktop, cursor.as_mut()).clone();
                         Some(t)
                     }
@@ -3844,6 +3969,7 @@ mod win {
                     }
                 }
 
+                CAPTURE_AT.set("encoding");
                 if let Some(tex) = texture.as_ref() {
                     // Privacy mode: no game is focused, so this frame is dropped
                     // before the encoder — the ring can never hold desktop
@@ -4017,8 +4143,11 @@ mod win {
             }
         }
 
+        CAPTURE_AT.set("shutting down Media Foundation");
+        drop(session);
         shared.set_state(EngineState::Idle);
         shared.running.store(false, Ordering::Release);
+        CAPTURE_AT.set("ended");
     }
 }
 
@@ -4965,6 +5094,50 @@ mod ring_buffer_tests {
     }
 }
 
+/// A stop never hangs the app: a thread that does not end in time is set
+/// aside, and the engine refuses to start until it has ended.
+#[cfg(test)]
+mod stop_tests {
+    use super::*;
+
+    #[test]
+    fn join_within_gives_back_a_thread_that_runs_on() {
+        let h = std::thread::spawn(|| std::thread::sleep(Duration::from_millis(400)));
+        let t = Instant::now();
+        let h = join_within(h, Duration::from_millis(50)).unwrap_err();
+        assert!(t.elapsed() < Duration::from_millis(300));
+        assert!(join_within(h, Duration::from_secs(5)).is_ok());
+        let quick = std::thread::spawn(|| ());
+        assert!(join_within(quick, Duration::from_secs(5)).is_ok());
+    }
+
+    #[test]
+    fn a_stalled_thread_blocks_start_until_it_ends() {
+        let e = CaptureEngine::new();
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        e.stalled.lock().push(std::thread::spawn(move || {
+            let _ = rx.recv();
+        }));
+        CAPTURE_AT.set("closing the window capture");
+        let cfg = RecorderConfig { output_dir: std::env::temp_dir(), ..Default::default() };
+        let t = Instant::now();
+        let err = e.start(cfg).unwrap_err().to_string();
+        assert!(t.elapsed() < Duration::from_millis(500), "start waited {:?}", t.elapsed());
+        assert!(err.contains("has not ended yet") && err.contains("closing the window capture"), "{err}");
+        assert!(!e.is_running());
+        // A second stop (quit) does not wait for it either.
+        let t = Instant::now();
+        e.stop();
+        assert!(t.elapsed() < Duration::from_millis(500));
+        tx.send(()).unwrap();
+        let t = Instant::now();
+        while e.reap_stalled().is_some() {
+            assert!(t.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(e.stalled.lock().is_empty());
+    }
+}
 
 /// The real engine (GPU picture, Media Foundation hardware encoder, AAC)
 /// fed by the test source: nothing on the screen or the PC's sound is
@@ -5293,5 +5466,136 @@ mod engine_e2e {
         let secs = info.video().unwrap().duration_seconds();
         assert!(secs > 2.5, "{secs} s kept of ~4");
         check(&p, secs, 60);
+    }
+
+    /// The child side of the window-restart test: one plain window, off
+    /// screen and never activated (nothing on the user's desktop changes but
+    /// a taskbar button), until it is killed.
+    #[test]
+    #[ignore]
+    fn engine_child_window_until_killed() {
+        let Ok(title) = std::env::var("LASTSHOT_CHILD_WINDOW") else { return };
+        use std::io::Write as _;
+        use windows::core::{w, HSTRING};
+        use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows::Win32::UI::WindowsAndMessaging::*;
+        unsafe extern "system" fn proc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+            DefWindowProcW(h, m, w, l)
+        }
+        unsafe {
+            let inst = HINSTANCE(GetModuleHandleW(None).unwrap().0);
+            let class = w!("LastshotRestartTestWindow");
+            let wc = WNDCLASSW { lpfnWndProc: Some(proc), hInstance: inst, lpszClassName: class, ..Default::default() };
+            RegisterClassW(&wc);
+            let hwnd = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                class,
+                &HSTRING::from(title),
+                WS_OVERLAPPEDWINDOW,
+                -4000,
+                -4000,
+                640,
+                360,
+                HWND::default(),
+                HMENU::default(),
+                inst,
+                None,
+            )
+            .unwrap();
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            // Straight to stdout (println! may be captured by the harness).
+            let mut out = std::io::stdout();
+            let _ = writeln!(out, "WINDOW {}", hwnd.0 as i64);
+            let _ = out.flush();
+            let mut msg = MSG::default();
+            while GetMessageW(&mut msg, HWND::default(), 0, 0).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+    }
+
+    /// Window children to end if the watchdog fires.
+    static CHILDREN: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+    /// A hang is a test failure, never a stuck test: after `secs` the
+    /// process says where the capture thread is and exits.
+    fn watchdog(secs: u64) {
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(secs));
+            eprintln!("WATCHDOG: test still running after {secs} s; capture thread at: {}", CAPTURE_AT.describe());
+            for pid in CHILDREN.lock().iter() {
+                let _ = std::process::Command::new("taskkill").args(["/F", "/PID", &pid.to_string()]).output();
+            }
+            std::process::exit(3);
+        });
+    }
+
+    fn window_child(title: &str) -> (std::process::Child, i64) {
+        use std::io::BufRead as _;
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "media::recorder::engine_e2e::engine_child_window_until_killed", "--ignored", "--nocapture", "--test-threads=1"])
+            .env("LASTSHOT_CHILD_WINDOW", title)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut lines = std::io::BufReader::new(child.stdout.take().unwrap()).lines();
+        loop {
+            let l = lines.next().expect("child ended early").unwrap();
+            // libtest prints "test name ... " without a line break first.
+            if let Some(i) = l.find("WINDOW ") {
+                CHILDREN.lock().push(child.id());
+                return (child, l[i + 7..].trim().parse().unwrap());
+            }
+        }
+    }
+
+    /// The sandbox hang of 2026-11-17: record an app's window, the app is
+    /// killed and started again, then switch to full screen (an engine
+    /// stop). The stop must end at once and leave no thread behind. Records
+    /// only its own off-screen window with Graphics Capture, never the screen.
+    #[test]
+    #[ignore]
+    fn window_app_restart_then_stop_ends_quickly() {
+        trace_crashes();
+        watchdog(60);
+        std::env::remove_var("LASTSHOT_TEST_INSTANCE");
+        assert!(!synthetic_source());
+        let title = format!("Lastshot restart test {}", std::process::id());
+        let exe = std::env::current_exe().unwrap().file_name().unwrap().to_string_lossy().into_owned();
+        let frames = |e: &CaptureEngine| e.shared.frames_encoded.load(Ordering::Relaxed);
+        for method in [crate::media::winvis::WindowMethod::Capture] {
+            let (mut a, hwnd) = window_child(&title);
+            let e = CaptureEngine::new();
+            let source = CaptureSource::Window { hwnd, exe: exe.clone(), title: title.clone(), method };
+            e.start(RecorderConfig { source, capture_system_audio: false, ..cfg(30) }).expect("engine starts");
+            let t = Instant::now();
+            while frames(&e) < 15 {
+                assert!(t.elapsed() < Duration::from_secs(15), "no frames: {:?}", e.stats().last_error);
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            println!("{method:?}: {} via {}", e.stats().encoder.friendly_name, e.stats().capture_method);
+            // Killed like taskkill /F, then started again.
+            a.kill().unwrap();
+            let _ = a.wait();
+            std::thread::sleep(Duration::from_millis(2500));
+            println!("window gone: at {}", CAPTURE_AT.describe());
+            let (mut b, _) = window_child(&title);
+            std::thread::sleep(Duration::from_millis(3000));
+            let before = frames(&e);
+            std::thread::sleep(Duration::from_millis(500));
+            println!("window back: {} frames in 0.5 s, at {}", frames(&e) - before, CAPTURE_AT.describe());
+            let t = Instant::now();
+            e.stop();
+            let took = t.elapsed();
+            println!("stop took {} ms", took.as_millis());
+            assert!(took < Duration::from_secs(2), "stop took {took:?} (at {})", CAPTURE_AT.describe());
+            assert!(e.stalled.lock().is_empty(), "a thread was left: {}", CAPTURE_AT.describe());
+            assert!(!e.is_running());
+            let _ = b.kill();
+            let _ = b.wait();
+        }
     }
 }

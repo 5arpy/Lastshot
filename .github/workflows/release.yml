@@ -22,6 +22,12 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: write
+    env:
+      # `tauri build` links the C runtime statically only if this is set while
+      # tauri-build's script runs. Set for every cargo step, so a script the
+      # test step (or the cache) ran can't drop it: such an exe needs
+      # vcruntime140.dll and won't start without the VC++ redistributable.
+      STATIC_VCRUNTIME: "true"
 
     steps:
       - name: Checkout repository
@@ -55,6 +61,19 @@ jobs:
         run: |
           npm run build
           cargo test --release --lib --manifest-path src-tauri/Cargo.toml
+
+      # Build once before publishing and refuse an exe that needs the VC++
+      # redistributable (tauri-action below reuses this build).
+      - name: Build the exe and check its imports
+        shell: pwsh
+        run: |
+          npx tauri build --no-bundle
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          $deps = & $dumpbin.FullName /nologo /dependents src-tauri\target\release\lastshot.exe
+          $deps
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin failed" }
+          if ($deps -match '(?i)vcruntime140|msvcp140') { throw "lastshot.exe imports the VC++ runtime: it would not start on PCs without the redistributable" }
 
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0

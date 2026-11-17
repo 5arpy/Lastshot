@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_DRAW_PREFS, along, boardCss, clampBar, clampFade, fadeAlpha, parseDrawPrefs, stepWidth, toggleBoard } from "./drawPrefs";
+import { DEFAULT_DRAW_PREFS, DRAW_TOOLS, MAIN_TOOLS, MORE_TOOLS, along, boardCss, clampBar, clampFade, fadeAlpha, parseDrawPrefs, stepWidth, toggleBoard } from "./drawPrefs";
 
 describe("draw on screen", () => {
+  it("splits the tools into the bar and More tools, every tool in exactly one", () => {
+    expect(MAIN_TOOLS.length).toBeLessThanOrEqual(8);
+    expect([...MAIN_TOOLS, ...MORE_TOOLS].sort()).toEqual([...DRAW_TOOLS].sort());
+    expect(MORE_TOOLS).toEqual(["select", "line", "ellipse", "step"]);
+  });
   it("reads remembered choices and drops bad ones", () => {
     expect(parseDrawPrefs(null)).toEqual(DEFAULT_DRAW_PREFS);
     expect(parseDrawPrefs("not json")).toEqual(DEFAULT_DRAW_PREFS);

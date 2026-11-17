@@ -17,6 +17,9 @@ export interface DrawPrefs {
 }
 
 export const DRAW_TOOLS: DrawTool[] = ["select", "pen", "highlight", "eraser", "arrow", "line", "rect", "ellipse", "text", "step", "spotlight"];
+/** On the bar (the main things); the rest are one click away under "More tools". Every tool keeps its key. */
+export const MAIN_TOOLS: DrawTool[] = ["pen", "highlight", "eraser", "arrow", "rect", "text", "spotlight"];
+export const MORE_TOOLS: DrawTool[] = DRAW_TOOLS.filter((t) => !MAIN_TOOLS.includes(t));
 export const PEN_WIDTHS = [2, 4, 6, 10, 16, 24];
 /** Fade choices in the menu (any other number can be typed). */
 export const FADE_CHOICES = [0, 2, 4, 8];

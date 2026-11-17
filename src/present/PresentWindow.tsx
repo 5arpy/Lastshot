@@ -15,7 +15,8 @@ import {
   type Board,
   type DrawPrefs,
   type DrawTool,
-  DRAW_TOOLS,
+  MAIN_TOOLS,
+  MORE_TOOLS,
   FADE_CHOICES,
   PEN_WIDTHS,
   along,
@@ -94,6 +95,7 @@ const ICON = {
   mouse: "M4 2l8.5 6-3.6.8 2.3 4.4-1.7.9-2.3-4.4L4.5 12z",
   camera: "M2 5h3l1.5-2h3L11 5h3v8H2zM8 11.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z",
   more: "M3.5 8h.01M8 8h.01M12.5 8h.01",
+  shapes: "M2.5 13.5l4-7 4 7zM10 2.5h3.5V6H10z",
   eraser: "M6.5 13.5h7M3.2 9.8l5.6-6.3 4.3 3.8-5.6 6.2H5.8z",
   close: "M4 4l8 8M12 4l-8 8",
 };
@@ -124,7 +126,7 @@ export default function PresentWindow() {
   const [hidden, setHidden] = useState(false);
   const hiddenRef = useRef(false);
   hiddenRef.current = hidden;
-  const [menu, setMenu] = useState<null | "more" | "width">(null);
+  const [menu, setMenu] = useState<null | "more" | "width" | "colour" | "tools">(null);
   const [snipping, setSnipping] = useState(false);
   const [barPos, setBarPos] = useState<{ x: number; y: number } | null>(null);
   const [last, setLast] = useState<Shape[] | null>(readLast);
@@ -506,6 +508,26 @@ export default function PresentWindow() {
   // Menus open towards the middle of the window (up when the bar is low).
   const low = (barRef.current?.getBoundingClientRect().top ?? 0) > view.h / 2;
   const pop = low ? "bottom-full mb-1" : "top-full mt-1";
+  const toolLabel = (id: DrawTool) => (id === "eraser" ? "Eraser: drag over drawings" : (TOOLS.find((x) => x.id === id)?.label ?? id));
+  const toolIcon = (id: DrawTool) => (id === "eraser" ? ICON.eraser : (TOOLS.find((x) => x.id === id)?.icon ?? ICON.shapes));
+  const toolButton = (id: DrawTool) => {
+    const label = toolLabel(id);
+    const on = tool === id && !mouse;
+    return (
+      <button
+        key={id}
+        type="button"
+        title={tip(label, DRAW_TOOL_KEYS.find((x) => x.tool === id)?.label ?? "") || label}
+        aria-label={label}
+        aria-pressed={on}
+        data-testid={`draw-tool-${id}`}
+        onClick={() => chooseTool(id)}
+        className={cn(btn, on && "bg-[#5d72db] text-white hover:bg-[#5d72db]")}
+      >
+        {svg(toolIcon(id))}
+      </button>
+    );
+  };
   const sep = <div className="mx-0.5 h-6 w-px shrink-0 bg-white/15" />;
   const layerView = useMemo(() => ({ scale: 1 / scale, ox: 0, oy: 0 }), [scale]);
 
@@ -597,45 +619,64 @@ export default function PresentWindow() {
         >
           {svg(ICON.grip, "h-4 w-4 stroke-[2.5]")}
         </div>
-        {DRAW_TOOLS.map((id) => {
-          const t = id === "eraser" ? { label: "Eraser: drag over drawings", icon: ICON.eraser } : TOOLS.find((x) => x.id === id);
-          if (!t) return null;
-          const on = tool === id && !mouse;
-          return (
-            <button
-              key={id}
-              type="button"
-              title={tip(t.label, DRAW_TOOL_KEYS.find((x) => x.tool === id)?.label ?? "") || t.label}
-              aria-label={t.label}
-              aria-pressed={on}
-              data-testid={`draw-tool-${id}`}
-              onClick={() => chooseTool(id)}
-              className={cn(btn, on && "bg-[#5d72db] text-white hover:bg-[#5d72db]")}
-            >
-              {svg(t.icon)}
-            </button>
-          );
-        })}
-        {sep}
-        {PALETTE.map((c, i) => (
+        {MAIN_TOOLS.map((id) => toolButton(id))}
+        <div className="relative">
           <button
-            key={c}
             type="button"
-            title={tip(`Colour ${c}`, `Colour ${i + 1} (${["red", "yellow", "green", "blue", "purple", "white", "black"][i]})`)}
-            onClick={() => chooseColour(c)}
-            className={cn("mx-px h-5 w-5 shrink-0 rounded-full border-2", style.color.toLowerCase() === c ? "border-white" : "border-white/20")}
-            style={{ background: c }}
-          />
-        ))}
-        <label className="relative mx-px h-5 w-5 shrink-0 cursor-pointer overflow-hidden rounded-full border-2 border-dashed border-white/30" title="Any colour">
-          <input
-            type="color"
-            value={/^#[0-9a-f]{6}$/i.test(style.color) ? style.color : "#ffffff"}
-            onChange={(e) => chooseColour(e.target.value)}
-            className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
-          />
-          <span className="pointer-events-none grid h-full place-items-center text-[10px] text-white/60">+</span>
-        </label>
+            title={`More tools: ${MORE_TOOLS.map((id) => toolLabel(id)).join(", ")}`}
+            aria-pressed={MORE_TOOLS.includes(tool) && !mouse}
+            data-testid="draw-tools-more"
+            onClick={() => setMenu((m) => (m === "tools" ? null : "tools"))}
+            className={cn(btn, "gap-0.5", MORE_TOOLS.includes(tool) && !mouse && "bg-[#5d72db] text-white hover:bg-[#5d72db]", menu === "tools" && "bg-white/15")}
+          >
+            {svg(MORE_TOOLS.includes(tool) ? toolIcon(tool) : ICON.shapes)}
+            <span className="text-[9px] text-white/60">▾</span>
+          </button>
+          {menu === "tools" && (
+            <div className={cn("absolute left-0 z-30 flex items-center gap-0.5 rounded-lg border border-white/10 bg-[#1c1e25] p-1 shadow-2xl", pop)} data-testid="draw-tools-menu">
+              {MORE_TOOLS.map((id) => toolButton(id))}
+            </div>
+          )}
+        </div>
+        {sep}
+        <div className="relative">
+          <button
+            type="button"
+            title={`Colour ${style.color}: the palette or any colour (${keyOf("Colour 1 (red)") || "1"}–${keyOf(`Colour ${PALETTE.length} (black)`) || PALETTE.length})`}
+            data-testid="draw-colour"
+            onClick={() => setMenu((m) => (m === "colour" ? null : "colour"))}
+            className={cn(btn, "gap-0.5", menu === "colour" && "bg-white/15")}
+          >
+            <span className="h-5 w-5 rounded-full border-2 border-white/70" style={{ background: style.color }} />
+            <span className="text-[9px] text-white/60">▾</span>
+          </button>
+          {menu === "colour" && (
+            <div className={cn("absolute left-0 z-30 flex items-center gap-1 rounded-lg border border-white/10 bg-[#1c1e25] p-1.5 shadow-2xl", pop)} data-testid="draw-colours">
+              {PALETTE.map((c, i) => (
+                <button
+                  key={c}
+                  type="button"
+                  title={tip(`Colour ${c}`, `Colour ${i + 1} (${["red", "yellow", "green", "blue", "purple", "white", "black"][i]})`)}
+                  onClick={() => {
+                    chooseColour(c);
+                    setMenu(null);
+                  }}
+                  className={cn("mx-px h-6 w-6 shrink-0 rounded-full border-2", style.color.toLowerCase() === c ? "border-white" : "border-white/20")}
+                  style={{ background: c }}
+                />
+              ))}
+              <label className="relative mx-px h-6 w-6 shrink-0 cursor-pointer overflow-hidden rounded-full border-2 border-dashed border-white/30" title="Any colour">
+                <input
+                  type="color"
+                  value={/^#[0-9a-f]{6}$/i.test(style.color) ? style.color : "#ffffff"}
+                  onChange={(e) => chooseColour(e.target.value)}
+                  className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+                />
+                <span className="pointer-events-none grid h-full place-items-center text-[10px] text-white/60">+</span>
+              </label>
+            </div>
+          )}
+        </div>
         <div className="relative">
           <button
             type="button"
@@ -678,25 +719,25 @@ export default function PresentWindow() {
           )}
         </div>
         {sep}
-        <button type="button" className={btn} title={tip("Undo", "Undo")} disabled={!hist.current.undoLabel} onClick={undo} data-testid="draw-undo">
+        <button
+          type="button"
+          className={btn}
+          title={`${tip("Undo", "Undo")}${keyOf("Redo") ? ` · redo: ${keyOf("Redo")}` : ""}`}
+          disabled={!hist.current.undoLabel}
+          onClick={undo}
+          data-testid="draw-undo"
+        >
           {svg(ICON.undo)}
-        </button>
-        <button type="button" className={btn} title={tip("Redo", "Redo")} disabled={!hist.current.redoLabel} onClick={redo} data-testid="draw-redo">
-          {svg(ICON.redo)}
         </button>
         <button type="button" className={btn} title={tip("Clear the drawing", "Clear the drawing")} disabled={!shapes.length} onClick={clear} data-testid="draw-clear">
           {svg(ICON.clear)}
         </button>
-        <button
-          type="button"
-          className={cn(btn, hidden && "bg-white/15 text-white")}
-          title={tip(hidden ? "Show the drawing" : "Hide the drawing", "Hide / show the drawing")}
-          aria-pressed={hidden}
-          onClick={() => setHidden((h) => !h)}
-          data-testid="draw-ink"
-        >
-          {svg(hidden ? ICON.eyeOff : ICON.eye)}
-        </button>
+        {hidden && (
+          // Shown only while the drawing is hidden (I), so it can always come back with a click.
+          <button type="button" className={cn(btn, "bg-white/15 text-white")} title={tip("Show the drawing", "Hide / show the drawing")} onClick={() => setHidden(false)} data-testid="draw-ink">
+            {svg(ICON.eyeOff)}
+          </button>
+        )}
         {sep}
         <button
           type="button"
@@ -731,7 +772,7 @@ export default function PresentWindow() {
           <button
             type="button"
             className={cn(btn, menu === "more" && "bg-white/15")}
-            title="Board, fading ink"
+            title="More: redo, hide the drawing, whiteboard, fading ink"
             onClick={() => setMenu((m) => (m === "more" ? null : "more"))}
             data-testid="draw-more"
           >
@@ -739,6 +780,26 @@ export default function PresentWindow() {
           </button>
           {menu === "more" && (
             <div className={cn("absolute right-0 z-30 w-64 space-y-2.5 rounded-lg border border-white/10 bg-[#1c1e25] p-2.5 text-[12px] text-white/80 shadow-2xl", pop)} data-testid="draw-menu">
+              <div className="grid grid-cols-2 gap-1">
+                <button
+                  type="button"
+                  disabled={!hist.current.redoLabel}
+                  onClick={redo}
+                  data-testid="draw-redo"
+                  className="flex items-center gap-1.5 rounded-md border border-white/10 px-2 py-1 text-left hover:bg-white/10 disabled:opacity-35"
+                >
+                  {svg(ICON.redo, "h-3.5 w-3.5")} Redo{keyOf("Redo") && <span className="ml-auto text-white/40">{keyOf("Redo")}</span>}
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={hidden}
+                  onClick={() => setHidden((h) => !h)}
+                  data-testid="draw-ink-menu"
+                  className={cn("flex items-center gap-1.5 rounded-md border px-2 py-1 text-left", hidden ? "border-[#5d72db] bg-[#5d72db]/20 text-white" : "border-white/10 hover:bg-white/10")}
+                >
+                  {svg(hidden ? ICON.eyeOff : ICON.eye, "h-3.5 w-3.5")} Hide{keyOf("Hide / show the drawing") && <span className="ml-auto text-white/40">{keyOf("Hide / show the drawing")}</span>}
+                </button>
+              </div>
               <div>
                 <div className="mb-1 text-white/50">Behind the drawing</div>
                 <div className="grid grid-cols-2 gap-1">

@@ -194,6 +194,12 @@ pub struct Settings {
     pub encoder_backend: crate::media::recorder::EncoderBackend,
     /// Pauses / resumes the screen recording.
     pub hotkey_pause: String,
+    /// Optional: marks a moment while recording (none by default).
+    #[serde(default)]
+    pub hotkey_mark: String,
+    /// Optional: mutes the mic in the recording (none by default).
+    #[serde(default)]
+    pub hotkey_rec_mic: String,
     /// Seconds counted down before a recording starts (0 = off).
     pub record_countdown: u32,
     /// The recording stops and saves by itself after this many minutes (0 = no limit).
@@ -399,6 +405,8 @@ impl Default for Settings {
             encoder_preset: Default::default(),
             encoder_backend: Default::default(),
             hotkey_pause: default_pause_hotkey(),
+            hotkey_mark: String::new(),
+            hotkey_rec_mic: String::new(),
             record_countdown: 0,
             record_max_minutes: 0.0,
             record_max_gb: 0.0,

@@ -12,7 +12,12 @@ export const OS_HOTKEYS = [
   { field: "hotkeyPause", action: "pause", label: "Pause / resume recording" },
   { field: "hotkeySnip", action: "snip", label: "Take a screenshot" },
   { field: "hotkeyToggle", action: "toggle", label: "Instant replay on / off" },
+  { field: "hotkeyMark", action: "mark", label: "Mark a moment while recording" },
+  { field: "hotkeyRecMic", action: "recmic", label: "Mute the mic in the recording" },
 ] as const;
+
+/** Hotkeys that may have no key: Backspace clears them in Settings (Mark and the mic mute start without one). */
+export const OPTIONAL_OS_HOTKEYS: readonly OsHotkeyAction[] = ["pause", "mark", "recmic"];
 
 export type OsHotkey = (typeof OS_HOTKEYS)[number];
 export type OsHotkeyField = OsHotkey["field"];

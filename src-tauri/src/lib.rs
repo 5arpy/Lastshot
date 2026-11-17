@@ -211,10 +211,16 @@ pub fn run() {
                 // Each on its own, retried and checked in the background;
                 // failures show in Settings and as one notification.
                 hotkeys::register_all(&handle, &save_key, &toggle_key, &snip_key, &record_key);
-                let pause_key = handle.state::<AppState>().settings.read().hotkey_pause.clone();
-                if !pause_key.is_empty() {
-                    if let Err(e) = hotkey_guard::set(&handle, "pause", &pause_key) {
-                        log::warn!("[lastshot] pause hotkey: {e}");
+                let optional = {
+                    let state = handle.state::<AppState>();
+                    let s = state.settings.read();
+                    [("pause", s.hotkey_pause.clone()), ("mark", s.hotkey_mark.clone()), ("recmic", s.hotkey_rec_mic.clone())]
+                };
+                for (action, key) in optional {
+                    if !key.is_empty() {
+                        if let Err(e) = hotkey_guard::set(&handle, action, &key) {
+                            log::warn!("[lastshot] {action} hotkey: {e}");
+                        }
                     }
                 }
             }
@@ -328,7 +334,6 @@ pub fn run() {
                 if window.label() == snip::SNIP_LABEL
                     || window.label() == present::PRESENT_LABEL
                     || window.label() == recording::BAR_LABEL
-                    || window.label() == recording::ANNOT_LABEL
                     || window.label() == studio::SCENE_LABEL {
                     return;
                 }
@@ -407,7 +412,6 @@ pub fn run() {
             recording::show_bar,
             recording::set_bar_compact,
             recording::set_drawing,
-            recording::set_drawing_passthrough,
             files::get_disk_info,
             files::move_clip_to_library,
             files::open_video_file,

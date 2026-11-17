@@ -351,6 +351,10 @@ export interface AppSettings {
   hotkeyRecord: string;
   /** Pauses / resumes the running screen recording. */
   hotkeyPause: string;
+  /** Optional ("" = none): marks a moment while recording. */
+  hotkeyMark: string;
+  /** Optional ("" = none): mutes the microphone in the recording. */
+  hotkeyRecMic: string;
   /** Seconds counted down before a recording starts (0 = off). */
   recordCountdown: number;
   /** The recording stops and saves after this many minutes, pauses not counted (0 = no limit). */
@@ -428,6 +432,8 @@ export interface BarState {
   hotkeyPause: string;
   hotkeySave: string;
   hotkeySnip: string;
+  hotkeyMark: string;
+  hotkeyRecMic: string;
   /** Size of the recorded area ("1280×720"); null = whole screen. */
   area?: string | null;
   /** Moments marked so far in this recording. */
@@ -517,12 +523,6 @@ export interface RenderProject {
   }[];
   targetMb?: number | null;
 }
-
-/** Message from the control bar to the drawing layer. */
-export type DrawCommand =
-  | { kind: "tool"; tool: "pen" | "marker" | "arrow" | "box"; color: string }
-  | { kind: "undo" }
-  | { kind: "clear" };
 
 /** Space on one drive. */
 export interface DiskInfo {

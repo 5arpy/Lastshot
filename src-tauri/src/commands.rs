@@ -746,6 +746,8 @@ pub struct SettingsPatch {
     pub encoder_preset: Option<crate::media::recorder::EncoderPreset>,
     pub encoder_backend: Option<crate::media::recorder::EncoderBackend>,
     pub hotkey_pause: Option<String>,
+    pub hotkey_mark: Option<String>,
+    pub hotkey_rec_mic: Option<String>,
     pub record_countdown: Option<u32>,
     pub record_max_minutes: Option<f32>,
     pub record_max_gb: Option<f32>,
@@ -781,12 +783,16 @@ pub fn update_settings(
         let snip = patch.hotkey_snip.as_ref().unwrap_or(&s.hotkey_snip);
         let record = patch.hotkey_record.as_ref().unwrap_or(&s.hotkey_record);
         let pause = patch.hotkey_pause.as_ref().unwrap_or(&s.hotkey_pause);
+        let mark = patch.hotkey_mark.as_ref().unwrap_or(&s.hotkey_mark);
+        let recmic = patch.hotkey_rec_mic.as_ref().unwrap_or(&s.hotkey_rec_mic);
         let keys = [
             (save, "Save replay"),
             (toggle, "Instant replay on/off"),
             (snip, "Screenshot"),
             (record, "Screen recording"),
             (pause, "Pause recording"),
+            (mark, "Mark a moment"),
+            (recmic, "Mic in the recording"),
         ];
         for (i, (a, an)) in keys.iter().enumerate() {
             for (b, bn) in keys.iter().skip(i + 1) {
@@ -796,7 +802,7 @@ pub fn update_settings(
             }
         }
         // ...nor the mic-mute or frames click-through shortcut.
-        for changed in [&patch.hotkey_save, &patch.hotkey_toggle, &patch.hotkey_snip, &patch.hotkey_record, &patch.hotkey_pause].into_iter().flatten() {
+        for changed in [&patch.hotkey_save, &patch.hotkey_toggle, &patch.hotkey_snip, &patch.hotkey_record, &patch.hotkey_pause, &patch.hotkey_mark, &patch.hotkey_rec_mic].into_iter().flatten().filter(|k| !k.is_empty()) {
             let other = crate::hotkeys::used_by(&app, changed, "main").filter(|n| *n == "Mic mute" || *n == "Pop-out frames click-through");
             if let Some(name) = other {
                 return Err(format!("'{changed}' is already the shortcut for {name}"));
@@ -823,6 +829,16 @@ pub fn update_settings(
         let v = v.trim().to_string();
         crate::hotkey_guard::set(&app, "pause", &v)?;
         s.hotkey_pause = v;
+    }
+    if let Some(v) = patch.hotkey_mark.as_ref() {
+        let v = v.trim().to_string();
+        crate::hotkey_guard::set(&app, "mark", &v)?;
+        s.hotkey_mark = v;
+    }
+    if let Some(v) = patch.hotkey_rec_mic.as_ref() {
+        let v = v.trim().to_string();
+        crate::hotkey_guard::set(&app, "recmic", &v)?;
+        s.hotkey_rec_mic = v;
     }
     if let Some(v) = patch.recording_format {
         s.recording_format = v;
@@ -1132,7 +1148,7 @@ pub fn update_settings(
     if patch.studio_layers.is_some() || patch.monitor_index.is_some() {
         crate::studio::sync(&app);
     }
-    if patch.control_bar.is_some() || patch.hotkey_record.is_some() || patch.hotkey_pause.is_some() {
+    if patch.control_bar.is_some() || patch.hotkey_record.is_some() || patch.hotkey_pause.is_some() || patch.hotkey_mark.is_some() || patch.hotkey_rec_mic.is_some() {
         crate::recording::sync_bar(&app);
         crate::recording::emit_state(&app);
     }

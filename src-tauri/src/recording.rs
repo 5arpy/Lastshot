@@ -32,11 +32,10 @@ static BAR_HIDDEN: AtomicBool = AtomicBool::new(false);
 /// The user asked for the bar (Home / tray) even though the setting is off.
 static BAR_WANTED: AtomicBool = AtomicBool::new(false);
 static BAR_OPEN: AtomicBool = AtomicBool::new(false);
+/// Draw on screen was opened from the bar (it closes with the recording).
 static DRAWING: AtomicBool = AtomicBool::new(false);
 /// What is happening after stop: "Saving the recording" / "Cutting to the area".
 static FINISH_LABEL: parking_lot::Mutex<Option<&'static str>> = parking_lot::Mutex::new(None);
-/// Label of the screen-drawing overlay window.
-pub const ANNOT_LABEL: &str = "annot";
 /// Seconds left of the countdown before a recording starts.
 static COUNTDOWN: parking_lot::Mutex<Option<u32>> = parking_lot::Mutex::new(None);
 static COUNTDOWN_CANCEL: AtomicBool = AtomicBool::new(false);
@@ -93,6 +92,9 @@ pub struct BarState {
     pub hotkey_pause: String,
     pub hotkey_save: String,
     pub hotkey_snip: String,
+    /// Optional keys (empty = none) for Mark and the recording's mic mute.
+    pub hotkey_mark: String,
+    pub hotkey_rec_mic: String,
     /// Seconds left before a counted-down recording starts.
     pub countdown: Option<u32>,
     /// Size of the recorded area ("1280×720"), None for the whole screen.
@@ -107,7 +109,7 @@ pub struct BarState {
     pub finishing_label: Option<String>,
     /// The bar window is open.
     pub bar_open: bool,
-    /// Drawing on the screen is on.
+    /// Draw on screen is open over the recorded screen.
     pub drawing: bool,
 }
 
@@ -122,7 +124,7 @@ fn bar_state(state: &AppState) -> BarState {
         finishing: *FINISHING.lock(),
         finishing_label: FINISH_LABEL.lock().map(str::to_string),
         bar_open: BAR_OPEN.load(Ordering::Relaxed),
-        drawing: DRAWING.load(Ordering::Relaxed),
+        drawing: DRAWING.load(Ordering::Relaxed) && crate::present::is_open(),
         recording,
         mic_muted: MIC_MUTED.load(Ordering::Relaxed),
         mic_on: s.capture_microphone,
@@ -131,6 +133,8 @@ fn bar_state(state: &AppState) -> BarState {
         hotkey_pause: s.hotkey_pause.clone(),
         hotkey_save: s.hotkey_save.clone(),
         hotkey_snip: s.hotkey_snip.clone(),
+        hotkey_mark: s.hotkey_mark.clone(),
+        hotkey_rec_mic: s.hotkey_rec_mic.clone(),
         countdown: *COUNTDOWN.lock(),
     }
 }
@@ -546,8 +550,9 @@ pub fn recorded_monitor(state: &AppState) -> Option<(i32, i32, u32, u32, String)
         .map(|m| (m.x, m.y, m.width, m.height, m.name.clone()))
 }
 
-/// Turns drawing on the screen on or off. The drawing layer covers the
-/// recorded screen and IS in the recording (the bar is not).
+/// Opens or closes Draw on screen over the recorded screen. Its drawings
+/// (and its toolbar) ARE in the recording; the bar is not. Same tools and
+/// keys as Draw on screen from the snip bar.
 #[tauri::command]
 pub async fn set_drawing(app: AppHandle, on: bool) -> Result<(), String> {
     if !on {
@@ -555,12 +560,13 @@ pub async fn set_drawing(app: AppHandle, on: bool) -> Result<(), String> {
         emit_state(&app);
         return Ok(());
     }
-    let rect = recorded_monitor(&app.state::<AppState>()).ok_or("no screen found")?;
-    let h = app.clone();
+    let (x, y, w, h, _) = recorded_monitor(&app.state::<AppState>()).ok_or("no screen found")?;
+    let monitors = vec![crate::snip_geo::MonRect::new(0, 0, w as i32, h as i32)];
+    let a = app.clone();
     let (tx, rx) = tokio::sync::oneshot::channel();
     // Windows are built on the main thread, queued from here (see sync_bar).
     let _ = app.run_on_main_thread(move || {
-        let _ = tx.send(open_drawing(&h, rect).map_err(|e| e.to_string()));
+        let _ = tx.send(crate::present::open(&a, (x, y, w, h), monitors, 0));
     });
     rx.await.map_err(|e| e.to_string())??;
     DRAWING.store(true, Ordering::Relaxed);
@@ -568,64 +574,26 @@ pub async fn set_drawing(app: AppHandle, on: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Click-through: the drawings stay on screen but the mouse works normally again.
-#[tauri::command]
-pub fn set_drawing_passthrough(app: AppHandle, on: bool) -> Result<(), String> {
-    let w = app.get_webview_window(ANNOT_LABEL).ok_or("drawing is off")?;
-    w.set_ignore_cursor_events(on).map_err(|e| e.to_string())?;
-    if !on {
-        raise_bar(&app);
-    }
-    Ok(())
-}
-
+/// Closes Draw on screen if the bar opened it (not one the user opened from
+/// the snip bar).
 fn close_drawing(app: &AppHandle) {
-    DRAWING.store(false, Ordering::Relaxed);
-    if let Some(w) = app.get_webview_window(ANNOT_LABEL) {
-        let _ = w.close();
+    if DRAWING.swap(false, Ordering::Relaxed) {
+        crate::present::present_close(app.clone());
     }
 }
 
-/// Keeps the bar above the drawing layer (both are always on top).
-fn raise_bar(app: &AppHandle) {
-    if let Some(b) = app.get_webview_window(BAR_LABEL) {
-        let _ = b.set_always_on_top(false);
-        let _ = b.set_always_on_top(true);
+/// Marks this moment from the hotkey (no-op when not recording).
+pub fn mark_now(app: &AppHandle) {
+    if let Some(state) = app.try_state::<AppState>() {
+        let _ = add_marker(app.clone(), state);
     }
 }
 
-fn open_drawing(app: &AppHandle, rect: (i32, i32, u32, u32, String)) -> tauri::Result<()> {
-    if app.get_webview_window(ANNOT_LABEL).is_some() {
-        return Ok(());
+/// Mutes or unmutes the microphone in the recording (the hotkey).
+pub fn toggle_rec_mic(app: &AppHandle) {
+    if let Some(state) = app.try_state::<AppState>() {
+        set_mic_muted(app.clone(), state, !MIC_MUTED.load(Ordering::Relaxed));
     }
-    let (x, y, w, h, _) = rect;
-    let win = tauri::WebviewWindowBuilder::new(app, ANNOT_LABEL, tauri::WebviewUrl::default())
-        .title("Lastshot drawing")
-        .decorations(false)
-        .transparent(true)
-        .resizable(false)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .shadow(false)
-        .focused(false)
-        .visible(false)
-        .build()?;
-    hide_from_alt_tab(&win);
-    win.set_position(tauri::PhysicalPosition::new(x, y))?;
-    win.set_size(tauri::PhysicalSize::new(w, h))?;
-    // Shown without taking focus from a game; clicking it to draw activates it.
-    #[cfg(windows)]
-    if let Ok(hwnd) = win.hwnd() {
-        use windows::Win32::Foundation::HWND;
-        use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWNOACTIVATE};
-        unsafe {
-            let _ = ShowWindow(HWND(hwnd.0 as _), SW_SHOWNOACTIVATE);
-        }
-    }
-    #[cfg(not(windows))]
-    win.show()?;
-    raise_bar(app);
-    Ok(())
 }
 
 /// Keeps a helper window (control bar, snip overlay, frames) out of Alt+Tab

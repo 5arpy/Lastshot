@@ -30,7 +30,6 @@ import type {
   SnipCapture,
   SnipDone,
   BarState,
-  DrawCommand,
   MediaInfo,
   RenderProject,
   ScreenShot,
@@ -157,7 +156,6 @@ async function listen<T>(channel: string, handler: Handler<T>): Promise<() => vo
 }
 
 export const CHANNELS = {
-  draw: "lastshot://draw",
   renderProgress: "lastshot://render-progress",
   clipSaved: "lastshot://clip-saved",
   stats: "lastshot://stats",
@@ -266,6 +264,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   libraryFolders: [],
   hotkeyRecord: "Alt+R",
   hotkeyPause: "Alt+Shift+R",
+  hotkeyMark: "",
+  hotkeyRecMic: "",
   recordCountdown: 0,
   recordMaxMinutes: 0,
   recordMaxGb: 0,
@@ -333,6 +333,8 @@ function simBarState(): BarState {
     replayOn: simEngine.isRunning(),
     hotkeyRecord: s.hotkeyRecord,
     hotkeyPause: s.hotkeyPause,
+    hotkeyMark: s.hotkeyMark,
+    hotkeyRecMic: s.hotkeyRecMic,
     hotkeySave: s.hotkeySave,
     hotkeySnip: s.hotkeySnip,
     bytes,
@@ -889,9 +891,6 @@ export const lastshot = {
     if (isTauri()) await invoke("set_drawing", { on });
   },
   /** Drawings stay but the mouse goes through to the apps below. */
-  async setDrawingPassthrough(on: boolean): Promise<void> {
-    if (isTauri()) await invoke("set_drawing_passthrough", { on });
-  },
   // --------------------------------------------------------------- studio
   async screenSnapshot(): Promise<ScreenShot> {
     if (isTauri()) return invoke<ScreenShot>("screen_snapshot");
@@ -965,12 +964,6 @@ export const lastshot = {
   },
 
   /** Control bar → drawing layer. */
-  async sendDraw(cmd: DrawCommand): Promise<void> {
-    if (isTauri()) await tauri().event.emitTo("annot", CHANNELS.draw, cmd);
-  },
-  onDraw(handler: Handler<DrawCommand>) {
-    return listen<DrawCommand>(CHANNELS.draw, handler);
-  },
   async getBarState(): Promise<BarState> {
     if (isTauri()) return invoke<BarState>("get_bar_state");
     return simBarState();

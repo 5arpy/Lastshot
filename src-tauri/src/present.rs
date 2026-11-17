@@ -113,6 +113,13 @@ pub fn present_close(app: AppHandle) {
         let _ = w.close();
     }
     INFO.lock().take();
+    // The control bar's Draw button follows it.
+    crate::recording::emit_state(&app);
+}
+
+/// Draw on screen is open.
+pub fn is_open() -> bool {
+    INFO.lock().is_some()
 }
 
 /// Snips the screen with the drawing on it: the regular snip overlay opens

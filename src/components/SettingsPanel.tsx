@@ -17,7 +17,7 @@ import ShortcutsSettings from "./ShortcutsSettings";
 import { acceleratorFromEvent } from "../lib/accelerator";
 import { screenshotsDir, shownPath } from "../lib/pathDisplay";
 import { getTheme, onThemeChange, setTheme, type ThemeChoice } from "../lib/theme";
-import { OS_HOTKEYS, osHotkeyClash, type OsHotkeyAction } from "../lib/osHotkeys";
+import { OPTIONAL_OS_HOTKEYS, OS_HOTKEYS, osHotkeyClash, type OsHotkeyAction } from "../lib/osHotkeys";
 import { CountdownRow, ScreenRecordingMore, VideoQualityRows } from "./RecordingSettings";
 
 interface Props {
@@ -64,10 +64,13 @@ function HotkeyRecorder({
   value,
   recording,
   onStart,
+  optional,
 }: {
   value: string;
   recording: boolean;
   onStart: () => void;
+  /** Off until set; Backspace clears it again. */
+  optional?: boolean;
 }) {
   const ref = useRef<HTMLButtonElement | null>(null);
   useEffect(() => {
@@ -80,7 +83,7 @@ function HotkeyRecorder({
       type="button"
       onClick={onStart}
       disabled={recording}
-      title="Click, then press the new key combination"
+      title={optional ? "Click, then press the new key combination (Backspace: no key)" : "Click, then press the new key combination"}
       className={cn(
         "relative rounded border px-3 py-1 font-mono text-[11px] font-semibold tracking-wide transition-colors",
         recording
@@ -93,8 +96,10 @@ function HotkeyRecorder({
           <span className="mr-1.5 inline-block h-1.5 w-1.5 animate-rec rounded-full bg-accent align-middle" />
           Press keys…
         </>
-      ) : (
+      ) : value ? (
         value.toUpperCase()
+      ) : (
+        <span className="font-sans font-normal text-ink-3">None</span>
       )}
     </button>
   );
@@ -315,7 +320,7 @@ export default function SettingsPanel({
       alive = false;
       off?.();
     };
-  }, [settings.hotkeySave, settings.hotkeyToggle, settings.hotkeySnip, settings.hotkeyRecord, settings.hotkeyPause]);
+  }, [settings.hotkeySave, settings.hotkeyToggle, settings.hotkeySnip, settings.hotkeyRecord, settings.hotkeyPause, settings.hotkeyMark, settings.hotkeyRecMic]);
   const retryHotkeys = () => void lastshot.retryHotkeys().then(setHotkeyStatus).catch(() => undefined);
   const [audioDevices, setAudioDevices] = useState<AudioDevice[]>([]);
   const [scanningDevices, setScanningDevices] = useState(false);
@@ -356,8 +361,16 @@ export default function SettingsPanel({
         setRecording(null);
         return;
       }
-      if (!accel) return;
       const hk = OS_HOTKEYS.find((o) => o.action === recording)!;
+      const bare = !e.ctrlKey && !e.altKey && !e.shiftKey && !e.metaKey;
+      if (bare && (e.key === "Backspace" || e.key === "Delete") && OPTIONAL_OS_HOTKEYS.includes(recording)) {
+        // Optional keys can be taken off again.
+        setRecording(null);
+        setHotkeyErr(null);
+        if (settings[hk.field]) onChange({ [hk.field]: "" } as Partial<AppSettings>);
+        return;
+      }
+      if (!accel) return;
       setRecording(null);
       const clash = osHotkeyClash(settings, hk.field, accel);
       if (clash) {
@@ -387,6 +400,7 @@ export default function SettingsPanel({
         <div className="flex items-center gap-2">
           <HotkeyRecorder
             value={withDefaults[field]}
+            optional={OPTIONAL_OS_HOTKEYS.includes(action)}
             recording={recording === action}
             onStart={() => {
               setHotkeyErr(null);
@@ -683,6 +697,8 @@ export default function SettingsPanel({
         <Row label="Save replay">{hotkey("save")}</Row>
         <Row label="Start / stop screen recording">{hotkey("record")}</Row>
         <Row label="Pause / resume screen recording">{hotkey("pause")}</Row>
+        <Row label="Mark a moment while recording" hint="None until you set one. The marks show on the editor timeline.">{hotkey("mark")}</Row>
+        <Row label="Mute the mic in the recording" hint="None until you set one. Only the recording's mic track, not the mic itself.">{hotkey("recmic")}</Row>
         <Row label="Take a screenshot">{hotkey("snip")}</Row>
         <Row label="Turn instant replay on / off">{hotkey("toggle")}</Row>
       </Section>

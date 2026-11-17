@@ -134,6 +134,21 @@ impl Table {
         }
     }
 
+    /// Drops durations of samples that never reached the file (a fragment
+    /// whose write failed), so `stts` matches the samples.
+    fn trim_durs(&mut self) {
+        let n = self.sizes.len() as u64;
+        while self.durs > n {
+            let Some((c, v)) = self.stts.last_mut() else { break };
+            *c -= 1;
+            self.durs -= 1;
+            self.total_dur -= *v as u64;
+            if *c == 0 {
+                self.stts.pop();
+            }
+        }
+    }
+
     fn add_chunk(&mut self, offset: u64, count: u32) {
         if count > 0 {
             self.chunks.push((offset, count));
@@ -603,6 +618,9 @@ pub struct Mp4Writer {
     pub fragment_seconds: f64,
     /// A write failed (disk full, drive gone): the file ends at `pos`.
     failed: bool,
+    /// Tests: writes past this file size fail like a full disk.
+    #[cfg(test)]
+    pub(crate) fail_after: Option<u64>,
 }
 
 impl Mp4Writer {
@@ -657,6 +675,8 @@ impl Mp4Writer {
             sync_every: Duration::from_secs(5),
             fragment_seconds: if mode == Mode::Hybrid { 1.0 } else { 0.5 },
             failed: false,
+            #[cfg(test)]
+            fail_after: None,
         })
     }
 
@@ -817,6 +837,14 @@ impl Mp4Writer {
         }
         h.u32((8 + data_len) as u32);
         h.extend_from_slice(b"mdat");
+        #[cfg(test)]
+        if let Some(limit) = self.fail_after {
+            if self.pos + h.len() as u64 + data_len > limit {
+                // Half a fragment reaches the disk, then it is full.
+                self.file.write_all(&h[..h.len() / 2])?;
+                return Err(io::Error::new(io::ErrorKind::StorageFull, "disk full (test)"));
+            }
+        }
         self.file.write_all(h)?;
         for t in &self.tracks {
             if !t.data.is_empty() {
@@ -861,9 +889,11 @@ impl Mp4Writer {
     pub fn finish(mut self) -> io::Result<Finished> {
         let flushed = self.flush();
         for t in &mut self.tracks {
-            if let Some((_, hint)) = t.pending.take() {
+            let hint = t.pending.take().map(|p| p.1).unwrap_or(1);
+            while (t.table.durs as usize) < t.table.samples() {
                 t.table.push_dur(hint);
             }
+            t.table.trim_durs();
         }
         let list: Vec<MoovTrack> =
             self.tracks.iter().filter(|t| t.table.samples() > 0).map(|t| MoovTrack { cfg: &t.cfg, table: Some(&t.table) }).collect();
@@ -1783,5 +1813,51 @@ pub(crate) mod tests {
         let info = read(&p).unwrap();
         assert_eq!(info.layout, Layout::HalfFinished);
         assert_eq!(info.video().unwrap().samples.len(), 60, "the full moov has every sample");
+    }
+
+    #[test]
+    fn a_full_disk_keeps_what_was_written() {
+        let p = tmp("full.mp4");
+        let s = H264Stream::new(64, 48);
+        let tracks = vec![
+            TrackConfig::video(CodecId::H264, 30_000, 64, 48, codec::video_config(CodecId::H264, &s.header(), &[]).unwrap()),
+            TrackConfig::aac(48_000, 2, 192_000),
+        ];
+        let mut w = Mp4Writer::create(&p, Mode::Hybrid, tracks).unwrap();
+        // Two fragments fit (each has one or two 4.6 KB key frames).
+        w.fail_after = Some(20_000);
+        let mut err = None;
+        let mut a = 0i64;
+        'outer: for i in 0..30 * 10u32 {
+            let (au, key) = s.frame(i, 30);
+            if let Err(e) = w.write_sample(0, i as i64 * 1000, 0, key, 1000, |b| {
+                codec::append_sample(CodecId::H264, &au, b);
+            }) {
+                err = Some(e);
+                break;
+            }
+            while a * 1024 * 30 < (i as i64 + 1) * 48_000 {
+                if let Err(e) = w.write_sample(1, a * 1024, 0, true, 1024, |b| b.extend_from_slice(&SILENT_AAC_STEREO)) {
+                    err = Some(e);
+                    break 'outer;
+                }
+                a += 1;
+            }
+        }
+        assert_eq!(err.expect("the disk filled up").kind(), io::ErrorKind::StorageFull);
+        // Later writes fail at once instead of growing the file.
+        assert!(w.flush().is_err());
+        let done = w.finish().unwrap();
+        let info = read(&p).unwrap();
+        assert_eq!(info.layout, Layout::Regular);
+        let v = info.video().unwrap();
+        assert!(v.samples.len() >= 30, "whole fragments kept: {}", v.samples.len());
+        assert_eq!(done.samples[0], v.samples.len());
+        if let Some(pr) = testdata::probe(&p) {
+            assert_eq!(pr.packets("h264"), Some(v.samples.len() as u64));
+        }
+        if let Some(e) = testdata::decode_errors(&p) {
+            assert!(e.trim().is_empty(), "{e}");
+        }
     }
 }

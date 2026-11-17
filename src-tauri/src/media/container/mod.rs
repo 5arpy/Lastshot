@@ -16,8 +16,11 @@ pub mod codec;
 pub mod mkv;
 pub mod mp4;
 pub mod remux;
+pub mod stream;
 
-#[cfg(test)]
+/// Hand-made H.264 + silent AAC: tests, and the picture of the headless sim.
+#[cfg(any(test, not(windows), feature = "headless-sim"))]
+#[allow(dead_code)]
 pub(crate) mod testdata;
 
 use std::io;

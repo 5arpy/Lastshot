@@ -900,17 +900,18 @@ pub fn aac_config_info(asc: &[u8]) -> Option<(u32, u16)> {
     Some((rate, ch))
 }
 
-/// Builds the decoder configuration record for a video codec from what the
-/// encoder handed over (`header`, Annex B or OBUs) and, failing that, from a
-/// key frame. None when the parameter sets are not there yet.
+/// Builds the decoder configuration record for a video codec from the
+/// parameter sets in a key frame (what the stream really uses) and, failing
+/// that, from what the encoder handed over (`header`, Annex B or OBUs). None
+/// when the parameter sets are not there yet.
 pub fn video_config(codec: CodecId, header: &[u8], keyframe: &[u8]) -> Option<Vec<u8>> {
     match codec {
         CodecId::H264 | CodecId::Hevc => {
-            let mut p = ParamSets::collect(codec, header);
+            let mut p = ParamSets::collect(codec, keyframe);
             if !p.is_complete(codec) {
-                let k = ParamSets::collect(codec, keyframe);
-                if k.is_complete(codec) {
-                    p = k;
+                let h = ParamSets::collect(codec, header);
+                if h.is_complete(codec) {
+                    p = h;
                 }
             }
             if !p.is_complete(codec) {
@@ -927,7 +928,7 @@ pub fn video_config(codec: CodecId, header: &[u8], keyframe: &[u8]) -> Option<Ve
             if header.first() == Some(&0x81) && header.len() > 4 {
                 return Some(header.to_vec());
             }
-            av1c(header).or_else(|| av1c(keyframe))
+            av1c(keyframe).or_else(|| av1c(header))
         }
         CodecId::Aac => None,
     }

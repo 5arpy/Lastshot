@@ -2386,6 +2386,10 @@ mod win {
         /// An async MFT must get exactly one ProcessOutput per event; calls
         /// without one fail (or, on some drivers, stall the next input).
         pending_output: u32,
+        /// Encoders that don't hand out their own output samples (Windows'
+        /// software H.264 encoder) write into this one; ProcessOutput without
+        /// it fails with E_INVALIDARG, so nothing was ever encoded.
+        out_sample: Option<(IMFSample, IMFMediaBuffer)>,
         width: u32,
         height: u32,
         fps: u32,
@@ -2410,6 +2414,27 @@ mod win {
 
     pub(crate) fn hardware_sessions() -> u32 {
         HW_SESSIONS.load(Ordering::Relaxed)
+    }
+
+    /// The output sample for an encoder that wants the caller to provide one
+    /// (no MFT_OUTPUT_STREAM_PROVIDES_SAMPLES / CAN_PROVIDE_SAMPLES), sized
+    /// for its largest access unit; None when the encoder hands out its own.
+    unsafe fn own_output_sample(
+        transform: &IMFTransform,
+        width: u32,
+        height: u32,
+    ) -> RResult<Option<(IMFSample, IMFMediaBuffer)>> {
+        let info = transform.GetOutputStreamInfo(0).map_err(hr)?;
+        let provides = (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0) as u32;
+        if info.dwFlags & provides != 0 {
+            return Ok(None);
+        }
+        // A raw NV12 frame bounds any sane access unit when cbSize is 0.
+        let size = info.cbSize.max(width * height * 3 / 2).max(64 * 1024);
+        let buffer = MFCreateMemoryBuffer(size).map_err(hr)?;
+        let sample = MFCreateSample().map_err(hr)?;
+        sample.AddBuffer(&buffer).map_err(hr)?;
+        Ok(Some((sample, buffer)))
     }
 
     /// One encoder that might be used.
@@ -2801,6 +2826,7 @@ mod win {
                 EncoderPreset::Quality => ", quality preset",
             };
             let detail = format!("{quality}, key frame every {} s{preset}", gop as f32 / fps.max(1) as f32);
+            let out_sample = own_output_sample(&transform, width, height)?;
             if hardware {
                 HW_SESSIONS.fetch_add(1, Ordering::Relaxed);
             }
@@ -2834,6 +2860,7 @@ mod win {
                 async_mode,
                 pending_input: 0,
                 pending_output: 0,
+                out_sample,
                 width,
                 height,
                 fps,
@@ -2926,9 +2953,18 @@ mod win {
                         self.pending_output -= 1;
                     }
                     let mut status = 0u32;
+                    let own = match self.out_sample.as_ref() {
+                        Some((sample, buffer)) => {
+                            // Reused: clear what the last access unit left.
+                            let _ = sample.DeleteAllItems();
+                            let _ = buffer.SetCurrentLength(0);
+                            Some(sample.clone())
+                        }
+                        None => None,
+                    };
                     let mut out = [MFT_OUTPUT_DATA_BUFFER {
                         dwStreamID: 0,
-                        pSample: std::mem::ManuallyDrop::new(None),
+                        pSample: std::mem::ManuallyDrop::new(own),
                         dwStatus: 0,
                         pEvents: std::mem::ManuallyDrop::new(None),
                     }];
@@ -2937,6 +2973,9 @@ mod win {
                     // The caller owns any event collection the MFT hands back;
                     // windows-rs never drops `ManuallyDrop` fields on its own.
                     drop(std::mem::ManuallyDrop::take(&mut out[0].pEvents));
+                    if result.is_err() {
+                        drop(std::mem::ManuallyDrop::take(&mut out[0].pSample));
+                    }
                     match result {
                         Ok(()) => {}
                         Err(e)
@@ -3011,6 +3050,7 @@ mod win {
         unsafe fn renegotiate_output(&mut self) -> RResult<()> {
             let available = self.transform.GetOutputAvailableType(0, 0).map_err(hr)?;
             self.transform.SetOutputType(0, &available, 0).map_err(hr)?;
+            self.out_sample = own_output_sample(&self.transform, self.width, self.height)?;
             if let Ok(size) = available.GetBlobSize(&MF_MT_MPEG_SEQUENCE_HEADER) {
                 if size > 0 {
                     let mut hdr = vec![0u8; size as usize];
@@ -3369,11 +3409,29 @@ mod win {
         }
     }
 
+    /// Duplication failures in a row before Automatic uses Graphics Capture.
+    const DUP_FAILURES_TO_FALL_BACK: u32 = 3;
+    /// Clean acquires in a row (about a second) that make a duplication healthy.
+    const DUP_HEALTHY_ACQUIRES: u32 = 60;
+    /// Failed acquires in a row before a duplication is set up again.
+    const DUP_ERRORS_TO_REBUILD: u32 = 30;
+
+    /// A clean acquire (a frame, or nothing changed): after a healthy run the
+    /// failure count starts over, so a one-off loss (UAC, a mode switch) never
+    /// adds up with one much later.
+    fn dup_clean(ok: &mut u32, errs: &mut u32, failures: &mut u32) {
+        *errs = 0;
+        *ok = ok.saturating_add(1);
+        if *ok == DUP_HEALTHY_ACQUIRES {
+            *failures = 0;
+        }
+    }
+
     /// Picks how to capture the screen for this engine run.
     fn screen_mode(cfg: &RecorderConfig, dup_failures: u32) -> ScreenMode {
         match &cfg.source {
             CaptureSource::Window { method, .. } => {
-                if *method == crate::media::winvis::WindowMethod::Capture || dup_failures >= 3 {
+                if *method == crate::media::winvis::WindowMethod::Capture || dup_failures >= DUP_FAILURES_TO_FALL_BACK {
                     ScreenMode::None
                 } else {
                     ScreenMode::Duplication
@@ -3382,7 +3440,7 @@ mod win {
             CaptureSource::Display => match cfg.display_method {
                 DisplayMethod::Duplication => ScreenMode::Duplication,
                 DisplayMethod::GraphicsCapture => ScreenMode::Capture,
-                DisplayMethod::Auto if dup_failures >= 3 => ScreenMode::Capture,
+                DisplayMethod::Auto if dup_failures >= DUP_FAILURES_TO_FALL_BACK => ScreenMode::Capture,
                 DisplayMethod::Auto => ScreenMode::DuplicationOrCapture,
             },
         }
@@ -3406,9 +3464,14 @@ mod win {
         };
 
         let mut backoff_ms = 40u64;
-        // Consecutive failures to set up desktop duplication; after three,
-        // Automatic switches to Graphics Capture for this run.
+        // Consecutive failures of desktop duplication: setting it up, or a
+        // duplication that was lost or kept failing before it ran well for a
+        // second. After three, Automatic switches to Graphics Capture for this
+        // run (remote sessions and virtual displays: RDP, Parsec, cloud VMs).
+        // A second of clean frames clears the count.
         let mut dup_failures = 0u32;
+        let mut dup_why = String::new();
+        let mut dup_fallback_said = false;
         // Encoders that opened but would not take frames (session limits on
         // some drivers show up only then): skipped on the next rebuild.
         let mut failed_encoders: Vec<String> = Vec::new();
@@ -3421,20 +3484,27 @@ mod win {
         'outer: while !shared.stop_requested.load(Ordering::Acquire) {
             // ---------------- build (or rebuild) the graphics stack -------
             let mode = if synthetic { ScreenMode::Synthetic } else { screen_mode(&cfg, dup_failures) };
+            let dup_fallback = dup_failures >= DUP_FAILURES_TO_FALL_BACK
+                && match &cfg.source {
+                    CaptureSource::Display => cfg.display_method == DisplayMethod::Auto,
+                    CaptureSource::Window { method, .. } => *method != crate::media::winvis::WindowMethod::Capture,
+                };
+            if dup_fallback && !dup_fallback_said {
+                dup_fallback_said = true;
+                log::warn!(
+                    "[lastshot] desktop duplication failed {dup_failures} times in a row on this screen ({dup_why}); using Graphics Capture for this run"
+                );
+            }
             let monitor_index = match &cfg.source {
                 CaptureSource::Window { hwnd, .. } => monitor_index_of_window(*hwnd).unwrap_or(cfg.monitor_index),
                 CaptureSource::Display => cfg.monitor_index,
             };
             let mut gfx = match GraphicsStack::create(monitor_index, mode, cfg.capture_cursor) {
-                Ok(g) => {
-                    if matches!(mode, ScreenMode::Duplication | ScreenMode::DuplicationOrCapture) {
-                        dup_failures = 0;
-                    }
-                    g
-                }
+                Ok(g) => g,
                 Err(e) => {
                     if matches!(mode, ScreenMode::Duplication | ScreenMode::DuplicationOrCapture) {
                         dup_failures += 1;
+                        dup_why = format!("{e}");
                     }
                     shared.set_state(EngineState::Recovering);
                     shared.fail(format!("{e}"));
@@ -3558,8 +3628,20 @@ mod win {
             *shared.last_error.write() = None;
             // A fallback (other codec, other encoder, the CPU) is said plainly.
             *shared.notice.write() = encoder.info.notice.clone();
-            *shared.capture_method.write() =
-                window.as_ref().map(|w| w.method_label()).unwrap_or(gfx.method_label()).to_string();
+            *shared.capture_method.write() = match window.as_ref() {
+                Some(w) => w.method_label().to_string(),
+                None if dup_fallback => "Graphics Capture (duplication failed)".to_string(),
+                None => gfx.method_label().to_string(),
+            };
+            if dup_failures >= DUP_FAILURES_TO_FALL_BACK
+                && matches!(cfg.source, CaptureSource::Display)
+                && cfg.display_method == DisplayMethod::Duplication
+            {
+                // The user chose duplication: keep it, but say why nothing comes.
+                *shared.notice.write() = Some(
+                    "Desktop duplication keeps failing on this screen (remote session or virtual display?). The Automatic capture method would use Graphics Capture here.".into(),
+                );
+            }
             shared.set_state(EngineState::Buffering);
             backoff_ms = 40;
 
@@ -3572,6 +3654,10 @@ mod win {
             let mut last_pts = i64::MIN;
             let mut was_gated = false;
             let mut last_screen: Option<ID3D11Texture2D> = None;
+            // Duplication health: clean acquires (a frame or "nothing changed")
+            // in a row, and failed acquires in a row.
+            let mut dup_ok = 0u32;
+            let mut dup_errs = 0u32;
             // Desktop Duplication leaves the pointer out; we draw it.
             let mut cursor = (cfg.capture_cursor && gfx.duplication.is_some())
                 .then(crate::media::cursor::CursorOverlay::default);
@@ -3642,6 +3728,7 @@ mod win {
                         match unsafe { dup.AcquireNextFrame(0, &mut frame_info, &mut resource) } {
                             Ok(()) => {
                                 acquired = true;
+                                dup_clean(&mut dup_ok, &mut dup_errs, &mut dup_failures);
                                 if let Some(c) = cursor.as_mut() {
                                     c.update(&dup, &gfx.device, &gfx.context, &frame_info);
                                 }
@@ -3658,10 +3745,17 @@ mod win {
                             Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => {
                                 // Nothing changed on screen. Re-encode the previous
                                 // surface so the timeline stays constant-frame-rate.
+                                dup_clean(&mut dup_ok, &mut dup_errs, &mut dup_failures);
                                 screen = last_screen.clone();
                             }
                             Err(e) if is_device_lost(&e) => {
                                 log::warn!("[lastshot] device lost during acquire: {e}");
+                                if dup_ok < DUP_HEALTHY_ACQUIRES {
+                                    // Lost before it ever ran well: counts toward
+                                    // Automatic's switch to Graphics Capture.
+                                    dup_failures += 1;
+                                    dup_why = format!("{e}");
+                                }
                                 let _ = unsafe { dup.ReleaseFrame() };
                                 shared.device_resets.fetch_add(1, Ordering::Relaxed);
                                 shared.generation.fetch_add(1, Ordering::AcqRel);
@@ -3670,9 +3764,25 @@ mod win {
                                 continue 'outer;
                             }
                             Err(e) => {
-                                log::warn!("[lastshot] acquire error: {e}");
+                                dup_errs += 1;
+                                dup_ok = 0;
+                                if dup_errs == 1 {
+                                    log::warn!("[lastshot] acquire error: {e}");
+                                }
                                 shared.dropped_frames.fetch_add(1, Ordering::Relaxed);
                                 let _ = unsafe { dup.ReleaseFrame() };
+                                if dup_errs >= DUP_ERRORS_TO_REBUILD {
+                                    // A duplication that only fails (seen on remote
+                                    // display adapters) is rebuilt, not retried forever.
+                                    log::warn!("[lastshot] desktop duplication failed {dup_errs} times in a row ({e}); setting it up again");
+                                    dup_failures += 1;
+                                    dup_why = format!("{e}");
+                                    shared.device_resets.fetch_add(1, Ordering::Relaxed);
+                                    shared.generation.fetch_add(1, Ordering::AcqRel);
+                                    shared.set_state(EngineState::Recovering);
+                                    encoder.flush();
+                                    continue 'outer;
+                                }
                                 continue;
                             }
                         }
@@ -5106,6 +5216,23 @@ mod engine_e2e {
             check(&p, 3.0, fps);
             e.stop();
         }
+        std::env::remove_var("LASTSHOT_SYNTH_SIZE");
+    }
+
+    /// Windows' software H.264 encoder (no graphics card encoder: VMs,
+    /// remote sessions, old GPUs, or every hardware session taken). It wants
+    /// the caller's output sample; without one nothing was ever encoded.
+    #[test]
+    #[ignore]
+    fn engine_software_encoder_records() {
+        std::env::set_var("LASTSHOT_SYNTH_SIZE", "1280x720");
+        let e = engine(RecorderConfig { encoder_backend: EncoderBackend::Software, performance_mode: false, ..cfg(30) });
+        let (p, _) = record(&e, "software.mp4", 3.0, opts());
+        assert!(!e.stats().encoder.hardware, "{:?}", e.stats().encoder);
+        check(&p, 3.0, 30);
+        let r = e.flush_to_disk(Some(3.0)).unwrap();
+        check(Path::new(&r.path), r.duration_seconds as f64, 30);
+        e.stop();
         std::env::remove_var("LASTSHOT_SYNTH_SIZE");
     }
 

@@ -30,6 +30,8 @@ describe("recording file names", () => {
     expect(renderRecordName("{app} {res} {fps}fps {codec} {nope}", { ...ctx, codec: "hevc", ext: "mkv" })).toBe(
       "Roblox 1920x1080 60fps HEVC {nope}.mkv",
     );
+    expect(renderRecordName("{codec}", ctx)).toBe("H264.mp4");
+    expect(renderRecordName("{codec}", { ...ctx, codec: "av1" })).toBe("AV1.mp4");
     expect(renderRecordName("{APP}", ctx)).toBe("Roblox.mp4");
   });
   it("drops trailing dots and spaces, and never gives an empty name", () => {
@@ -40,6 +42,8 @@ describe("recording file names", () => {
     expect(recordNameError(DEFAULT_RECORD_NAME)).toBeNull();
     expect(recordNameError("   ")).toMatch(/Type a name/);
     for (const c of [":", "*", "?", '"', "<", ">", "|", "/", "\\"]) expect(recordNameError(`a${c}b`), c).toMatch(/can't contain/);
+    expect(recordNameError("{app} {dat}")).toMatch(/Unknown name part \{dat\}/);
+    expect(recordNameError("{APP} {Fps}fps")).toBeNull();
   });
   it("every token is listed once and is in braces", () => {
     const t = RECORD_NAME_TOKENS.map((x) => x.token);

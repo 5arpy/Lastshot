@@ -22,8 +22,8 @@ export const RECORD_NAME_TOKENS: { token: string; hint: string }[] = [
   { token: "{minute}", hint: "Minute, 00-59" },
   { token: "{second}", hint: "Second, 00-59" },
   { token: "{res}", hint: "Resolution, like 1920x1080" },
-  { token: "{fps}", hint: "Frame rate, like 60" },
-  { token: "{codec}", hint: "Video codec: H.264, HEVC or AV1" },
+  { token: "{fps}", hint: "Frame rate, like 60 (type {fps}fps for 60fps)" },
+  { token: "{codec}", hint: "Video codec: H264, HEVC or AV1" },
 ];
 
 /** Characters Windows does not allow in a file name. */
@@ -35,6 +35,10 @@ export function recordNameError(template: string): string | null {
   if (BAD_CHARS.test(template)) return 'A file name can\'t contain : * ? " < > | / \\';
   // eslint-disable-next-line no-control-regex
   if (/[\x00-\x1f]/.test(template)) return "A file name can't contain control characters.";
+  // Same words as the app's own check.
+  const known = new Set(RECORD_NAME_TOKENS.map((t) => t.token.toLowerCase()));
+  const unknown = template.match(/\{[^{}]*\}/g)?.find((t) => !known.has(t.toLowerCase()));
+  if (unknown) return `Unknown name part ${unknown}. These work: ${RECORD_NAME_TOKENS.map((t) => t.token).join(" ")}.`;
   return null;
 }
 
@@ -52,7 +56,7 @@ const pad = (n: number) => String(n).padStart(2, "0");
 
 /**
  * The file name a template gives (the browser preview; the installed app asks
- * the backend). Unknown tokens stay as typed; trailing dots and spaces go,
+ * the backend). Unknown tokens stay as typed (recordNameError reports them); trailing dots and spaces go,
  * like Windows does.
  */
 export function renderRecordName(template: string, c: NameContext): string {
@@ -71,7 +75,8 @@ export function renderRecordName(template: string, c: NameContext): string {
     second: pad(d.getSeconds()),
     res: `${c.width}x${c.height}`,
     fps: String(Math.round(c.fps)),
-    codec: CODEC_LABEL[c.codec],
+    // No dot, like the app: "H264".
+    codec: CODEC_LABEL[c.codec].replace(".", ""),
   };
   const stem = template
     .replace(/\{([a-z]+)\}/gi, (all, k: string) => values[k.toLowerCase()] ?? all)

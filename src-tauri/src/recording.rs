@@ -968,7 +968,7 @@ pub fn render_file_name(template: &str, p: &NameParts) -> Result<String, String>
             "minute" => p.when.format("%M").to_string(),
             "second" => p.when.format("%S").to_string(),
             "res" => format!("{}x{}", p.width, p.height),
-            "fps" => format!("{}fps", p.fps),
+            "fps" => p.fps.to_string(),
             "codec" => p.codec.replace('.', ""),
             _ => {
                 let list: Vec<String> = FILE_NAME_TOKENS.iter().map(|t| format!("{{{t}}}")).collect();
@@ -1380,7 +1380,7 @@ mod name_tests {
 
     #[test]
     fn every_token_fills_in() {
-        let n = render_file_name("{year}{month}{day}_{hour}{minute}{second} {RES} {fps} {codec} {app}", &parts()).unwrap();
+        let n = render_file_name("{year}{month}{day}_{hour}{minute}{second} {RES} {fps}fps {codec} {app}", &parts()).unwrap();
         assert_eq!(n, "20261117_201503 2560x1440 144fps H264 Roblox");
     }
 

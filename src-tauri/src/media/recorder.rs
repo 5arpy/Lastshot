@@ -1840,6 +1840,9 @@ mod win {
         pub src_format: DXGI_FORMAT,
         /// Test copies: the made-up picture (nothing is captured).
         pub synth: Option<Synth>,
+        /// The screen is on a software adapter (VM, remote session) and is
+        /// captured with Graphics Capture on another GPU.
+        pub cross_adapter: bool,
     }
 
     impl GraphicsStack {
@@ -1851,7 +1854,8 @@ mod win {
                 }
 
                 // Walk adapters/outputs to find the requested monitor. Index is
-                // flattened across adapters so a 2-GPU laptop behaves sanely.
+                // flattened across adapters (as in the monitor list) so a
+                // 2-GPU laptop behaves sanely.
                 let mut flat = 0u32;
                 let mut adapter_idx = 0u32;
                 loop {
@@ -1860,12 +1864,7 @@ mod win {
                         Err(_) => break,
                     };
                     let adesc = adapter.GetDesc1().map_err(hr)?;
-
-                    // Skip the Microsoft Basic Render Driver.
-                    if (adesc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0 {
-                        adapter_idx += 1;
-                        continue;
-                    }
+                    let software = (adesc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0;
 
                     let mut output_idx = 0u32;
                     loop {
@@ -1874,7 +1873,14 @@ mod win {
                             Err(_) => break,
                         };
                         if flat == monitor_index {
-                            return Self::build(&adapter, &adesc, &output, mode, cursor);
+                            if !software {
+                                return Self::build(&adapter, &adesc, &output, mode, cursor);
+                            }
+                            // No graphics card drives this screen (a virtual
+                            // machine, a remote session, the basic display
+                            // driver): Graphics Capture on the first real GPU,
+                            // which works across adapters.
+                            return Self::build_cross(&factory, &output, mode, cursor);
                         }
                         flat += 1;
                         output_idx += 1;
@@ -1883,6 +1889,28 @@ mod win {
                 }
                 Err(RecorderError::NoSuchMonitor(monitor_index))
             }
+        }
+
+        /// A screen on a software adapter, captured with Graphics Capture on
+        /// the first hardware GPU (desktop duplication needs the screen's own).
+        unsafe fn build_cross(factory: &IDXGIFactory1, output: &IDXGIOutput, mode: ScreenMode, cursor: bool) -> RResult<Self> {
+            let mut i = 0u32;
+            while let Ok(adapter) = factory.EnumAdapters1(i) {
+                i += 1;
+                let adesc = adapter.GetDesc1().map_err(hr)?;
+                if (adesc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0 {
+                    continue;
+                }
+                let mode = if mode == ScreenMode::None { ScreenMode::None } else { ScreenMode::Capture };
+                log::warn!(
+                    "[lastshot] no graphics card drives this screen (software adapter: virtual machine or remote session); Graphics Capture on {}",
+                    adapter_name(&adesc)
+                );
+                let mut s = Self::build(&adapter, &adesc, output, mode, cursor)?;
+                s.cross_adapter = true;
+                return Ok(s);
+            }
+            Err(RecorderError::Other("No graphics card found: Lastshot needs one to record (only the basic display driver is there).".into()))
         }
 
         /// The first hardware GPU with a made-up picture: no monitor, no screen.
@@ -1911,6 +1939,7 @@ mod win {
                     adapter_name: adapter_name(&adesc),
                     vram_mb: (adesc.DedicatedVideoMemory / (1024 * 1024)) as u64,
                     synth: Some(synth),
+                    cross_adapter: false,
                 });
             }
             Err(RecorderError::Other("no graphics card for the test picture".into()))
@@ -2050,6 +2079,7 @@ mod win {
                 adapter_name,
                 vram_mb: (adesc.DedicatedVideoMemory / (1024 * 1024)) as u64,
                 synth: None,
+                cross_adapter: false,
             })
         }
 
@@ -2059,6 +2089,8 @@ mod win {
                 "Test picture (nothing captured)"
             } else if self.duplication.is_some() {
                 "Desktop duplication"
+            } else if self.wgc.is_some() && self.cross_adapter {
+                "Graphics Capture (screen on a software adapter)"
             } else if self.wgc.is_some() {
                 "Graphics Capture"
             } else {
@@ -2106,17 +2138,15 @@ mod win {
             let factory: IDXGIFactory1 = CreateDXGIFactory1().ok()?;
             let mut flat = 0u32;
             let mut ai = 0u32;
+            // Counted like GraphicsStack::create and the monitor list: every adapter.
             while let Ok(adapter) = factory.EnumAdapters1(ai) {
-                let soft = adapter.GetDesc1().map(|d| d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0).unwrap_or(true);
-                if !soft {
-                    let mut oi = 0u32;
-                    while let Ok(output) = adapter.EnumOutputs(oi) {
-                        if output.GetDesc().map(|d| d.Monitor == mon).unwrap_or(false) {
-                            return Some(flat);
-                        }
-                        flat += 1;
-                        oi += 1;
+                let mut oi = 0u32;
+                while let Ok(output) = adapter.EnumOutputs(oi) {
+                    if output.GetDesc().map(|d| d.Monitor == mon).unwrap_or(false) {
+                        return Some(flat);
                     }
+                    flat += 1;
+                    oi += 1;
                 }
                 ai += 1;
             }

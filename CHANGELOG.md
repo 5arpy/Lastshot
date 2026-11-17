@@ -43,6 +43,7 @@ All notable changes to **Lastshot** (and, before 1.7.1, to **ClipFlow**, which L
 - 60 fps replays and recordings could drop frames or play unevenly; frames are now placed on an even 60 fps grid.
 - A settings file missing one setting (an older version, a hand edit) reset every setting to its default. Missing settings now take their default one by one, and a file Lastshot cannot read is kept as `settings.json.unreadable`.
 - **A saved replay could be up to a second (or more, for a still picture) shorter than asked.** It now starts on the key frame at or before the start, so it always holds at least the seconds asked for.
+- **Changing what to record could freeze the recorder** (and quitting) after the recorded app was closed and opened again. Looking for the app's window never waits on another app now, and stopping the recorder always comes back within seconds.
 - One shortcut can no longer be given to two actions at once (the four main shortcuts, mic mute and the frames click-through shortcut).
 
 ## [1.9.1] - 2026-11-17

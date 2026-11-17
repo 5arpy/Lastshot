@@ -57,7 +57,7 @@ import { setShortcutOverrides } from "./lib/shortcuts";
 const UI_SCALES = [0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
 import { screenshotsDir, setStreamerMode, shownPath } from "./lib/pathDisplay";
 
-const APP_VERSION = "1.9.0";
+const APP_VERSION = "1.9.1";
 
 /**
  * How long the privacy-gate state must stay put before it actually flips the

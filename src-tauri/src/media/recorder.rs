@@ -11,7 +11,7 @@
 //!                        │
 //!                        └─► EncodedPacket ──► RollingRingBuffer (Arc<[u8]>)
 //!                                                        │
-//!                          Alt+C ──────────────────────► IMFSinkWriter ➜ .mp4
+//!                          Alt+C / recording ──► container::stream ➜ .mp4 / .mkv
 //! ```
 //!
 //! Design notes
@@ -94,6 +94,12 @@ pub struct EncoderInfo {
     pub hardware: bool,
     pub adapter_name: String,
     pub dedicated_vram_mb: u64,
+    /// Why this is not the encoder or codec asked for (a fallback), if so.
+    #[serde(default)]
+    pub notice: Option<String>,
+    /// The encoder settings in effect ("VBR 12 Mbit/s, key frame every 1 s").
+    #[serde(default)]
+    pub detail: String,
 }
 
 impl Default for EncoderInfo {
@@ -105,6 +111,8 @@ impl Default for EncoderInfo {
             hardware: false,
             adapter_name: "—".into(),
             dedicated_vram_mb: 0,
+            notice: None,
+            detail: String::new(),
         }
     }
 }
@@ -114,6 +122,8 @@ impl Default for EncoderInfo {
 pub enum Codec {
     H264,
     Hevc,
+    /// Needs an RTX 40, RX 7000 or Intel Arc encoder; falls back to HEVC.
+    Av1,
 }
 
 impl Codec {
@@ -121,8 +131,83 @@ impl Codec {
         match self {
             Codec::H264 => "H.264",
             Codec::Hevc => "HEVC",
+            Codec::Av1 => "AV1",
         }
     }
+
+    /// `VideoFormatHeader::codec`.
+    pub fn header_id(self) -> u8 {
+        match self {
+            Codec::H264 => 0,
+            Codec::Hevc => 1,
+            Codec::Av1 => 2,
+        }
+    }
+
+    pub fn container(self) -> crate::media::container::CodecId {
+        use crate::media::container::CodecId;
+        match self {
+            Codec::H264 => CodecId::H264,
+            Codec::Hevc => CodecId::Hevc,
+            Codec::Av1 => CodecId::Av1,
+        }
+    }
+}
+
+/// How the encoder spends bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RateControl {
+    /// Variable bitrate around the target, capped at 1.5x (best for files).
+    #[default]
+    Vbr,
+    /// Constant bitrate (predictable size, streaming-like).
+    Cbr,
+    /// Constant quality (`cqp_level`); the size follows the picture.
+    Cqp,
+}
+
+impl RateControl {
+    pub fn label(self) -> &'static str {
+        match self {
+            RateControl::Vbr => "VBR",
+            RateControl::Cbr => "CBR",
+            RateControl::Cqp => "CQP",
+        }
+    }
+}
+
+/// The encoder's speed / quality trade-off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum EncoderPreset {
+    /// Speed in Game Mode, the encoder's own default otherwise.
+    #[default]
+    Auto,
+    Speed,
+    Balanced,
+    Quality,
+}
+
+/// Which encoder to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum EncoderBackend {
+    /// The GPU that draws the screen, then any other GPU, then software.
+    #[default]
+    Auto,
+    Nvidia,
+    Amd,
+    Intel,
+    Software,
+}
+
+fn default_cqp() -> u32 {
+    23
+}
+
+fn default_keyframe_seconds() -> f32 {
+    1.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,6 +253,18 @@ pub struct RecorderConfig {
     /// duplication with an automatic Graphics Capture fallback).
     #[serde(default)]
     pub display_method: DisplayMethod,
+    #[serde(default)]
+    pub rate_control: RateControl,
+    /// Constant-quality level (1-51, lower = better) for `RateControl::Cqp`.
+    #[serde(default = "default_cqp")]
+    pub cqp_level: u32,
+    /// Seconds between key frames (0.25-10).
+    #[serde(default = "default_keyframe_seconds")]
+    pub keyframe_seconds: f32,
+    #[serde(default)]
+    pub encoder_preset: EncoderPreset,
+    #[serde(default)]
+    pub encoder_backend: EncoderBackend,
 }
 
 /// How full-screen capture works.
@@ -229,6 +326,11 @@ impl Default for RecorderConfig {
             app_audio: Default::default(),
             capture_cursor: true,
             display_method: DisplayMethod::Auto,
+            rate_control: RateControl::Vbr,
+            cqp_level: default_cqp(),
+            keyframe_seconds: default_keyframe_seconds(),
+            encoder_preset: EncoderPreset::Auto,
+            encoder_backend: EncoderBackend::Auto,
         }
     }
 }
@@ -682,6 +784,8 @@ struct SharedState {
     running: AtomicBool,
     stop_requested: AtomicBool,
     pub(super) force_device_reset: AtomicBool,
+    /// A recording starts or resumes: the next frame is a key frame.
+    pub(super) force_key_request: AtomicBool,
     /// Set by the frontend when privacy mode is on and no game has focus: the
     /// capture thread stops feeding the encoder, so the ring can never hold
     /// desktop footage.
@@ -721,6 +825,7 @@ impl SharedState {
             running: AtomicBool::new(false),
             stop_requested: AtomicBool::new(false),
             force_device_reset: AtomicBool::new(false),
+            force_key_request: AtomicBool::new(false),
             privacy_gate: Arc::new(AtomicBool::new(false)),
             generation: Arc::new(AtomicU32::new(1)),
             dropped_frames: AtomicU64::new(0),
@@ -836,15 +941,54 @@ pub struct RecordingStatus {
     /// False once the recording thread has ended on its own (display change,
     /// disk error); the caller should then collect it with `stop_recording`.
     pub active: bool,
+    /// File size so far.
+    pub bytes: u64,
+    /// Something to know while it runs ("Disk almost full: about 6 minutes left").
+    pub notice: Option<String>,
+    /// Why it stopped by itself (time or size limit, full disk, drive removed).
+    pub ended: Option<String>,
+    /// Seconds until a limit or a full disk stops it, whichever comes first.
+    pub seconds_left: Option<f32>,
+}
+
+/// What a recording is told at start.
+#[derive(Debug, Clone, Default)]
+pub struct RecordOptions {
+    pub format: crate::media::container::stream::Format,
+    /// Stops by itself after this much recorded time (pauses not counted); 0 = no limit.
+    pub max_seconds: f64,
+    /// Stops by itself when the file reaches this size; 0 = no limit.
+    pub max_bytes: u64,
+    /// Stops (keeping what was recorded) when the drive has less free space.
+    pub reserve_bytes: u64,
+}
+
+/// Shared between the recording thread and the UI.
+#[derive(Default)]
+pub struct RecShared {
+    pub bytes: AtomicU64,
+    pub notice: parking_lot::Mutex<Option<String>>,
+    pub ended: parking_lot::Mutex<Option<String>>,
+    /// Milliseconds left before a limit or a full disk; -1 = none.
+    pub left_ms: std::sync::atomic::AtomicI64,
+}
+
+/// How a recording thread ended.
+struct RecEnd {
+    duration_hns: i64,
+    has_audio: bool,
 }
 
 struct Recording {
     stop: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
+    /// Newest frame when pause was pressed: frames up to it are still kept.
+    pause_pts: Arc<std::sync::atomic::AtomicI64>,
     written_hns: Arc<std::sync::atomic::AtomicI64>,
+    info: Arc<RecShared>,
     path: PathBuf,
     started: Instant,
-    thread: Option<std::thread::JoinHandle<RResult<(i64, bool)>>>,
+    thread: Option<std::thread::JoinHandle<RResult<RecEnd>>>,
 }
 
 pub struct CaptureEngine {
@@ -1119,7 +1263,7 @@ impl CaptureEngine {
     /// Starts writing everything the engine captures from now on to `path`
     /// (screen recording). The engine must be running. The capture ring is
     /// streamed to disk every half second, so no second encoder is needed.
-    pub fn start_recording(&self, path: PathBuf) -> RResult<RecordingStatus> {
+    pub fn start_recording(&self, path: PathBuf, opts: RecordOptions) -> RResult<RecordingStatus> {
         if !self.is_running() {
             return Err(RecorderError::NotRunning);
         }
@@ -1132,14 +1276,16 @@ impl CaptureEngine {
             .lock()
             .clone()
             .ok_or_else(|| RecorderError::Other("The recorder is still starting. Try again in a second.".into()))?;
+        // The file starts at the next key frame, asked for right now, so it
+        // begins at the press however long the key frame interval is.
         let (generation, start) = {
             let ring = self.shared.ring.lock();
             let (generation, newest) = ring
                 .newest_video()
                 .ok_or_else(|| RecorderError::Other("The recorder is still starting. Try again in a second.".into()))?;
-            let kf = ring.keyframe_at_or_before(generation, newest).unwrap_or(newest);
-            (generation, kf)
+            (generation, newest + 1)
         };
+        self.shared.force_key_request.store(true, Ordering::Release);
         // A running audio thread always delivers (silence until a device
         // or the chosen app has sound), so it decides, not whether packets
         // happen to be in the ring yet: a recording started right after the
@@ -1151,21 +1297,38 @@ impl CaptureEngine {
 
         let stop = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
+        let pause_pts = Arc::new(std::sync::atomic::AtomicI64::new(i64::MAX));
         let written = Arc::new(std::sync::atomic::AtomicI64::new(0));
+        let info = Arc::new(RecShared { left_ms: std::sync::atomic::AtomicI64::new(-1), ..Default::default() });
         let ring = Arc::clone(&self.shared.ring);
-        let (t_stop, t_paused, t_written, t_path) =
-            (Arc::clone(&stop), Arc::clone(&paused), Arc::clone(&written), path.clone());
+        let (t_stop, t_paused, t_pause_pts, t_written, t_info, t_path) = (
+            Arc::clone(&stop),
+            Arc::clone(&paused),
+            Arc::clone(&pause_pts),
+            Arc::clone(&written),
+            Arc::clone(&info),
+            path.clone(),
+        );
         let thread = std::thread::Builder::new()
             .name("lastshot-recording".into())
             .spawn(move || {
-                record_loop(&t_path, &header, &ring, generation, start, with_audio, &t_stop, &t_paused, &t_written)
+                let ctl = RecControl {
+                    stop: &t_stop,
+                    paused: &t_paused,
+                    pause_pts: &t_pause_pts,
+                    written: &t_written,
+                    info: &t_info,
+                };
+                record_loop(&t_path, &header, &ring, generation, start, with_audio, &opts, ctl)
             })
             .map_err(|e| RecorderError::Other(format!("could not start recording: {e}")))?;
         self.shared.layers.set_timer(Some(Arc::clone(&written)));
         *slot = Some(Recording {
             stop,
             paused,
+            pause_pts,
             written_hns: written,
+            info,
             path,
             started: Instant::now(),
             thread: Some(thread),
@@ -1177,7 +1340,7 @@ impl CaptureEngine {
     pub fn recording_status(&self) -> Option<RecordingStatus> {
         let slot = self.recording.lock();
         let r = slot.as_ref()?;
-        Some(RecordingStatus {
+        let status = RecordingStatus {
             path: r.path.to_string_lossy().to_string(),
             file_name: r
                 .path
@@ -1187,13 +1350,30 @@ impl CaptureEngine {
             seconds: r.written_hns.load(Ordering::Relaxed) as f32 / HNS_PER_SECOND as f32,
             paused: r.paused.load(Ordering::Relaxed),
             active: r.thread.as_ref().is_some_and(|t| !t.is_finished()),
-        })
+            bytes: r.info.bytes.load(Ordering::Relaxed),
+            notice: r.info.notice.lock().clone(),
+            ended: r.info.ended.lock().clone(),
+            seconds_left: match r.info.left_ms.load(Ordering::Relaxed) {
+                ms if ms >= 0 => Some(ms as f32 / 1000.0),
+                _ => None,
+            },
+        };
+        Some(status)
     }
 
     pub fn set_recording_paused(&self, paused: bool) -> bool {
         match self.recording.lock().as_ref() {
             Some(r) => {
-                r.paused.store(paused, Ordering::Relaxed);
+                if paused && !r.paused.load(Ordering::Relaxed) {
+                    // What is on screen at the press is still recorded.
+                    let newest = self.shared.ring.lock().newest_video().map_or(i64::MIN, |(_, pts)| pts);
+                    r.pause_pts.store(newest, Ordering::Relaxed);
+                }
+                let was = r.paused.swap(paused, Ordering::Relaxed);
+                if was && !paused {
+                    // Resume on a fresh key frame instead of the next regular one.
+                    self.shared.force_key_request.store(true, Ordering::Release);
+                }
                 true
             }
             None => false,
@@ -1215,8 +1395,8 @@ impl CaptureEngine {
             .thread
             .take()
             .map(|t| t.join())
-            .unwrap_or(Ok(Ok((0, false))));
-        let (duration_hns, has_audio) = match joined {
+            .unwrap_or(Ok(Ok(RecEnd { duration_hns: 0, has_audio: false })));
+        let RecEnd { duration_hns, has_audio } = match joined {
             Ok(r) => r,
             Err(_) => Err(RecorderError::Other("the recording thread crashed".into())),
         }
@@ -1436,7 +1616,7 @@ impl Drop for CaptureEngine {
 #[cfg(all(windows, not(feature = "headless-sim")))]
 mod win {
     use super::*;
-    use windows::core::{Interface, PCWSTR, PWSTR};
+    use windows::core::{Interface, PWSTR};
     use windows::Win32::Foundation::{HMODULE, TRUE, E_UNEXPECTED};
     use windows::Win32::Graphics::Direct3D::{
         D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
@@ -1522,6 +1702,72 @@ mod win {
         Capture,
         /// No monitor picture (a window source captured on its own).
         None,
+        /// Test copies: a made-up moving picture, nothing captured.
+        Synthetic,
+    }
+
+    /// The made-up picture of a test copy: a box that moves across once a
+    /// second and a white flash in the first tenth of every second (the test
+    /// sound beeps then too, so A/V sync can be measured in the file).
+    pub(super) struct Synth {
+        tex: ID3D11Texture2D,
+        rtv: ID3D11RenderTargetView,
+        ctx1: Option<ID3D11DeviceContext1>,
+        w: u32,
+        h: u32,
+    }
+
+    impl Synth {
+        unsafe fn new(device: &ID3D11Device, context: &ID3D11DeviceContext, w: u32, h: u32) -> RResult<Self> {
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: w,
+                Height: h,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+            };
+            let mut tex = None;
+            device.CreateTexture2D(&desc, None, Some(&mut tex)).map_err(hr)?;
+            let tex = tex.ok_or_else(|| RecorderError::Other("no test texture".into()))?;
+            let mut rtv = None;
+            device.CreateRenderTargetView(&tex, None, Some(&mut rtv)).map_err(hr)?;
+            let rtv = rtv.ok_or_else(|| RecorderError::Other("no test target".into()))?;
+            Ok(Self { tex, rtv, ctx1: context.cast().ok(), w, h })
+        }
+
+        /// The picture at engine time `t_hns`.
+        pub fn frame(&self, ctx: &ID3D11DeviceContext, t_hns: i64) -> ID3D11Texture2D {
+            let frac = (t_hns.rem_euclid(HNS_PER_SECOND)) as f32 / HNS_PER_SECOND as f32;
+            let bg = if frac < 0.1 { [1.0, 1.0, 1.0, 1.0] } else { [0.08, 0.10, 0.16, 1.0] };
+            unsafe {
+                ctx.ClearRenderTargetView(&self.rtv, &bg);
+                if let Some(c1) = self.ctx1.as_ref() {
+                    let size = (self.h / 4).max(2) as i32;
+                    let x = (frac * (self.w as i32 - size).max(1) as f32) as i32;
+                    let y = (self.h as i32 - size) / 2;
+                    let rect = windows::Win32::Foundation::RECT { left: x, top: y, right: x + size, bottom: y + size };
+                    c1.ClearView(&self.rtv, &[0.95, 0.35, 0.2, 1.0], Some(&[rect]));
+                }
+            }
+            self.tex.clone()
+        }
+    }
+
+    /// Size of the test picture: `LASTSHOT_SYNTH_SIZE=WxH` (odd sizes too), 1280x720 otherwise.
+    fn synth_size() -> (u32, u32) {
+        std::env::var("LASTSHOT_SYNTH_SIZE")
+            .ok()
+            .and_then(|v| {
+                let (w, h) = v.split_once(['x', 'X'])?;
+                Some((w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?))
+            })
+            .filter(|&(w, h)| (16..=8192).contains(&w) && (16..=8192).contains(&h))
+            .unwrap_or((1280, 720))
     }
 
     pub(super) struct GraphicsStack {
@@ -1540,12 +1786,17 @@ mod win {
         pub src_width: u32,
         pub src_height: u32,
         pub src_format: DXGI_FORMAT,
+        /// Test copies: the made-up picture (nothing is captured).
+        pub synth: Option<Synth>,
     }
 
     impl GraphicsStack {
         pub fn create(monitor_index: u32, mode: ScreenMode, cursor: bool) -> RResult<Self> {
             unsafe {
                 let factory: IDXGIFactory1 = CreateDXGIFactory1().map_err(hr)?;
+                if mode == ScreenMode::Synthetic {
+                    return Self::build_synthetic(&factory);
+                }
 
                 // Walk adapters/outputs to find the requested monitor. Index is
                 // flattened across adapters so a 2-GPU laptop behaves sanely.
@@ -1580,6 +1831,64 @@ mod win {
                 }
                 Err(RecorderError::NoSuchMonitor(monitor_index))
             }
+        }
+
+        /// The first hardware GPU with a made-up picture: no monitor, no screen.
+        unsafe fn build_synthetic(factory: &IDXGIFactory1) -> RResult<Self> {
+            let mut i = 0u32;
+            while let Ok(adapter) = factory.EnumAdapters1(i) {
+                i += 1;
+                let adesc = adapter.GetDesc1().map_err(hr)?;
+                if (adesc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0 {
+                    continue;
+                }
+                let (device, context) = Self::make_device(&adapter)?;
+                let (w, h) = synth_size();
+                let synth = Synth::new(&device, &context, w, h)?;
+                return Ok(Self {
+                    src_width: w,
+                    src_height: h,
+                    src_format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    device,
+                    context,
+                    duplication: None,
+                    wgc: None,
+                    wgc_tex: None,
+                    monitor: windows::Win32::Graphics::Gdi::HMONITOR::default(),
+                    desktop: crate::media::winvis::IRect { left: 0, top: 0, right: w as i32, bottom: h as i32 },
+                    adapter_name: adapter_name(&adesc),
+                    vram_mb: (adesc.DedicatedVideoMemory / (1024 * 1024)) as u64,
+                    synth: Some(synth),
+                });
+            }
+            Err(RecorderError::Other("no graphics card for the test picture".into()))
+        }
+
+        unsafe fn make_device(adapter: &IDXGIAdapter1) -> RResult<(ID3D11Device, ID3D11DeviceContext)> {
+            let levels = [D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0];
+            let mut device: Option<ID3D11Device> = None;
+            let mut context: Option<ID3D11DeviceContext> = None;
+            let mut level = D3D_FEATURE_LEVEL::default();
+            D3D11CreateDevice(
+                adapter,
+                windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+                Some(&levels),
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                Some(&mut level),
+                Some(&mut context),
+            )
+            .map_err(hr)?;
+            let device = device.ok_or_else(|| RecorderError::Other("no d3d11 device".into()))?;
+            let context = context.ok_or_else(|| RecorderError::Other("no d3d11 context".into()))?;
+            let mt: ID3D11Multithread = device.cast().map_err(hr)?;
+            let _ = mt.SetMultithreadProtected(TRUE);
+            if let Ok(dxgi_dev) = device.cast::<IDXGIDevice>() {
+                let _ = dxgi_dev.SetGPUThreadPriority(-2);
+            }
+            Ok((device, context))
         }
 
         unsafe fn build(
@@ -1671,13 +1980,7 @@ mod win {
                 src_format = DXGI_FORMAT_B8G8R8A8_UNORM;
             }
 
-            let adapter_name = String::from_utf16_lossy(
-                &adesc.Description[..adesc
-                    .Description
-                    .iter()
-                    .position(|&c| c == 0)
-                    .unwrap_or(adesc.Description.len())],
-            );
+            let adapter_name = adapter_name(adesc);
 
             let _ = adapter; // adapter kept alive through `device`
 
@@ -1694,12 +1997,15 @@ mod win {
                 desktop,
                 adapter_name,
                 vram_mb: (adesc.DedicatedVideoMemory / (1024 * 1024)) as u64,
+                synth: None,
             })
         }
 
         /// Plain-words name of the capture method in use.
         pub fn method_label(&self) -> &'static str {
-            if self.duplication.is_some() {
+            if self.synth.is_some() {
+                "Test picture (nothing captured)"
+            } else if self.duplication.is_some() {
                 "Desktop duplication"
             } else if self.wgc.is_some() {
                 "Graphics Capture"
@@ -1728,6 +2034,12 @@ mod win {
             }
             slot.as_ref().map(|s| s.tex.clone())
         }
+    }
+
+    fn adapter_name(adesc: &DXGI_ADAPTER_DESC1) -> String {
+        String::from_utf16_lossy(
+            &adesc.Description[..adesc.Description.iter().position(|&c| c == 0).unwrap_or(adesc.Description.len())],
+        )
     }
 
     /// The flat DXGI output index of the monitor showing most of `hwnd`.
@@ -1977,6 +2289,11 @@ mod win {
     // ------------------------------------------------ hardware H.264 MFT
     pub(super) struct HardwareEncoder {
         transform: IMFTransform,
+        codec_api: Option<ICodecAPI>,
+        /// Counted in `HW_SESSIONS` while open.
+        hardware: bool,
+        /// Which encoder this is (to skip it if it stops taking frames).
+        pub candidate: String,
         events: Option<IMFMediaEventGenerator>,
         _dxgi_manager: IMFDXGIDeviceManager,
         pub info: EncoderInfo,
@@ -1992,266 +2309,453 @@ mod win {
         fps: u32,
     }
 
+    /// What the encoder is asked for (from the settings).
+    #[derive(Clone, Debug)]
+    pub(super) struct EncoderOpts {
+        pub codec: Codec,
+        pub bitrate_kbps: u32,
+        pub rate_control: RateControl,
+        pub cqp_level: u32,
+        pub keyframe_seconds: f32,
+        pub preset: EncoderPreset,
+        pub backend: EncoderBackend,
+        pub performance_mode: bool,
+    }
+
+    /// Hardware encoder sessions Lastshot holds right now (NVIDIA's consumer
+    /// cards allow only a few at once, shared with every other app).
+    static HW_SESSIONS: AtomicU32 = AtomicU32::new(0);
+
+    pub(crate) fn hardware_sessions() -> u32 {
+        HW_SESSIONS.load(Ordering::Relaxed)
+    }
+
+    /// One encoder that might be used.
+    struct Candidate {
+        /// None = the Microsoft software H.264 encoder.
+        act: Option<IMFActivate>,
+        name: String,
+        codec: Codec,
+        vendor: EncoderVendor,
+        same_adapter: bool,
+    }
+
+    impl Candidate {
+        fn key(&self) -> String {
+            format!("{} / {}", self.name, self.codec.as_str())
+        }
+    }
+
+    fn codec_subtype(c: Codec) -> windows::core::GUID {
+        match c {
+            Codec::H264 => MFVideoFormat_H264,
+            Codec::Hevc => MFVideoFormat_HEVC,
+            Codec::Av1 => MFVideoFormat_AV1,
+        }
+    }
+
+    unsafe fn activate_name(act: &IMFActivate) -> String {
+        let mut name = PWSTR::null();
+        let mut len = 0u32;
+        if act.GetAllocatedString(&MFT_FRIENDLY_NAME_Attribute, &mut name, &mut len).is_ok() {
+            let s = name.to_string().unwrap_or_default();
+            windows::Win32::System::Com::CoTaskMemFree(Some(name.0 as *const std::ffi::c_void));
+            s
+        } else {
+            "Hardware Encoder".to_string()
+        }
+    }
+
+    /// Hardware encoders that make `codec` from NV12: (activate, name, adapter LUID).
+    pub(super) unsafe fn hardware_encoders(codec: Codec) -> Vec<(IMFActivate, String, Option<u64>)> {
+        let in_info = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: MFVideoFormat_NV12 };
+        let out_info = MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: codec_subtype(codec) };
+        let mut activates: *mut Option<IMFActivate> = std::ptr::null_mut();
+        let mut count: u32 = 0;
+        let mut out = Vec::new();
+        if MFTEnumEx(
+            MFT_CATEGORY_VIDEO_ENCODER,
+            MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
+            Some(&in_info),
+            Some(&out_info),
+            &mut activates,
+            &mut count,
+        )
+        .is_err()
+        {
+            return out;
+        }
+        if count > 0 && !activates.is_null() {
+            let slice = std::slice::from_raw_parts(activates, count as usize);
+            for act in slice.iter().flatten() {
+                let luid = act.GetUINT64(&MFT_ENUM_ADAPTER_LUID).ok();
+                out.push((act.clone(), activate_name(act), luid));
+            }
+        }
+        if !activates.is_null() {
+            windows::Win32::System::Com::CoTaskMemFree(Some(activates as *const std::ffi::c_void));
+        }
+        out
+    }
+
+    fn device_luid(device: &ID3D11Device) -> Option<u64> {
+        unsafe {
+            let dxgi: IDXGIDevice = device.cast().ok()?;
+            let d = dxgi.GetAdapter().ok()?.GetDesc().ok()?;
+            Some(((d.AdapterLuid.HighPart as u32 as u64) << 32) | d.AdapterLuid.LowPart as u64)
+        }
+    }
+
+    fn backend_vendor(b: EncoderBackend) -> Option<EncoderVendor> {
+        match b {
+            EncoderBackend::Nvidia => Some(EncoderVendor::Nvenc),
+            EncoderBackend::Amd => Some(EncoderVendor::AmdAmf),
+            EncoderBackend::Intel => Some(EncoderVendor::IntelQsv),
+            _ => None,
+        }
+    }
+
+    /// The codecs to try, wanted one first. H.264 falls back to HEVC on the
+    /// GPU before the CPU (super-wide screens are past H.264's 4096 limit).
+    fn codec_chain(c: Codec) -> &'static [Codec] {
+        match c {
+            Codec::Av1 => &[Codec::Av1, Codec::Hevc, Codec::H264],
+            Codec::Hevc => &[Codec::Hevc, Codec::H264],
+            Codec::H264 => &[Codec::H264, Codec::Hevc],
+        }
+    }
+
+    /// Every encoder worth trying, best first: per codec (wanted, then the
+    /// fallbacks) the chosen vendor, then the GPU that draws the picture,
+    /// then the others; the software H.264 encoder last (first when Software
+    /// is chosen).
+    unsafe fn candidates(device: &ID3D11Device, opts: &EncoderOpts) -> Vec<Candidate> {
+        let luid = device_luid(device);
+        let want = backend_vendor(opts.backend);
+        let mut out = Vec::new();
+        for &c in codec_chain(opts.codec) {
+            let mut list: Vec<Candidate> = hardware_encoders(c)
+                .into_iter()
+                .map(|(act, name, l)| Candidate {
+                    vendor: EncoderVendor::from_friendly_name(&name),
+                    same_adapter: luid.is_some() && l == luid,
+                    act: Some(act),
+                    name,
+                    codec: c,
+                })
+                .collect();
+            list.sort_by_key(|k| (want.is_some_and(|v| k.vendor != v), !k.same_adapter));
+            out.extend(list);
+        }
+        let sw = Candidate {
+            act: None,
+            name: "Microsoft H.264 Encoder MFT".into(),
+            codec: Codec::H264,
+            vendor: EncoderVendor::MediaFoundationSoftware,
+            same_adapter: true,
+        };
+        if opts.backend == EncoderBackend::Software {
+            out.insert(0, sw);
+        } else {
+            out.push(sw);
+        }
+        out
+    }
+
+    /// Why the encoder in use is not the one asked for, in plain words.
+    fn fallback_notice(opts: &EncoderOpts, used: &Candidate, list: &[Candidate], errors: &[String]) -> Option<String> {
+        let used_hw = used.act.is_some();
+        if used.codec != opts.codec {
+            let why = if opts.codec == Codec::Av1 && !list.iter().any(|c| c.codec == Codec::Av1) {
+                " (AV1 needs an NVIDIA RTX 40, AMD RX 7000 or Intel Arc graphics card)"
+            } else {
+                ""
+            };
+            return Some(format!(
+                "{} isn't available on this PC{why}, so {} is used.",
+                opts.codec.as_str(),
+                used.codec.as_str()
+            ));
+        }
+        if let Some(v) = backend_vendor(opts.backend) {
+            if used.vendor != v {
+                return Some(format!("No {} encoder could start, so {} is used.", v.label(), used.vendor.label()));
+            }
+        }
+        if !used_hw && opts.backend != EncoderBackend::Software {
+            return Some(if list.iter().any(|c| c.act.is_some()) {
+                log::warn!("[lastshot] hardware encoders failed: {}", errors.join("; "));
+                "The graphics card's encoder could not start (other apps may be using all of it), so the CPU encodes. \
+                 That costs more CPU: close other recording apps or restart Lastshot."
+                    .to_string()
+            } else {
+                "No graphics card encoder was found, so the CPU encodes (slower).".to_string()
+            });
+        }
+        None
+    }
+
+    /// Rate control, key frames and the speed preset through ICodecAPI.
+    /// Returns the rate control the encoder took (some have no CQP).
+    unsafe fn apply_codec_api(api: &ICodecAPI, opts: &EncoderOpts, gop: u32) -> RateControl {
+        let b = opts.bitrate_kbps.saturating_mul(1000);
+        let try_mode = |m: RateControl| {
+            let v = match m {
+                RateControl::Cbr => eAVEncCommonRateControlMode_CBR.0 as u32,
+                RateControl::Vbr => eAVEncCommonRateControlMode_PeakConstrainedVBR.0 as u32,
+                RateControl::Cqp => eAVEncCommonRateControlMode_Quality.0 as u32,
+            };
+            set_codec_u32(api, &CODECAPI_AVEncCommonRateControlMode, v).is_ok()
+        };
+        let mut rc = opts.rate_control;
+        if !try_mode(rc) {
+            rc = [RateControl::Vbr, RateControl::Cbr].into_iter().find(|&m| m != rc && try_mode(m)).unwrap_or(rc);
+        }
+        match rc {
+            RateControl::Cbr => {
+                let _ = set_codec_u32(api, &CODECAPI_AVEncCommonMeanBitRate, b);
+            }
+            RateControl::Vbr => {
+                let _ = set_codec_u32(api, &CODECAPI_AVEncCommonMeanBitRate, b);
+                let _ = set_codec_u32(api, &CODECAPI_AVEncCommonMaxBitRate, b.saturating_mul(3) / 2);
+            }
+            RateControl::Cqp => {
+                let qp = opts.cqp_level.clamp(1, 51);
+                let _ = api.SetValue(&CODECAPI_AVEncVideoEncodeQP, &windows::core::VARIANT::from(qp as u64));
+                // Encoders without a QP knob read this 0-100 quality.
+                let _ = set_codec_u32(api, &CODECAPI_AVEncCommonQuality, ((51 - qp) * 100 / 50).min(100));
+            }
+        }
+        let _ = set_codec_u32(api, &CODECAPI_AVEncCommonLowLatency, 1);
+        let _ = set_codec_u32(api, &CODECAPI_AVEncMPVGOPSize, gop);
+        let _ = set_codec_u32(api, &CODECAPI_AVEncVideoMaxNumRefFrame, 1);
+        // No B-frames, ever: frames come out in display order (the replay
+        // buffer and the file writer rely on it) and with no reorder delay.
+        let _ = set_codec_u32(api, &CODECAPI_AVEncMPVDefaultBPictureCount, 0);
+        // 0 = best quality, 100 = fastest: the knob NVENC/AMF/QSV honour.
+        let speed = match opts.preset {
+            EncoderPreset::Auto if opts.performance_mode => Some(80),
+            EncoderPreset::Auto => None,
+            EncoderPreset::Speed => Some(85),
+            EncoderPreset::Balanced => Some(50),
+            EncoderPreset::Quality => Some(15),
+        };
+        if let Some(v) = speed {
+            let _ = set_codec_u32(api, &CODECAPI_AVEncCommonQualityVsSpeed, v);
+        }
+        if opts.performance_mode && opts.preset == EncoderPreset::Auto && rc != RateControl::Cqp {
+            let _ = set_codec_u32(api, &CODECAPI_AVEncCommonQuality, 55);
+        }
+        rc
+    }
+
     impl HardwareEncoder {
+        /// Opens the best encoder that works: the wanted codec and encoder
+        /// first, then the fallbacks (another codec, another GPU, the CPU),
+        /// skipping `failed` (encoders that opened but took no frames). The
+        /// info's notice says why it is not the one asked for.
         pub fn create(
             device: &ID3D11Device,
             width: u32,
             height: u32,
             fps: u32,
-            bitrate_kbps: u32,
-            codec: Codec,
-            performance_mode: bool,
+            opts: &EncoderOpts,
+            adapter_name: &str,
+            vram_mb: u64,
+            failed: &[String],
+        ) -> RResult<Self> {
+            unsafe {
+                let list = candidates(device, opts);
+                let mut errors: Vec<String> = Vec::new();
+                for cand in list.iter().filter(|c| !failed.contains(&c.key())) {
+                    if cand.codec == Codec::H264 && width > 4096 {
+                        errors.push(format!("{}: H.264 stops at 4096 pixels wide", cand.key()));
+                        continue;
+                    }
+                    match Self::open(cand, device, width, height, fps, opts, adapter_name, vram_mb) {
+                        Ok(mut enc) => {
+                            enc.info.notice = fallback_notice(opts, cand, &list, &errors);
+                            if let Some(n) = enc.info.notice.as_ref() {
+                                log::warn!("[lastshot] encoder fallback: {n}");
+                            }
+                            return Ok(enc);
+                        }
+                        Err(e) => {
+                            log::warn!("[lastshot] encoder {} failed: {e}", cand.key());
+                            errors.push(format!("{}: {e}", cand.key()));
+                        }
+                    }
+                }
+                Err(if errors.is_empty() {
+                    RecorderError::NoEncoder
+                } else {
+                    RecorderError::Other(format!("no encoder could start ({})", errors.join("; ")))
+                })
+            }
+        }
+
+        unsafe fn open(
+            cand: &Candidate,
+            device: &ID3D11Device,
+            width: u32,
+            height: u32,
+            fps: u32,
+            opts: &EncoderOpts,
             adapter_name: &str,
             vram_mb: u64,
         ) -> RResult<Self> {
-            unsafe {
-                let subtype = match codec {
-                    Codec::H264 => MFVideoFormat_H264,
-                    Codec::Hevc => MFVideoFormat_HEVC,
-                };
-
-                // 1. Enumerate hardware encoders, preferring the vendor MFT that
-                //    lives on the same adapter as our D3D device.
-                let in_info = MFT_REGISTER_TYPE_INFO {
-                    guidMajorType: MFMediaType_Video,
-                    guidSubtype: MFVideoFormat_NV12,
-                };
-                let out_info = MFT_REGISTER_TYPE_INFO {
-                    guidMajorType: MFMediaType_Video,
-                    guidSubtype: subtype,
-                };
-
-                let mut activates: *mut Option<IMFActivate> = std::ptr::null_mut();
-                let mut count: u32 = 0;
-                MFTEnumEx(
-                    MFT_CATEGORY_VIDEO_ENCODER,
-                    MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER,
-                    Some(&in_info),
-                    Some(&out_info),
-                    &mut activates,
-                    &mut count,
+            let codec = cand.codec;
+            let subtype = codec_subtype(codec);
+            let hardware = cand.act.is_some();
+            let transform: IMFTransform = match cand.act.as_ref() {
+                Some(act) => act.ActivateObject().map_err(hr)?,
+                None => windows::Win32::System::Com::CoCreateInstance(
+                    &CLSID_MSH264EncoderMFT,
+                    None,
+                    windows::Win32::System::Com::CLSCTX_INPROC_SERVER,
                 )
+                .map_err(|_| RecorderError::NoEncoder)?,
+            };
+            if opts.performance_mode && !hardware {
+                log::warn!(
+                    "[lastshot] Game Mode is on but only a software H.264 encoder is available; capture may compete with the game for CPU"
+                );
+            }
+
+            // Async unlock + low latency BEFORE any type negotiation.
+            let attrs = transform.GetAttributes().ok();
+            let mut async_mode = false;
+            if let Some(a) = attrs.as_ref() {
+                if a.GetUINT32(&MF_TRANSFORM_ASYNC).unwrap_or(0) == 1 {
+                    a.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1).map_err(hr)?;
+                    async_mode = true;
+                }
+                let _ = a.SetUINT32(&MF_LOW_LATENCY, 1);
+                let _ = a.SetUINT32(&MF_SA_D3D11_AWARE, 1);
+            }
+
+            // Bind our D3D11 device so the MFT reads the NV12 texture in
+            // place (true zero-copy; no staging, no PCIe round trip).
+            let mut reset_token = 0u32;
+            let mut manager: Option<IMFDXGIDeviceManager> = None;
+            MFCreateDXGIDeviceManager(&mut reset_token, &mut manager).map_err(hr)?;
+            let manager = manager.ok_or_else(|| RecorderError::Other("no dxgi manager".into()))?;
+            manager.ResetDevice(device, reset_token).map_err(hr)?;
+            let bound = transform.ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, manager.as_raw() as usize);
+            if hardware {
+                bound.map_err(hr)?;
+            }
+
+            let gop = ((opts.keyframe_seconds.clamp(0.25, 10.0) * fps as f32).round() as u32).max(1);
+            let codec_api = transform.cast::<ICodecAPI>().ok();
+            // Some encoders take rate control only before the types are set,
+            // others only after: set it at both points.
+            if let Some(api) = codec_api.as_ref() {
+                apply_codec_api(api, opts, gop);
+            }
+
+            // Output type first - that is the MFT contract.
+            let out_type = MFCreateMediaType().map_err(hr)?;
+            out_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video).map_err(hr)?;
+            out_type.SetGUID(&MF_MT_SUBTYPE, &subtype).map_err(hr)?;
+            out_type.SetUINT32(&MF_MT_AVG_BITRATE, opts.bitrate_kbps.saturating_mul(1000)).map_err(hr)?;
+            out_type
+                .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
                 .map_err(hr)?;
-
-                let mut chosen: Option<(IMFActivate, String)> = None;
-                if count > 0 && !activates.is_null() {
-                    let slice = std::slice::from_raw_parts(activates, count as usize);
-                    for act in slice.iter().flatten() {
-                        let mut name = PWSTR::null();
-                        let mut len = 0u32;
-                        let friendly = if act
-                            .GetAllocatedString(&MFT_FRIENDLY_NAME_Attribute, &mut name, &mut len)
-                            .is_ok()
-                        {
-                            let s = name.to_string().unwrap_or_default();
-                            windows::Win32::System::Com::CoTaskMemFree(Some(
-                                name.0 as *const std::ffi::c_void,
-                            ));
-                            s
-                        } else {
-                            "Hardware Encoder".to_string()
-                        };
-                        if chosen.is_none() {
-                            chosen = Some((act.clone(), friendly));
-                        }
-                    }
-                    windows::Win32::System::Com::CoTaskMemFree(Some(
-                        activates as *const std::ffi::c_void,
-                    ));
-                }
-
-                // 2. Software fallback keeps Lastshot usable on old iGPUs; it is
-                //    clearly reported to the UI so the user knows why the CPU is busy.
-                let (transform, friendly, hardware) = match chosen {
-                    Some((act, name)) => {
-                        let t: IMFTransform = act.ActivateObject().map_err(hr)?;
-                        (t, name, true)
-                    }
-                    None => {
-                        let t: IMFTransform = windows::Win32::System::Com::CoCreateInstance(
-                            &CLSID_MSH264EncoderMFT,
-                            None,
-                            windows::Win32::System::Com::CLSCTX_INPROC_SERVER,
-                        )
-                        .map_err(|_| RecorderError::NoEncoder)?;
-                        (t, "Microsoft H.264 Encoder MFT".to_string(), false)
-                    }
-                };
-
-                if performance_mode && !hardware {
-                    log::warn!(
-                        "[lastshot] Game Mode is on but only a software H.264 encoder is available; capture may compete with the game for CPU"
-                    );
-                }
-
-                // 3. Async unlock + low latency BEFORE any type negotiation.
-                let attrs = transform.GetAttributes().ok();
-                let mut async_mode = false;
-                if let Some(a) = attrs.as_ref() {
-                    if a.GetUINT32(&MF_TRANSFORM_ASYNC).unwrap_or(0) == 1 {
-                        a.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1).map_err(hr)?;
-                        async_mode = true;
-                    }
-                    let _ = a.SetUINT32(&MF_LOW_LATENCY, 1);
-                    // Never let the MFT hold more than 1 frame: latency > memory.
-                    let _ = a.SetUINT32(&MF_SA_D3D11_AWARE, 1);
-                }
-
-                // 4. Bind our D3D11 device so the MFT reads the NV12 texture in
-                //    place (true zero-copy; no staging, no PCIe round trip).
-                let mut reset_token = 0u32;
-                let mut manager: Option<IMFDXGIDeviceManager> = None;
-                MFCreateDXGIDeviceManager(&mut reset_token, &mut manager).map_err(hr)?;
-                let manager =
-                    manager.ok_or_else(|| RecorderError::Other("no dxgi manager".into()))?;
-                manager.ResetDevice(device, reset_token).map_err(hr)?;
-                transform
-                    .ProcessMessage(
-                        MFT_MESSAGE_SET_D3D_MANAGER,
-                        manager.as_raw() as usize,
-                    )
-                    .map_err(hr)?;
-
-                // 5. Output type first - that is the MFT contract.
-                let out_type = MFCreateMediaType().map_err(hr)?;
+            set_attr_size(&out_type, &MF_MT_FRAME_SIZE, width, height)?;
+            set_attr_ratio(&out_type, &MF_MT_FRAME_RATE, fps, 1)?;
+            set_attr_ratio(&out_type, &MF_MT_PIXEL_ASPECT_RATIO, 1, 1)?;
+            if codec == Codec::H264 {
                 out_type
-                    .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
+                    .SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High.0 as u32)
                     .map_err(hr)?;
-                out_type.SetGUID(&MF_MT_SUBTYPE, &subtype).map_err(hr)?;
-                out_type
-                    .SetUINT32(&MF_MT_AVG_BITRATE, bitrate_kbps * 1000)
-                    .map_err(hr)?;
-                out_type
-                    .SetUINT32(
-                        &MF_MT_INTERLACE_MODE,
-                        MFVideoInterlace_Progressive.0 as u32,
-                    )
-                    .map_err(hr)?;
-                set_attr_size(&out_type, &MF_MT_FRAME_SIZE, width, height)?;
-                set_attr_ratio(&out_type, &MF_MT_FRAME_RATE, fps, 1)?;
-                set_attr_ratio(&out_type, &MF_MT_PIXEL_ASPECT_RATIO, 1, 1)?;
-                if codec == Codec::H264 {
-                    out_type
-                        .SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High.0 as u32)
-                        .map_err(hr)?;
+            }
+            let _ = out_type.SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, gop);
+            transform.SetOutputType(0, &out_type, 0).map_err(hr)?;
+
+            // Input type: NV12 straight from the video processor.
+            let in_type = MFCreateMediaType().map_err(hr)?;
+            in_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video).map_err(hr)?;
+            in_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12).map_err(hr)?;
+            in_type
+                .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
+                .map_err(hr)?;
+            set_attr_size(&in_type, &MF_MT_FRAME_SIZE, width, height)?;
+            set_attr_ratio(&in_type, &MF_MT_FRAME_RATE, fps, 1)?;
+            set_attr_ratio(&in_type, &MF_MT_PIXEL_ASPECT_RATIO, 1, 1)?;
+            transform.SetInputType(0, &in_type, 0).map_err(hr)?;
+
+            let rc = match codec_api.as_ref() {
+                Some(api) => apply_codec_api(api, opts, gop),
+                None => opts.rate_control,
+            };
+
+            let events: Option<IMFMediaEventGenerator> = if async_mode { transform.cast().ok() } else { None };
+
+            transform.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0).map_err(hr)?;
+            transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0).map_err(hr)?;
+
+            // Parameter sets for the file writer (present after negotiation;
+            // the writer also reads them from the first key frame).
+            let negotiated = transform.GetOutputCurrentType(0).map_err(hr)?;
+            let mut sequence_header = Vec::new();
+            if let Ok(size) = negotiated.GetBlobSize(&MF_MT_MPEG_SEQUENCE_HEADER) {
+                if size > 0 {
+                    sequence_header.resize(size as usize, 0u8);
+                    let _ = negotiated.GetBlob(&MF_MT_MPEG_SEQUENCE_HEADER, &mut sequence_header, None);
                 }
-                // 1 key frame per second: fine-grained ring eviction + fast seek.
-                let _ = out_type.SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, fps);
-                transform.SetOutputType(0, &out_type, 0).map_err(hr)?;
+            }
 
-                // 6. Input type: NV12 straight from the video processor.
-                let in_type = MFCreateMediaType().map_err(hr)?;
-                in_type
-                    .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
-                    .map_err(hr)?;
-                in_type
-                    .SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)
-                    .map_err(hr)?;
-                in_type
-                    .SetUINT32(
-                        &MF_MT_INTERLACE_MODE,
-                        MFVideoInterlace_Progressive.0 as u32,
-                    )
-                    .map_err(hr)?;
-                set_attr_size(&in_type, &MF_MT_FRAME_SIZE, width, height)?;
-                set_attr_ratio(&in_type, &MF_MT_FRAME_RATE, fps, 1)?;
-                set_attr_ratio(&in_type, &MF_MT_PIXEL_ASPECT_RATIO, 1, 1)?;
-                transform.SetInputType(0, &in_type, 0).map_err(hr)?;
-
-                // 7. Rate control - CBR keeps VBV predictable, which keeps the
-                //    ring buffer's memory ceiling predictable.
-                if let Ok(codec_api) = transform.cast::<ICodecAPI>() {
-                    let _ = set_codec_u32(&codec_api, &CODECAPI_AVEncCommonRateControlMode, 0);
-                    let _ = set_codec_u32(
-                        &codec_api,
-                        &CODECAPI_AVEncCommonMeanBitRate,
-                        bitrate_kbps * 1000,
-                    );
-                    let _ = set_codec_u32(&codec_api, &CODECAPI_AVEncCommonLowLatency, 1);
-                    let _ = set_codec_u32(&codec_api, &CODECAPI_AVEncMPVGOPSize, fps);
-                    let _ = set_codec_u32(&codec_api, &CODECAPI_AVEncVideoMaxNumRefFrame, 1);
-                    // Game Mode: bias the encoder toward speed instead of the
-                    // vendor's default quality preset. Clips still look good at
-                    // 1080p, but the encoder spends noticeably less time on the
-                    // GPU while a game is running.
-                    if performance_mode {
-                        let _ = set_codec_u32(&codec_api, &CODECAPI_AVEncCommonQuality, 55);
-                        // The knob NVENC/AMF/QSV actually honour for the
-                        // speed/quality tradeoff (0 = quality, 100 = speed).
-                        let _ = set_codec_u32(
-                            &codec_api,
-                            &CODECAPI_AVEncCommonQualityVsSpeed,
-                            80,
-                        );
-                        // No B-frames: less encoder work and no reorder delay.
-                        let _ = set_codec_u32(
-                            &codec_api,
-                            &CODECAPI_AVEncMPVDefaultBPictureCount,
-                            0,
-                        );
-                    }
-                }
-
-                let events: Option<IMFMediaEventGenerator> = if async_mode {
-                    transform.cast().ok()
-                } else {
-                    None
-                };
-
-                transform
-                    .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
-                    .map_err(hr)?;
-                transform
-                    .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
-                    .map_err(hr)?;
-
-                // Grab SPS/PPS for the muxer (present after type negotiation).
-                let negotiated = transform.GetOutputCurrentType(0).map_err(hr)?;
-                let mut sequence_header = Vec::new();
-                if let Ok(size) = negotiated.GetBlobSize(&MF_MT_MPEG_SEQUENCE_HEADER) {
-                    if size > 0 {
-                        sequence_header.resize(size as usize, 0u8);
-                        let _ = negotiated
-                            .GetBlob(&MF_MT_MPEG_SEQUENCE_HEADER, &mut sequence_header, None);
-                    }
-                }
-
-                let vendor = if hardware {
-                    EncoderVendor::from_friendly_name(&friendly)
-                } else {
-                    EncoderVendor::MediaFoundationSoftware
-                };
-
-                Ok(Self {
-                    transform,
-                    events,
-                    _dxgi_manager: manager,
-                    info: EncoderInfo {
-                        vendor,
-                        friendly_name: friendly,
-                        codec: codec.as_str().to_string(),
-                        hardware,
-                        adapter_name: adapter_name.to_string(),
-                        dedicated_vram_mb: vram_mb,
-                    },
-                    header: VideoFormatHeader {
-                        width,
-                        height,
-                        fps_num: fps,
-                        fps_den: 1,
-                        bitrate: bitrate_kbps * 1000,
-                        profile: eAVEncH264VProfile_High.0 as u32,
-                        codec: if codec == Codec::H264 { 0 } else { 1 },
-                        sequence_header,
-                    },
-                    async_mode,
-                    pending_input: 0,
-                    pending_output: 0,
+            let vendor = if hardware { cand.vendor } else { EncoderVendor::MediaFoundationSoftware };
+            let quality = match rc {
+                RateControl::Cqp => format!("CQP {}", opts.cqp_level.clamp(1, 51)),
+                _ => format!("{} {} Mbit/s", rc.label(), (opts.bitrate_kbps as f32 / 1000.0 * 10.0).round() / 10.0),
+            };
+            let preset = match opts.preset {
+                EncoderPreset::Auto if opts.performance_mode => ", speed preset (Game Mode)",
+                EncoderPreset::Auto => "",
+                EncoderPreset::Speed => ", speed preset",
+                EncoderPreset::Balanced => ", balanced preset",
+                EncoderPreset::Quality => ", quality preset",
+            };
+            let detail = format!("{quality}, key frame every {} s{preset}", gop as f32 / fps.max(1) as f32);
+            if hardware {
+                HW_SESSIONS.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(Self {
+                transform,
+                codec_api,
+                hardware,
+                candidate: cand.key(),
+                events,
+                _dxgi_manager: manager,
+                info: EncoderInfo {
+                    vendor,
+                    friendly_name: cand.name.clone(),
+                    codec: codec.as_str().to_string(),
+                    hardware,
+                    adapter_name: adapter_name.to_string(),
+                    dedicated_vram_mb: vram_mb,
+                    notice: None,
+                    detail,
+                },
+                header: VideoFormatHeader {
                     width,
                     height,
-                    fps,
-                })
-            }
+                    fps_num: fps,
+                    fps_den: 1,
+                    bitrate: opts.bitrate_kbps.saturating_mul(1000),
+                    profile: eAVEncH264VProfile_High.0 as u32,
+                    codec: codec.header_id(),
+                    sequence_header,
+                },
+                async_mode,
+                pending_input: 0,
+                pending_output: 0,
+                width,
+                height,
+                fps,
+            })
         }
 
         /// Feeds one NV12 texture. `force_key` is used right after a device
@@ -2311,6 +2815,10 @@ mod win {
                 sample.SetSampleDuration(duration_hns).map_err(hr)?;
                 if force_key {
                     let _ = sample.SetUINT32(&MFSampleExtension_CleanPoint, 1);
+                    // The way most hardware encoders actually take the request.
+                    if let Some(api) = self.codec_api.as_ref() {
+                        let _ = set_codec_u32(api, &CODECAPI_AVEncVideoForceKeyFrame, 1);
+                    }
                 }
 
                 match self.transform.ProcessInput(0, &sample, 0) {
@@ -2450,6 +2958,9 @@ mod win {
 
     impl Drop for HardwareEncoder {
         fn drop(&mut self) {
+            if self.hardware {
+                HW_SESSIONS.fetch_sub(1, Ordering::Relaxed);
+            }
             unsafe {
                 let _ = self
                     .transform
@@ -2514,175 +3025,17 @@ mod win {
         api.SetValue(key, &v)
     }
 
-    // ------------------------------------------------------------- muxing
-    /// Remuxes ring-buffer packets into a fragmented-friendly MP4 with a
-    /// pass-through sink writer (no re-encode, ~1 GB/s effective throughput).
-    pub(super) fn mux(
-        path: &Path,
-        header: &VideoFormatHeader,
-        video: &[EncodedPacket],
-        audio: &[EncodedPacket],
-    ) -> RResult<()> {
-        let mut m = StreamMux::open(path, header, !audio.is_empty())?;
-        let base_pts = video.first().map(|p| p.pts_hns).unwrap_or(0);
-        for pkt in video {
-            m.write(TrackKind::Video, pkt, pkt.pts_hns - base_pts)?;
-        }
-        for pkt in audio {
-            m.write(TrackKind::Audio, pkt, pkt.pts_hns - base_pts)?;
-        }
-        m.finish()
-    }
-
-    /// An MP4 that encoded packets are appended to (pass-through, no
-    /// re-encode). Used for replays (all at once) and screen recordings
-    /// (streamed while they run). Must stay on the thread that opened it.
-    pub(super) struct StreamMux {
-        _session: MfSession,
-        writer: IMFSinkWriter,
-        vstream: u32,
-        astream: Option<u32>,
-    }
-
-    impl StreamMux {
-        pub(super) fn open(path: &Path, header: &VideoFormatHeader, with_audio: bool) -> RResult<Self> {
-        unsafe {
-            let _session = MfSession::new()?;
-            let wide: Vec<u16> = path
-                .as_os_str()
-                .encode_wide()
-                .chain(std::iter::once(0))
-                .collect();
-
-            let attrs = {
-                let mut a: Option<IMFAttributes> = None;
-                MFCreateAttributes(&mut a, 6).map_err(hr)?;
-                a.ok_or_else(|| RecorderError::Other("no sink attributes".into()))?
-            };
-            attrs
-                .SetGUID(&MF_TRANSCODE_CONTAINERTYPE, &MFTranscodeContainerType_MPEG4)
-                .map_err(hr)?;
-            // We are writing already-encoded samples; throttling would only add
-            // latency to the Alt+C path.
-            let _ = attrs.SetUINT32(&MF_SINK_WRITER_DISABLE_THROTTLING, 1);
-            let _ = attrs.SetUINT32(&MF_LOW_LATENCY, 0);
-            let _ = attrs.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1);
-
-            let writer =
-                MFCreateSinkWriterFromURL(PCWSTR(wide.as_ptr()), None, &attrs).map_err(hr)?;
-
-            // ---- video stream (pass-through) ----
-            let subtype = if header.codec == 0 {
-                MFVideoFormat_H264
-            } else {
-                MFVideoFormat_HEVC
-            };
-            let vtype = MFCreateMediaType().map_err(hr)?;
-            vtype
-                .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
-                .map_err(hr)?;
-            vtype.SetGUID(&MF_MT_SUBTYPE, &subtype).map_err(hr)?;
-            vtype
-                .SetUINT32(&MF_MT_AVG_BITRATE, header.bitrate)
-                .map_err(hr)?;
-            vtype
-                .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
-                .map_err(hr)?;
-            set_attr_size(&vtype, &MF_MT_FRAME_SIZE, header.width, header.height)?;
-            set_attr_ratio(&vtype, &MF_MT_FRAME_RATE, header.fps_num, header.fps_den)?;
-            set_attr_ratio(&vtype, &MF_MT_PIXEL_ASPECT_RATIO, 1, 1)?;
-            if !header.sequence_header.is_empty() {
-                let _ = vtype.SetBlob(&MF_MT_MPEG_SEQUENCE_HEADER, &header.sequence_header);
-            }
-            if header.codec == 0 {
-                let _ = vtype.SetUINT32(&MF_MT_MPEG2_PROFILE, header.profile);
-            }
-            let vstream = writer.AddStream(&vtype).map_err(hr)?;
-            // Identical in/out type ⇒ the sink writer inserts no transform.
-            writer.SetInputMediaType(vstream, &vtype, None).map_err(hr)?;
-
-            // ---- audio stream (AAC pass-through) ----
-            let astream = if with_audio {
-                let atype = MFCreateMediaType().map_err(hr)?;
-                atype
-                    .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)
-                    .map_err(hr)?;
-                atype.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_AAC).map_err(hr)?;
-                atype
-                    .SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, 48_000)
-                    .map_err(hr)?;
-                atype.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, 2).map_err(hr)?;
-                atype
-                    .SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)
-                    .map_err(hr)?;
-                atype
-                    .SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 24_000)
-                    .map_err(hr)?;
-                atype
-                    .SetUINT32(&MF_MT_AAC_PAYLOAD_TYPE, 0)
-                    .map_err(hr)?;
-                atype
-                    .SetUINT32(
-                        &MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION,
-                        0x29, // AAC-LC L2
-                    )
-                    .map_err(hr)?;
-                let s = writer.AddStream(&atype).map_err(hr)?;
-                writer.SetInputMediaType(s, &atype, None).map_err(hr)?;
-                Some(s)
-            } else {
-                None
-            };
-
-            writer.BeginWriting().map_err(hr)?;
-            Ok(Self { _session, writer, vstream, astream })
-        }
-        }
-
-        /// Appends one packet at `pts` (100 ns, file time).
-        pub(super) fn write(&mut self, track: TrackKind, pkt: &EncodedPacket, pts: i64) -> RResult<()> {
-            let stream = match track {
-                TrackKind::Video => self.vstream,
-                TrackKind::Audio => match self.astream {
-                    Some(s) => s,
-                    None => return Ok(()),
-                },
-            };
-            unsafe {
-                // Clamp negative stamps: WriteSample rejects them.
-                let key = matches!(track, TrackKind::Audio) || pkt.keyframe;
-                let sample = make_sample(&pkt.data, pts.max(0), pkt.duration_hns, key)?;
-                self.writer.WriteSample(stream, &sample).map_err(hr)?;
-            }
-            Ok(())
-        }
-
-        pub(super) fn finish(self) -> RResult<()> {
-            unsafe { self.writer.Finalize().map_err(hr) }
-        }
-    }
-
-    unsafe fn make_sample(
-        data: &[u8],
-        pts: i64,
-        dur: i64,
-        keyframe: bool,
-    ) -> RResult<IMFSample> {
-        let buffer = MFCreateMemoryBuffer(data.len() as u32).map_err(hr)?;
-        let mut ptr: *mut u8 = std::ptr::null_mut();
-        buffer.Lock(&mut ptr, None, None).map_err(hr)?;
-        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
-        buffer.Unlock().map_err(hr)?;
-        buffer.SetCurrentLength(data.len() as u32).map_err(hr)?;
-
-        let sample = MFCreateSample().map_err(hr)?;
-        sample.AddBuffer(&buffer).map_err(hr)?;
-        sample.SetSampleTime(pts).map_err(hr)?;
-        sample.SetSampleDuration(dur).map_err(hr)?;
-        if keyframe {
-            let _ = sample.SetUINT32(&MFSampleExtension_CleanPoint, 1);
-        }
-        Ok(sample)
+    pub(super) fn encoder_caps() -> EncoderCaps {
+        let _session = MfSession::new().ok();
+        let codecs = [Codec::H264, Codec::Hevc, Codec::Av1]
+            .into_iter()
+            .map(|c| CodecCaps {
+                codec: c,
+                hardware: unsafe { hardware_encoders(c) }.into_iter().map(|(_, n, _)| n).collect(),
+                software: c == Codec::H264,
+            })
+            .collect();
+        EncoderCaps { codecs, sessions: hardware_sessions() }
     }
 
     // -------------------------------------------------------------- misc
@@ -2712,8 +3065,6 @@ mod win {
             let _ = SetThreadPriority(GetCurrentThread(), priority);
         }
     }
-
-    use std::os::windows::ffi::OsStrExt;
 
     // ----------------------------------------------- window / app source
     /// A window drawn, fitted, into a fixed canvas (windows can be resized;
@@ -2976,10 +3327,18 @@ mod win {
         // Consecutive failures to set up desktop duplication; after three,
         // Automatic switches to Graphics Capture for this run.
         let mut dup_failures = 0u32;
+        // Encoders that opened but would not take frames (session limits on
+        // some drivers show up only then): skipped on the next rebuild.
+        let mut failed_encoders: Vec<String> = Vec::new();
+        let synthetic = super::synthetic_source();
+        if synthetic {
+            // A test copy never captures a window or the screen.
+            cfg.source = CaptureSource::Display;
+        }
 
         'outer: while !shared.stop_requested.load(Ordering::Acquire) {
             // ---------------- build (or rebuild) the graphics stack -------
-            let mode = screen_mode(&cfg, dup_failures);
+            let mode = if synthetic { ScreenMode::Synthetic } else { screen_mode(&cfg, dup_failures) };
             let monitor_index = match &cfg.source {
                 CaptureSource::Window { hwnd, .. } => monitor_index_of_window(*hwnd).unwrap_or(cfg.monitor_index),
                 CaptureSource::Display => cfg.monitor_index,
@@ -3082,16 +3441,25 @@ mod win {
                 }
             };
 
+            let enc_opts = EncoderOpts {
+                codec: cfg.codec,
+                bitrate_kbps: cfg.bitrate_kbps,
+                rate_control: cfg.rate_control,
+                cqp_level: cfg.cqp_level,
+                keyframe_seconds: cfg.keyframe_seconds,
+                preset: cfg.encoder_preset,
+                backend: cfg.encoder_backend,
+                performance_mode: cfg.performance_mode,
+            };
             let mut encoder = match HardwareEncoder::create(
                 &gfx.device,
                 dst_w,
                 dst_h,
                 cfg.target_fps,
-                cfg.bitrate_kbps,
-                cfg.codec,
-                cfg.performance_mode,
+                &enc_opts,
                 &gfx.adapter_name,
                 gfx.vram_mb,
+                &failed_encoders,
             ) {
                 Ok(e) => e,
                 Err(e) => {
@@ -3106,7 +3474,8 @@ mod win {
             *shared.dimensions.write() = encoder.dimensions();
             *fmt.lock() = Some(encoder.header.clone());
             *shared.last_error.write() = None;
-            *shared.notice.write() = None;
+            // A fallback (other codec, other encoder, the CPU) is said plainly.
+            *shared.notice.write() = encoder.info.notice.clone();
             *shared.capture_method.write() =
                 window.as_ref().map(|w| w.method_label()).unwrap_or(gfx.method_label()).to_string();
             shared.set_state(EngineState::Buffering);
@@ -3126,6 +3495,9 @@ mod win {
                 .then(crate::media::cursor::CursorOverlay::default);
             let mut fps_window = Instant::now();
             let mut fps_frames = 0u32;
+            // An encoder that never takes a frame is given up on after ~2 s.
+            let mut accepted_any = false;
+            let mut refused = 0u32;
 
             // Studio layers and the live preview (both cost nothing when unused).
             let mut layers = crate::media::layers::LayerRenderer::default();
@@ -3180,7 +3552,9 @@ mod win {
                 let mut screen: Option<ID3D11Texture2D> = None;
                 let mut acquired = false;
                 if needs_screen {
-                    if let Some(dup) = gfx.duplication.clone() {
+                    if let Some(s) = gfx.synth.as_ref() {
+                        screen = Some(s.frame(&gfx.context, clock.now_hns()));
+                    } else if let Some(dup) = gfx.duplication.clone() {
                         let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
                         let mut resource: Option<IDXGIResource> = None;
                         match unsafe { dup.AcquireNextFrame(0, &mut frame_info, &mut resource) } {
@@ -3343,6 +3717,9 @@ mod win {
                             force_key = true;
                             was_gated = false;
                         }
+                        if shared.force_key_request.swap(false, Ordering::AcqRel) {
+                            force_key = true;
+                        }
                         // Constant frame rate: stamp the frame on the fps
                         // grid (REC-036). Players then see an even cadence,
                         // and a late frame leaves a one-slot gap instead of
@@ -3391,6 +3768,17 @@ mod win {
                             };
                         if !accepted {
                             shared.dropped_frames.fetch_add(1, Ordering::Relaxed);
+                            if !accepted_any {
+                                refused += 1;
+                                if refused >= cfg.target_fps.max(1) * 2 {
+                                    log::warn!("[lastshot] {} took no frames; trying the next encoder", encoder.candidate);
+                                    failed_encoders.push(encoder.candidate.clone());
+                                    drop(encoder);
+                                    continue 'outer;
+                                }
+                            }
+                        } else {
+                            accepted_any = true;
                         }
 
                         let drain = encoder.drain(&mut push);
@@ -3459,51 +3847,11 @@ mod sim {
 
     pub(super) fn boost_thread(_performance_mode: bool) {}
 
-    pub(super) struct StreamMux {
-        path: PathBuf,
-        bytes: Vec<u8>,
-    }
-
-    impl StreamMux {
-        pub(super) fn open(path: &Path, header: &VideoFormatHeader, _with_audio: bool) -> RResult<Self> {
-            let mut bytes = vec![
-                0x00, 0x00, 0x00, 0x18, b'f', b't', b'y', b'p', b'i', b's', b'o', b'm', 0x00, 0x00,
-                0x02, 0x00, b'i', b's', b'o', b'm', b'i', b's', b'o', b'2',
-            ];
-            bytes.extend_from_slice(&header.sequence_header);
-            Ok(Self { path: path.to_path_buf(), bytes })
+    pub(super) fn encoder_caps() -> EncoderCaps {
+        EncoderCaps {
+            codecs: vec![CodecCaps { codec: Codec::H264, hardware: Vec::new(), software: true }],
+            sessions: 0,
         }
-        pub(super) fn write(&mut self, track: TrackKind, pkt: &EncodedPacket, _pts: i64) -> RResult<()> {
-            if matches!(track, TrackKind::Video) {
-                self.bytes.extend_from_slice(&pkt.data);
-            }
-            Ok(())
-        }
-        pub(super) fn finish(self) -> RResult<()> {
-            std::fs::write(&self.path, self.bytes)?;
-            Ok(())
-        }
-    }
-
-    pub(super) fn mux(
-        path: &Path,
-        header: &VideoFormatHeader,
-        video: &[EncodedPacket],
-        _audio: &[EncodedPacket],
-    ) -> RResult<()> {
-        // Emit a structurally valid (if tiny) file so downstream code paths -
-        // metadata scan, trimming, deletion - all still exercise real IO.
-        let mut bytes = Vec::with_capacity(1024 + video.len() * 32);
-        bytes.extend_from_slice(&[
-            0x00, 0x00, 0x00, 0x18, b'f', b't', b'y', b'p', b'i', b's', b'o', b'm', 0x00, 0x00,
-            0x02, 0x00, b'i', b's', b'o', b'm', b'i', b's', b'o', b'2',
-        ]);
-        bytes.extend_from_slice(&header.sequence_header);
-        for p in video {
-            bytes.extend_from_slice(&p.data);
-        }
-        std::fs::write(path, bytes)?;
-        Ok(())
     }
 
     pub(super) fn capture_loop(
@@ -3512,8 +3860,9 @@ mod sim {
         fmt: Arc<Mutex<Option<VideoFormatHeader>>>,
         _clock: Arc<super::QpcClock>,
     ) {
-        let w = if cfg.width == 0 { 1920 } else { cfg.width };
-        let h = if cfg.height == 0 { 1080 } else { cfg.height };
+        // A small real H.264 stream, so saved files play.
+        let (w, h) = (320, 180);
+        let stream = crate::media::container::testdata::H264Stream::new(w, h);
 
         *shared.encoder.write() = EncoderInfo {
             vendor: EncoderVendor::MediaFoundationSoftware,
@@ -3522,6 +3871,8 @@ mod sim {
             hardware: false,
             adapter_name: "Virtual Adapter".into(),
             dedicated_vram_mb: 0,
+            notice: None,
+            detail: String::new(),
         };
         *shared.dimensions.write() = (w, h);
         *fmt.lock() = Some(VideoFormatHeader {
@@ -3530,14 +3881,13 @@ mod sim {
             fps_num: cfg.target_fps,
             fps_den: 1,
             bitrate: cfg.bitrate_kbps * 1000,
-            profile: 100,
+            profile: 66,
             codec: 0,
-            sequence_header: vec![0, 0, 0, 1, 0x67, 0x64, 0x00, 0x2A],
+            sequence_header: stream.header(),
         });
         shared.set_state(EngineState::Buffering);
 
         let frame_hns = HNS_PER_SECOND / cfg.target_fps.max(1) as i64;
-        let bytes_per_frame = (cfg.bitrate_kbps as usize * 1000 / 8) / cfg.target_fps.max(1) as usize;
         let interval = Duration::from_secs_f64(1.0 / cfg.target_fps.max(1) as f64);
         let mut pts = 0i64;
         let mut n = 0u64;
@@ -3558,11 +3908,10 @@ mod sim {
                 was_gated = false;
                 n = 0;
             }
-            let key = n % cfg.target_fps.max(1) as u64 == 0;
-            let size = if key { bytes_per_frame * 6 } else { bytes_per_frame };
+            let (au, key) = stream.frame(n as u32, cfg.target_fps.max(1));
             let pkt = EncodedPacket {
                 track: TrackKind::Video,
-                data: Arc::from(vec![(n % 251) as u8; size.max(64)].into_boxed_slice()),
+                data: Arc::from(au.into_boxed_slice()),
                 pts_hns: pts,
                 duration_hns: frame_hns,
                 keyframe: key,
@@ -3611,10 +3960,92 @@ struct RecSegment {
     offset: i64,
 }
 
-/// The screen-recording thread: streams new ring packets into an MP4 until
+/// The recording thread's links to the engine and the UI.
+struct RecControl<'a> {
+    stop: &'a AtomicBool,
+    paused: &'a AtomicBool,
+    pause_pts: &'a std::sync::atomic::AtomicI64,
+    written: &'a std::sync::atomic::AtomicI64,
+    info: &'a RecShared,
+}
+
+/// Test copies (`LASTSHOT_TEST_INSTANCE=1`) record a made-up picture and sound
+/// instead of the screen and the PC's audio, so a test can never capture the
+/// user's desktop. `LASTSHOT_REAL_CAPTURE=1` turns that off for a test that
+/// records its own window.
+pub fn synthetic_source() -> bool {
+    std::env::var("LASTSHOT_TEST_INSTANCE").as_deref() == Ok("1") && std::env::var_os("LASTSHOT_REAL_CAPTURE").is_none()
+}
+
+/// What the file writer needs to know about the engine's streams.
+fn stream_info(header: &VideoFormatHeader, with_audio: bool) -> crate::media::container::stream::StreamInfo {
+    use crate::media::container::{stream::StreamInfo, CodecId};
+    StreamInfo {
+        codec: match header.codec {
+            1 => CodecId::Hevc,
+            2 => CodecId::Av1,
+            _ => CodecId::H264,
+        },
+        width: header.width,
+        height: header.height,
+        fps_num: header.fps_num,
+        fps_den: header.fps_den,
+        bitrate: header.bitrate,
+        header: header.sequence_header.clone(),
+        audio: with_audio.then_some((
+            crate::media::audio::SAMPLE_RATE,
+            crate::media::audio::CHANNELS as u16,
+            crate::media::audio::AAC_BYTES_PER_SECOND * 8,
+        )),
+    }
+}
+
+/// Free space on the drive holding `dir` (None when it can't be read).
+pub fn free_space(dir: &Path) -> Option<u64> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+        let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let mut avail = 0u64;
+        unsafe { GetDiskFreeSpaceExW(PCWSTR(wide.as_ptr()), Some(&mut avail), None, None) }.ok()?;
+        Some(avail)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = dir;
+        None
+    }
+}
+
+fn gb(bytes: u64) -> String {
+    let g = bytes as f64 / 1e9;
+    if g >= 10.0 {
+        format!("{g:.0} GB")
+    } else {
+        format!("{g:.1} GB")
+    }
+}
+
+fn minutes(secs: f64) -> String {
+    let m = (secs / 60.0).round().max(1.0) as u64;
+    if m == 1 {
+        "about a minute".into()
+    } else {
+        format!("about {m} minutes")
+    }
+}
+
+/// Room kept for finishing the file (index, last fragment) under a size limit.
+const SIZE_LIMIT_MARGIN: u64 = 16 << 20;
+
+/// The screen-recording thread: streams new ring packets into the file until
 /// `stop`, skipping paused stretches (it resumes on a key frame so the file
-/// stays decodable). Returns the written duration and whether it has audio.
-#[allow(clippy::too_many_arguments)]
+/// stays decodable). Each poll is written and flushed, so a crash or power
+/// cut loses at most about a second. It stops by itself at the time or size
+/// limit, when the drive runs low, or when a write fails (full disk, drive
+/// removed), always keeping what reached the disk.
 fn record_loop(
     path: &Path,
     header: &VideoFormatHeader,
@@ -3622,17 +4053,23 @@ fn record_loop(
     generation: u32,
     start: i64,
     with_audio: bool,
-    stop: &AtomicBool,
-    paused: &AtomicBool,
-    written: &std::sync::atomic::AtomicI64,
-) -> RResult<(i64, bool)> {
-    let mut mux = platform::StreamMux::open(path, header, with_audio)?;
+    opts: &RecordOptions,
+    ctl: RecControl<'_>,
+) -> RResult<RecEnd> {
+    use crate::media::container::mp4::Mode;
+    use crate::media::container::stream::{describe_write_error, StreamWriter};
+    let RecControl { stop, paused, pause_pts, written, info } = ctl;
+    let limit_hns = (opts.max_seconds * HNS_PER_SECOND as f64) as i64;
+    let mut mux = StreamWriter::new(path, opts.format, Mode::Hybrid, stream_info(header, with_audio));
     let mut last_v = start - 1;
     let mut last_a = start - 1;
     let mut segs: Vec<RecSegment> = Vec::new();
     let mut need_key = true;
     let mut end_raw = start; // end of the last written video frame
     let mut wrote_audio = false;
+    let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let mut last_disk: Option<Instant> = None;
+    let mut ended: Option<String> = None;
     loop {
         let stopping = stop.load(Ordering::Relaxed);
         let (video, audio, gen_changed) = {
@@ -3642,68 +4079,227 @@ fn record_loop(
             (v, a, changed)
         };
         let is_paused = paused.load(Ordering::Relaxed);
-        if is_paused {
-            if let Some(seg) = segs.last_mut() {
-                if seg.end.is_none() {
-                    seg.end = Some(end_raw);
-                }
-            }
-            need_key = true;
-        }
-        for p in &video {
-            last_v = p.pts_hns;
-            if is_paused {
-                continue;
-            }
-            if need_key {
-                if !p.keyframe {
+        // Frames up to the press are kept when pausing.
+        let pause_at = if is_paused { pause_pts.load(Ordering::Relaxed) } else { i64::MAX };
+        let mut limit_hit = false;
+        let wrote = (|| -> std::io::Result<()> {
+            for p in &video {
+                last_v = p.pts_hns;
+                if p.pts_hns > pause_at || limit_hit {
                     continue;
                 }
-                let offset = match segs.last() {
-                    Some(prev) => prev.offset + (p.pts_hns - prev.end.unwrap_or(end_raw)),
-                    None => start,
-                };
-                segs.push(RecSegment { start: p.pts_hns, end: None, offset });
-                need_key = false;
+                if need_key {
+                    if !p.keyframe {
+                        continue;
+                    }
+                    let offset = match segs.last() {
+                        Some(prev) => prev.offset + (p.pts_hns - prev.end.unwrap_or(end_raw)),
+                        None => p.pts_hns,
+                    };
+                    segs.push(RecSegment { start: p.pts_hns, end: None, offset });
+                    need_key = false;
+                }
+                let seg = segs.last().expect("segment opened above");
+                // The time limit cuts on the exact frame.
+                if limit_hns > 0 && p.pts_hns - seg.offset >= limit_hns {
+                    limit_hit = true;
+                    continue;
+                }
+                if mux.write_video(&p.data, p.pts_hns - seg.offset, p.duration_hns, p.keyframe)? {
+                    end_raw = p.pts_hns + p.duration_hns;
+                    written.store(end_raw - seg.offset, Ordering::Relaxed);
+                }
             }
-            let seg = segs.last().expect("segment opened above");
-            mux.write(TrackKind::Video, p, p.pts_hns - seg.offset)?;
-            end_raw = p.pts_hns + p.duration_hns;
-            written.store(end_raw - seg.offset, Ordering::Relaxed);
-        }
-        for p in &audio {
-            last_a = p.pts_hns;
-            if !with_audio {
-                continue;
+            if is_paused {
+                if let Some(seg) = segs.last_mut() {
+                    if seg.end.is_none() {
+                        seg.end = Some(end_raw);
+                    }
+                }
+                need_key = true;
             }
-            // Only audio that belongs to a written stretch of video.
-            let seg = segs.iter().find(|s| {
-                p.pts_hns >= s.start && s.end.map_or(p.pts_hns < end_raw + 2 * HNS_PER_SECOND, |e| p.pts_hns < e)
-            });
-            if let Some(seg) = seg {
-                mux.write(TrackKind::Audio, p, p.pts_hns - seg.offset)?;
-                wrote_audio = true;
+            // On the last pass, the sound ends with the picture.
+            let open_end = if stopping || limit_hit { end_raw } else { end_raw + 2 * HNS_PER_SECOND };
+            for p in &audio {
+                last_a = p.pts_hns;
+                if !with_audio {
+                    continue;
+                }
+                // Only audio that belongs to a written stretch of video.
+                let seg = segs
+                    .iter()
+                    .find(|s| p.pts_hns >= s.start && s.end.map_or(p.pts_hns < open_end, |e| p.pts_hns < e));
+                if let Some(seg) = seg {
+                    wrote_audio |= mux.write_audio(&p.data, p.pts_hns - seg.offset, p.duration_hns)?;
+                }
             }
-        }
-        if stopping || gen_changed {
-            if gen_changed {
-                log::warn!("[lastshot] recording ended: the display or GPU changed");
-            }
+            mux.flush()
+        })();
+        if let Err(e) = wrote {
+            log::warn!("[lastshot] recording write failed: {e}");
+            ended = Some(format!("{}, so the recording stopped. Everything up to that moment is saved.", describe_write_error(&e)));
             break;
         }
-        std::thread::sleep(Duration::from_millis(500));
+        let bytes = mux.bytes();
+        info.bytes.store(bytes, Ordering::Relaxed);
+        let secs = written.load(Ordering::Relaxed) as f64 / HNS_PER_SECOND as f64;
+
+        // ---- limits: time, size, free space
+        let mut left: Option<f64> = None;
+        let rate = if secs > 2.0 { bytes as f64 / secs } else { 0.0 };
+        if opts.max_seconds > 0.0 {
+            if limit_hit || secs >= opts.max_seconds {
+                ended = Some(format!("Stopped at the time limit ({}).", fmt_duration(opts.max_seconds)));
+                break;
+            }
+            left = Some(opts.max_seconds - secs);
+        }
+        if opts.max_bytes > 0 {
+            let cap = opts.max_bytes.saturating_sub(SIZE_LIMIT_MARGIN);
+            if bytes >= cap {
+                ended = Some(format!("Stopped at the size limit ({}).", gb(opts.max_bytes)));
+                break;
+            }
+            if rate > 0.0 {
+                let l = (cap - bytes) as f64 / rate;
+                left = Some(left.map_or(l, |x| x.min(l)));
+            }
+        }
+        if last_disk.map_or(true, |t| t.elapsed() >= Duration::from_secs(2)) {
+            last_disk = Some(Instant::now());
+            if let Some(free) = free_space(&dir) {
+                if free <= opts.reserve_bytes {
+                    ended = Some(format!(
+                        "The disk is almost full ({} left), so the recording stopped. Everything up to then is saved.",
+                        gb(free)
+                    ));
+                    break;
+                }
+                let room = free - opts.reserve_bytes;
+                let disk_left = if rate > 0.0 { Some(room as f64 / rate) } else { None };
+                let warn = match disk_left {
+                    Some(l) => l < 600.0,
+                    None => room < 2_000_000_000,
+                };
+                *info.notice.lock() = warn.then(|| match disk_left {
+                    Some(l) => format!("Disk almost full: {} of recording left", minutes(l)),
+                    None => format!("Disk almost full: {} left", gb(room)),
+                });
+                if let Some(l) = disk_left {
+                    left = Some(left.map_or(l, |x| x.min(l)));
+                }
+            }
+        }
+        info.left_ms.store(left.map_or(-1, |l| (l.max(0.0) * 1000.0) as i64), Ordering::Relaxed);
+
+        if stopping {
+            break;
+        }
+        if gen_changed {
+            log::warn!("[lastshot] recording ended: the display or GPU changed");
+            ended = Some("The display or graphics card changed, so the recording stopped. Everything up to then is saved.".into());
+            break;
+        }
+        // Up to half a second, but a stop is picked up at once.
+        for _ in 0..10 {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
-    mux.finish()?;
-    Ok((written.load(Ordering::Relaxed), with_audio && wrote_audio))
+    if let Some(e) = ended {
+        log::info!("[lastshot] {e}");
+        *info.ended.lock() = Some(e);
+    }
+    let started = mux.started();
+    match mux.finish() {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            let _ = std::fs::remove_file(path);
+            return Err(RecorderError::Other(
+                if paused.load(Ordering::Relaxed) {
+                    "Nothing was recorded: it was paused the whole time."
+                } else {
+                    "Nothing was recorded."
+                }
+                .into(),
+            ));
+        }
+        // The file keeps what reached the disk (it plays) and is finished
+        // by the repair on the next start.
+        Err(e) if started => log::warn!("[lastshot] finishing the recording failed: {e}"),
+        Err(e) => return Err(e.into()),
+    }
+    Ok(RecEnd { duration_hns: written.load(Ordering::Relaxed), has_audio: with_audio && wrote_audio })
 }
 
+fn fmt_duration(secs: f64) -> String {
+    let s = secs.round() as u64;
+    match (s / 3600, (s / 60) % 60, s % 60) {
+        (0, 0, s) => format!("{s} s"),
+        (0, m, 0) => format!("{m} min"),
+        (0, m, s) => format!("{m} min {s} s"),
+        (h, 0, _) => format!("{h} h"),
+        (h, m, _) => format!("{h} h {m} min"),
+    }
+}
+
+/// Writes a replay (ring packets) as a normal MP4, video and sound
+/// interleaved by time. Sound from before the first picture is left out.
 fn mux_packets_to_mp4(
     path: &Path,
     header: &VideoFormatHeader,
     video: &[EncodedPacket],
     audio: &[EncodedPacket],
 ) -> RResult<()> {
-    platform::mux(path, header, video, audio)
+    use crate::media::container::mp4::Mode;
+    use crate::media::container::stream::{Format, StreamWriter};
+    let mut w = StreamWriter::new(path, Format::Mp4, Mode::Plain, stream_info(header, !audio.is_empty()));
+    let base = video.first().map(|p| p.pts_hns).unwrap_or(0);
+    let (mut i, mut j) = (0, 0);
+    while i < video.len() || j < audio.len() {
+        let take_video = match (video.get(i), audio.get(j)) {
+            (Some(v), Some(a)) => v.pts_hns <= a.pts_hns,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if take_video {
+            let p = &video[i];
+            w.write_video(&p.data, p.pts_hns - base, p.duration_hns, p.keyframe)?;
+            i += 1;
+        } else {
+            let p = &audio[j];
+            w.write_audio(&p.data, p.pts_hns - base, p.duration_hns)?;
+            j += 1;
+        }
+    }
+    match w.finish()? {
+        Some(_) => Ok(()),
+        None => Err(RecorderError::EmptyBuffer),
+    }
+}
+
+/// The encoders one codec has on this PC.
+#[derive(Debug, Clone, Serialize)]
+pub struct CodecCaps {
+    pub codec: Codec,
+    /// Names of the graphics card encoders found.
+    pub hardware: Vec<String>,
+    /// Windows' own software encoder exists for it.
+    pub software: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EncoderCaps {
+    pub codecs: Vec<CodecCaps>,
+    /// Hardware encoder sessions Lastshot holds right now.
+    pub sessions: u32,
+}
+
+/// Which encoders this PC has (Settings shows it; nothing is opened).
+pub fn encoder_caps() -> EncoderCaps {
+    platform::encoder_caps()
 }
 
 pub fn process_rss_bytes() -> u64 {
@@ -4172,3 +4768,316 @@ mod ring_buffer_tests {
     }
 }
 
+
+/// The real engine (GPU picture, Media Foundation hardware encoder, AAC)
+/// fed by the test source: nothing on the screen or the PC's sound is
+/// captured. Needs a GPU, so run by hand:
+/// `cargo test --lib engine_e2e -- --ignored --test-threads=1 --nocapture`
+#[cfg(all(test, windows, not(feature = "headless-sim")))]
+mod engine_e2e {
+    use super::*;
+    use crate::media::container::{mkv, mp4, remux, stream::Format, testdata, CodecId};
+
+    fn dir() -> PathBuf {
+        let d = std::env::temp_dir().join(format!("lastshot-e2e-rec-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&d);
+        d
+    }
+
+    /// Prints where an access violation happens (no debugger needed).
+    fn trace_crashes() {
+        #[repr(C)]
+        struct Record {
+            code: u32,
+            flags: u32,
+            next: *mut Record,
+            address: *mut std::ffi::c_void,
+            n: u32,
+            info: [usize; 15],
+        }
+        #[repr(C)]
+        struct Pointers {
+            record: *mut Record,
+            context: *mut std::ffi::c_void,
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn AddVectoredExceptionHandler(first: u32, f: unsafe extern "system" fn(*mut Pointers) -> i32) -> *mut std::ffi::c_void;
+        }
+        unsafe extern "system" fn on_exception(p: *mut Pointers) -> i32 {
+            let r = &*(*p).record;
+            if r.code == 0xC000_0005 {
+                eprintln!(
+                    "ACCESS VIOLATION at {:?} ({} {:#x}) on thread {:?}
+{}",
+                    r.address,
+                    if r.info[0] == 0 { "read" } else { "write" },
+                    r.info[1],
+                    std::thread::current().name(),
+                    std::backtrace::Backtrace::force_capture()
+                );
+            }
+            0 // keep searching
+        }
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| unsafe {
+            AddVectoredExceptionHandler(1, on_exception);
+        });
+    }
+
+    fn engine(cfg: RecorderConfig) -> CaptureEngine {
+        trace_crashes();
+        std::env::set_var("LASTSHOT_TEST_INSTANCE", "1");
+        assert!(synthetic_source());
+        let e = CaptureEngine::new();
+        e.start(cfg).expect("engine starts");
+        let t = Instant::now();
+        while e.video_format.lock().is_none() || e.shared.ring.lock().video_frames() < 10 {
+            assert!(t.elapsed() < Duration::from_secs(20), "no frames: {:?}", e.stats().last_error);
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let st = e.stats();
+        println!(
+            "encoder: {} / {} ({}) {}x{} [{}] notice: {:?}",
+            st.encoder.friendly_name, st.encoder.codec, st.capture_method, st.width, st.height, st.encoder.detail, st.encoder.notice
+        );
+        e
+    }
+
+    fn cfg(fps: u32) -> RecorderConfig {
+        RecorderConfig {
+            target_fps: fps,
+            buffer_seconds: 20,
+            output_dir: dir(),
+            capture_system_audio: true,
+            capture_microphone: false,
+            ..Default::default()
+        }
+    }
+
+    fn opts() -> RecordOptions {
+        RecordOptions { reserve_bytes: 0, ..Default::default() }
+    }
+
+    fn codec_name(c: CodecId) -> &'static str {
+        match c {
+            CodecId::H264 => "h264",
+            CodecId::Hevc => "hevc",
+            CodecId::Av1 => "av1",
+            CodecId::Aac => "aac",
+        }
+    }
+
+    /// A finished recording: normal MP4, about `secs` long at `fps`, with
+    /// sound, clean for ffmpeg and readable by Media Foundation.
+    fn check(p: &Path, secs: f64, fps: u32) {
+        let info = mp4::read(p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+        assert_eq!(info.layout, mp4::Layout::Regular, "{}", p.display());
+        let v = info.video().expect("video track");
+        let frames = v.samples.len() as f64;
+        assert!((frames - secs * fps as f64).abs() <= fps as f64 * 0.75, "{}: {frames} frames for {secs} s", p.display());
+        assert!(v.samples[0].key, "starts on a key frame");
+        let audio = info.tracks.iter().find(|t| t.config.codec == CodecId::Aac).expect("sound track");
+        let a_secs = audio.duration_seconds();
+        assert!((a_secs - v.duration_seconds()).abs() < 0.3, "sound {a_secs} s vs picture {} s", v.duration_seconds());
+        if let Some(pr) = testdata::probe(p) {
+            assert!(pr.stderr.trim().is_empty(), "{}", pr.stderr);
+            assert_eq!(pr.packets(codec_name(v.config.codec)), Some(v.samples.len() as u64), "{pr:?}");
+        }
+        if let Some(e) = testdata::decode_errors(p) {
+            assert!(e.trim().is_empty(), "{}: {e}", p.display());
+        }
+        let m = crate::media::library::probe(p).expect("Media Foundation reads it");
+        assert!((m.duration_seconds as f64 - secs).abs() < 0.8, "MF: {} s", m.duration_seconds);
+        assert!(m.has_audio);
+        println!("ok {}: {frames} frames, {:.2} s, {} bytes", p.display(), v.duration_seconds(), std::fs::metadata(p).unwrap().len());
+    }
+
+    /// Sound minus picture, seconds, at each flash of the test picture (the
+    /// test sound beeps at the same engine time). None without ffmpeg.
+    fn av_offsets(p: &Path) -> Option<Vec<f64>> {
+        let out = std::process::Command::new(testdata::ffmpeg()?)
+            .args(["-v", "info", "-i"])
+            .arg(p)
+            .args(["-vf", "signalstats,metadata=print:key=lavfi.signalstats.YAVG", "-af", "silencedetect=noise=-15dB:d=0.02", "-f", "null", "-"])
+            .output()
+            .ok()?;
+        let log = String::from_utf8_lossy(&out.stderr);
+        let (mut flashes, mut beeps) = (Vec::new(), Vec::new());
+        let (mut t, mut was_bright) = (0.0f64, false);
+        for line in log.lines() {
+            if let Some(i) = line.find("pts_time:") {
+                t = line[i + 9..].split_whitespace().next()?.parse().ok()?;
+            } else if let Some(i) = line.find("YAVG=") {
+                let y: f64 = line[i + 5..].trim().parse().ok()?;
+                let bright = y > 128.0;
+                if bright && !was_bright {
+                    flashes.push(t);
+                }
+                was_bright = bright;
+            } else if let Some(i) = line.find("silence_end: ") {
+                beeps.push(line[i + 13..].split_whitespace().next()?.parse::<f64>().ok()?);
+            }
+        }
+        Some(
+            flashes
+                .iter()
+                .filter_map(|f| beeps.iter().map(|b| b - f).min_by(|a, b| a.abs().total_cmp(&b.abs())))
+                .collect(),
+        )
+    }
+
+    fn record(e: &CaptureEngine, name: &str, secs: f64, o: RecordOptions) -> (PathBuf, ClipWriteResult) {
+        let p = dir().join(name);
+        let _ = std::fs::remove_file(&p);
+        e.start_recording(p.clone(), o).unwrap();
+        std::thread::sleep(Duration::from_secs_f64(secs));
+        let r = e.stop_recording().unwrap();
+        (p, r)
+    }
+
+    #[test]
+    #[ignore]
+    fn engine_records_with_the_test_source() {
+        let e = engine(cfg(60));
+
+        // A plain recording, stopped twice (the second is a clean error).
+        let (p, r) = record(&e, "plain.mp4", 4.0, opts());
+        assert!(e.stop_recording().is_err());
+        assert!(r.has_audio);
+        check(&p, 4.0, 60);
+        if let Some(off) = av_offsets(&p) {
+            println!("A/V offsets (sound - picture, s): {off:?}");
+            assert!(off.len() >= 3, "flashes and beeps found: {off:?}");
+            let mut o = off.clone();
+            o.sort_by(f64::total_cmp);
+            let median = o[o.len() / 2];
+            assert!(median.abs() < 0.05, "sound is {median:+.3} s off the picture");
+        }
+
+        // Paused for 1.5 s in the middle: the file is the 4 s around it.
+        let p = dir().join("paused.mp4");
+        e.start_recording(p.clone(), opts()).unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+        e.set_recording_paused(true);
+        std::thread::sleep(Duration::from_millis(1500));
+        e.set_recording_paused(false);
+        std::thread::sleep(Duration::from_secs(2));
+        e.stop_recording().unwrap();
+        check(&p, 4.0, 60);
+
+        // The time limit stops it by itself, with the reason.
+        let p = dir().join("limit.mp4");
+        e.start_recording(p.clone(), RecordOptions { max_seconds: 2.0, ..opts() }).unwrap();
+        let t = Instant::now();
+        while e.recording_status().unwrap().active {
+            assert!(t.elapsed() < Duration::from_secs(8), "did not stop at the limit");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let ended = e.recording_status().unwrap().ended.unwrap();
+        assert!(ended.contains("time limit"), "{ended}");
+        e.stop_recording().unwrap();
+        check(&p, 2.0, 60);
+        let secs = mp4::read(&p).unwrap().video().unwrap().duration_seconds();
+        assert!((secs - 2.0).abs() < 0.02, "cut at {secs} s, not 2 s");
+
+        // MKV, then converted.
+        let (p, _) = record(&e, "rec.mkv", 2.5, RecordOptions { format: Format::Mkv, ..opts() });
+        let m = mkv::read(&p).unwrap();
+        assert!(m.tracks.len() == 2 && !m.truncated, "{m:?}");
+        let f = remux::fix(&p, &mut |_| {}).unwrap();
+        check(Path::new(&f.path), 2.5, 60);
+
+        // Paused at once and stopped: nothing recorded, no file.
+        let p = dir().join("nothing.mp4");
+        e.start_recording(p.clone(), opts()).unwrap();
+        e.set_recording_paused(true);
+        std::thread::sleep(Duration::from_millis(800));
+        let err = e.stop_recording().unwrap_err().to_string();
+        assert!(err.contains("Nothing was recorded"), "{err}");
+        assert!(!p.exists());
+
+        // An instant replay of the last 5 s.
+        let r = e.flush_to_disk(Some(5.0)).unwrap();
+        check(Path::new(&r.path), r.duration_seconds as f64, 60);
+        assert!(r.duration_seconds >= 5.0 && r.duration_seconds < 7.0, "{}", r.duration_seconds);
+        e.stop();
+    }
+
+    #[test]
+    #[ignore]
+    fn engine_codecs_rate_controls_and_odd_sizes() {
+        for (codec, rc, size, fps) in [
+            (Codec::Hevc, RateControl::Vbr, "1280x720", 60),
+            (Codec::H264, RateControl::Cbr, "1366x768", 30),
+            (Codec::H264, RateControl::Cqp, "854x481", 144),
+            (Codec::Av1, RateControl::Vbr, "1920x1080", 60),
+        ] {
+            std::env::set_var("LASTSHOT_SYNTH_SIZE", size);
+            let e = engine(RecorderConfig { codec, rate_control: rc, keyframe_seconds: 2.0, ..cfg(fps) });
+            let (p, _) = record(&e, &format!("{}-{}-{size}.mp4", codec.as_str(), rc.label()), 3.0, opts());
+            check(&p, 3.0, fps);
+            e.stop();
+        }
+        std::env::remove_var("LASTSHOT_SYNTH_SIZE");
+    }
+
+    /// The child side of the kill test: records until it is killed.
+    #[test]
+    #[ignore]
+    fn engine_child_records_until_killed() {
+        let Ok(path) = std::env::var("LASTSHOT_KILL_REC") else { return };
+        use std::io::Write as _;
+        let e = engine(cfg(60));
+        e.start_recording(PathBuf::from(&path), opts()).unwrap();
+        println!("RECORDING");
+        let _ = std::io::stdout().flush();
+        std::thread::sleep(Duration::from_secs(60));
+    }
+
+    #[test]
+    #[ignore]
+    fn a_killed_app_leaves_a_playable_recording() {
+        use std::io::BufRead as _;
+        let p = dir().join("killed.mp4");
+        let _ = std::fs::remove_file(&p);
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "media::recorder::engine_e2e::engine_child_records_until_killed",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("LASTSHOT_KILL_REC", &p)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut lines = std::io::BufReader::new(child.stdout.take().unwrap()).lines();
+        loop {
+            let l = lines.next().expect("child ended early").unwrap();
+            if l.contains("RECORDING") {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_secs(4));
+        child.kill().unwrap();
+        let _ = child.wait();
+        let d = remux::diagnose(&p).unwrap();
+        assert_eq!(d.need, remux::Need::RepairInPlace, "{d:?}");
+        // Plays as it is, before any repair.
+        if let Some(pr) = testdata::probe(&p) {
+            assert!(pr.packets("h264").unwrap_or(0) >= 150, "{pr:?}");
+            println!("cut-off file plays: {}", pr.stdout.trim());
+        }
+        let f = remux::fix(&p, &mut |_| {}).unwrap();
+        assert!(!f.new_file);
+        println!("repaired: {}", f.message);
+        let info = mp4::read(&p).unwrap();
+        assert_eq!(info.layout, mp4::Layout::Regular);
+        let secs = info.video().unwrap().duration_seconds();
+        assert!(secs > 2.5, "{secs} s kept of ~4");
+        check(&p, secs, 60);
+    }
+}

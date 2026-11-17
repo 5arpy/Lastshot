@@ -639,6 +639,14 @@ mod imp {
             // Audio PTS matches clock time directly.
             let mut next_pts = clock.now_hns();
 
+            // Test copies: a made-up sound instead of the PC's audio (see
+            // `recorder::synthetic_source`): a quiet 440 Hz tone with a 1 kHz
+            // beep in the first tenth of every second of the engine clock,
+            // where the test picture flashes.
+            let synth = crate::media::recorder::synthetic_source();
+            let synth_t0 = clock.now_hns();
+            let mut synth_done: i64 = 0;
+
             while !stop.load(Ordering::Acquire) {
                 // If the selected microphone device changes live, switch immediately.
                 let requested_mic_id = mic_device.read().clone();
@@ -663,14 +671,14 @@ mod imp {
                             }
                         }
                     }
-                    if system && loopback.is_none() {
+                    if system && loopback.is_none() && !synth {
                         match open_reported(true, None, &status) {
                             Ok(Some(ep)) => loopback = Some(ep),
                             Ok(None) => {}
                             Err(()) => {}
                         }
                     }
-                    if mic && microphone.is_none() {
+                    if mic && microphone.is_none() && !synth {
                         match open_reported(false, current_mic_id.as_deref(), &status) {
                             Ok(Some(ep)) => microphone = Some(ep),
                             Ok(None) => {}
@@ -715,6 +723,23 @@ mod imp {
                 if let Some(ep) = microphone.as_mut() {
                     if !drain_endpoint(ep, &mut mic_pending, &mut qpc_first) {
                         microphone = None;
+                    }
+                }
+                if synth {
+                    let due = (clock.now_hns() - synth_t0) * SAMPLE_RATE as i64 / HNS_PER_SECOND;
+                    let out = if system { &mut sys_pending } else { &mut mic_pending };
+                    while synth_done < due {
+                        let t_hns = synth_t0 + synth_done * HNS_PER_SECOND / SAMPLE_RATE as i64;
+                        let t = synth_done as f32 / SAMPLE_RATE as f32;
+                        let beep = t_hns.rem_euclid(HNS_PER_SECOND) < HNS_PER_SECOND / 10;
+                        let v = if beep {
+                            0.5 * (std::f32::consts::TAU * 1000.0 * t).sin()
+                        } else {
+                            0.05 * (std::f32::consts::TAU * 440.0 * t).sin()
+                        };
+                        out.push(v);
+                        out.push(v);
+                        synth_done += 1;
                     }
                 }
 

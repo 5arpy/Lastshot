@@ -738,6 +738,20 @@ pub struct SettingsPatch {
     pub screenshot_quality: Option<u8>,
     pub screenshot_copy: Option<bool>,
     pub recording_dir: Option<String>,
+    pub recording_format: Option<crate::media::container::stream::Format>,
+    pub remux_mkv: Option<bool>,
+    pub rate_control: Option<crate::media::recorder::RateControl>,
+    pub cqp_level: Option<u32>,
+    pub keyframe_seconds: Option<f32>,
+    pub encoder_preset: Option<crate::media::recorder::EncoderPreset>,
+    pub encoder_backend: Option<crate::media::recorder::EncoderBackend>,
+    pub hotkey_pause: Option<String>,
+    pub record_countdown: Option<u32>,
+    pub record_max_minutes: Option<f32>,
+    pub record_max_gb: Option<f32>,
+    pub record_file_name: Option<String>,
+    pub record_if_exists: Option<String>,
+    pub disk_reserve_mb: Option<u32>,
     pub streamer_mode: Option<bool>,
     /// In-app shortcut rebindings (the whole map).
     pub shortcuts: Option<std::collections::BTreeMap<String, String>>,
@@ -766,21 +780,23 @@ pub fn update_settings(
         let toggle = patch.hotkey_toggle.as_ref().unwrap_or(&s.hotkey_toggle);
         let snip = patch.hotkey_snip.as_ref().unwrap_or(&s.hotkey_snip);
         let record = patch.hotkey_record.as_ref().unwrap_or(&s.hotkey_record);
+        let pause = patch.hotkey_pause.as_ref().unwrap_or(&s.hotkey_pause);
         let keys = [
             (save, "Save replay"),
             (toggle, "Instant replay on/off"),
             (snip, "Screenshot"),
             (record, "Screen recording"),
+            (pause, "Pause recording"),
         ];
         for (i, (a, an)) in keys.iter().enumerate() {
             for (b, bn) in keys.iter().skip(i + 1) {
-                if a.eq_ignore_ascii_case(b) {
+                if !a.is_empty() && a.eq_ignore_ascii_case(b) {
                     return Err(format!("'{a}' is used twice: {an} and {bn}"));
                 }
             }
         }
         // ...nor the mic-mute or frames click-through shortcut.
-        for changed in [&patch.hotkey_save, &patch.hotkey_toggle, &patch.hotkey_snip, &patch.hotkey_record].into_iter().flatten() {
+        for changed in [&patch.hotkey_save, &patch.hotkey_toggle, &patch.hotkey_snip, &patch.hotkey_record, &patch.hotkey_pause].into_iter().flatten() {
             let other = crate::hotkeys::used_by(&app, changed, "main").filter(|n| *n == "Mic mute" || *n == "Pop-out frames click-through");
             if let Some(name) = other {
                 return Err(format!("'{changed}' is already the shortcut for {name}"));
@@ -802,6 +818,59 @@ pub fn update_settings(
     if let Some(v) = patch.hotkey_record.clone() {
         crate::hotkeys::rebind(&app, &s.hotkey_record, &v)?;
         s.hotkey_record = v;
+    }
+    if let Some(v) = patch.hotkey_pause.as_ref() {
+        let v = v.trim().to_string();
+        crate::hotkey_guard::set(&app, "pause", &v)?;
+        s.hotkey_pause = v;
+    }
+    if let Some(v) = patch.recording_format {
+        s.recording_format = v;
+    }
+    if let Some(v) = patch.remux_mkv {
+        s.remux_mkv = v;
+    }
+    if let Some(v) = patch.rate_control {
+        s.rate_control = v;
+    }
+    if let Some(v) = patch.cqp_level {
+        s.cqp_level = v.clamp(1, 51);
+    }
+    if let Some(v) = patch.keyframe_seconds {
+        if !v.is_finite() {
+            return Err("The key frame interval must be a number".into());
+        }
+        s.keyframe_seconds = v.clamp(0.25, 10.0);
+    }
+    if let Some(v) = patch.encoder_preset {
+        s.encoder_preset = v;
+    }
+    if let Some(v) = patch.encoder_backend {
+        s.encoder_backend = v;
+    }
+    if let Some(v) = patch.record_countdown {
+        s.record_countdown = v.min(60);
+    }
+    if let Some(v) = patch.record_max_minutes {
+        s.record_max_minutes = if v.is_finite() { v.clamp(0.0, 100_000.0) } else { 0.0 };
+    }
+    if let Some(v) = patch.record_max_gb {
+        s.record_max_gb = if v.is_finite() { v.clamp(0.0, 100_000.0) } else { 0.0 };
+    }
+    if let Some(v) = patch.record_file_name.as_ref() {
+        let v = v.trim();
+        let v = if v.is_empty() { crate::settings::DEFAULT_RECORD_FILE_NAME } else { v };
+        crate::recording::check_file_name_template(v)?;
+        s.record_file_name = v.to_string();
+    }
+    if let Some(v) = patch.record_if_exists.as_ref() {
+        if !["number", "overwrite"].contains(&v.as_str()) {
+            return Err(format!("unknown choice {v}"));
+        }
+        s.record_if_exists = v.clone();
+    }
+    if let Some(v) = patch.disk_reserve_mb {
+        s.disk_reserve_mb = v.clamp(100, 1_000_000);
     }
     if let Some(v) = patch.control_bar.clone() {
         if !["recording", "always", "off"].contains(&v.as_str()) {
@@ -1063,7 +1132,7 @@ pub fn update_settings(
     if patch.studio_layers.is_some() || patch.monitor_index.is_some() {
         crate::studio::sync(&app);
     }
-    if patch.control_bar.is_some() || patch.hotkey_record.is_some() {
+    if patch.control_bar.is_some() || patch.hotkey_record.is_some() || patch.hotkey_pause.is_some() {
         crate::recording::sync_bar(&app);
         crate::recording::emit_state(&app);
     }

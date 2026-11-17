@@ -85,15 +85,23 @@ pub fn rebind(app: &AppHandle, previous: &str, next: &str) -> Result<(), String>
 pub fn used_by(app: &AppHandle, accel: &str, me: &str) -> Option<&'static str> {
     let want = parse(accel).ok()?;
     let st = app.try_state::<AppState>()?;
-    let (save, toggle, snip, record, mic) = {
+    let (save, toggle, snip, record, pause, mic) = {
         let s = st.settings.read();
-        (s.hotkey_save.clone(), s.hotkey_toggle.clone(), s.hotkey_snip.clone(), s.hotkey_record.clone(), s.audio_guard.mic_mute_hotkey.clone())
+        (
+            s.hotkey_save.clone(),
+            s.hotkey_toggle.clone(),
+            s.hotkey_snip.clone(),
+            s.hotkey_record.clone(),
+            s.hotkey_pause.clone(),
+            s.audio_guard.mic_mute_hotkey.clone(),
+        )
     };
     let all = [
         ("save", "Save replay", save),
         ("toggle", "Instant replay on/off", toggle),
         ("snip", "Screenshot", snip),
         ("record", "Screen recording", record),
+        ("pause", "Pause recording", pause),
         ("mic", "Mic mute", mic),
         ("frames", "Pop-out frames click-through", crate::frames::frame_get_hotkey()),
     ];
@@ -114,13 +122,14 @@ pub fn on_shortcut(app: &AppHandle, shortcut: &Shortcut, state: ShortcutState) {
     // Read only the two hotkey strings — cloning the full Settings (which
     // includes Vec<CaptureProfile> and Vec<ProfileMapEntry>) on every global
     // shortcut event is wasteful and holds the read lock longer than needed.
-    let (save_key, toggle_key, snip_key, record_key) = {
+    let (save_key, toggle_key, snip_key, record_key, pause_key) = {
         let s = app_state.settings.read();
         (
             s.hotkey_save.clone(),
             s.hotkey_toggle.clone(),
             s.hotkey_snip.clone(),
             s.hotkey_record.clone(),
+            s.hotkey_pause.clone(),
         )
     };
 
@@ -141,6 +150,8 @@ pub fn on_shortcut(app: &AppHandle, shortcut: &Shortcut, state: ShortcutState) {
         crate::snip::begin(app.clone());
     } else if parse(&record_key).map(|s| &s == shortcut).unwrap_or(false) {
         crate::recording::toggle(app.clone());
+    } else if !pause_key.is_empty() && parse(&pause_key).map(|s| &s == shortcut).unwrap_or(false) {
+        crate::recording::toggle_pause(app);
     } else if crate::audio_guard::is_mic_hotkey(app, shortcut) {
         crate::audio_guard::toggle_mic(app);
     } else if crate::frames::is_hotkey(shortcut) {

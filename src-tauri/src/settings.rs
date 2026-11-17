@@ -175,6 +175,33 @@ pub struct Settings {
     /// Where screen recordings are saved; empty = the save location.
     #[serde(default)]
     pub recording_dir: String,
+    /// Container of screen recordings: crash-safe MP4 (default) or MKV.
+    pub recording_format: crate::media::container::stream::Format,
+    /// MKV recordings are converted to MP4 after they stop (the MKV is
+    /// removed once the MP4 checks out).
+    pub remux_mkv: bool,
+    /// VBR (default), CBR or CQP.
+    pub rate_control: crate::media::recorder::RateControl,
+    /// CQP quality level, 1-51 (lower = better, bigger).
+    pub cqp_level: u32,
+    /// Seconds between key frames, 0.25-10.
+    pub keyframe_seconds: f32,
+    pub encoder_preset: crate::media::recorder::EncoderPreset,
+    pub encoder_backend: crate::media::recorder::EncoderBackend,
+    /// Pauses / resumes the screen recording.
+    pub hotkey_pause: String,
+    /// Seconds counted down before a recording starts (0 = off).
+    pub record_countdown: u32,
+    /// The recording stops and saves by itself after this many minutes (0 = no limit).
+    pub record_max_minutes: f32,
+    /// ...or at this file size in GB (0 = no limit).
+    pub record_max_gb: f32,
+    /// File name of new recordings, with {app} {date} {time} ... tokens.
+    pub record_file_name: String,
+    /// "number" (add " 2", " 3") or "overwrite" (the old file goes to the Recycle Bin).
+    pub record_if_exists: String,
+    /// A recording stops (keeping what it has) when the drive has less free space than this.
+    pub disk_reserve_mb: u32,
     /// Hides folder paths in the window (for streaming / screen sharing).
     #[serde(default)]
     pub streamer_mode: bool,
@@ -238,6 +265,13 @@ pub const MAX_BUFFER_SECONDS: u32 = 3600;
 fn default_record_hotkey() -> String {
     "Alt+R".into()
 }
+
+pub fn default_pause_hotkey() -> String {
+    "Alt+Shift+R".into()
+}
+
+/// Gives today's names: `Roblox Recording 2026-11-17 20-15-03.mp4`.
+pub const DEFAULT_RECORD_FILE_NAME: &str = "{app} Recording {date} {time}";
 
 fn default_control_bar() -> String {
     "recording".into()
@@ -348,6 +382,20 @@ impl Default for Settings {
             screenshot_quality: default_screenshot_quality(),
             screenshot_copy: true,
             recording_dir: String::new(),
+            recording_format: Default::default(),
+            remux_mkv: true,
+            rate_control: Default::default(),
+            cqp_level: 23,
+            keyframe_seconds: 1.0,
+            encoder_preset: Default::default(),
+            encoder_backend: Default::default(),
+            hotkey_pause: default_pause_hotkey(),
+            record_countdown: 0,
+            record_max_minutes: 0.0,
+            record_max_gb: 0.0,
+            record_file_name: DEFAULT_RECORD_FILE_NAME.into(),
+            record_if_exists: "number".into(),
+            disk_reserve_mb: 1024,
             streamer_mode: false,
             app_outputs: Vec::new(),
             popout_places: Vec::new(),
@@ -462,6 +510,11 @@ impl Settings {
             app_audio: self.app_audio.clone(),
             capture_cursor: self.capture_cursor,
             display_method: self.display_method,
+            rate_control: self.rate_control,
+            cqp_level: self.cqp_level.clamp(1, 51),
+            keyframe_seconds: if self.keyframe_seconds.is_finite() { self.keyframe_seconds.clamp(0.25, 10.0) } else { 1.0 },
+            encoder_preset: self.encoder_preset,
+            encoder_backend: self.encoder_backend,
         };
         self.apply_performance_caps(&mut cfg);
         cfg
@@ -480,6 +533,17 @@ impl Settings {
         } else {
             cfg.max_height = 0;
             cfg.performance_mode = false;
+        }
+    }
+
+    /// What a new screen recording is told (format, limits, disk reserve).
+    pub fn record_options(&self) -> crate::media::recorder::RecordOptions {
+        let finite = |v: f32| if v.is_finite() && v > 0.0 { v as f64 } else { 0.0 };
+        crate::media::recorder::RecordOptions {
+            format: self.recording_format,
+            max_seconds: finite(self.record_max_minutes) * 60.0,
+            max_bytes: (finite(self.record_max_gb) * 1e9) as u64,
+            reserve_bytes: self.disk_reserve_mb as u64 * 1_000_000,
         }
     }
 

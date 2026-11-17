@@ -142,6 +142,10 @@ pub struct Settings {
     /// Also save every snip as a PNG in `<clips folder>\Screenshots`.
     #[serde(default = "default_true")]
     pub snip_save_to_folder: bool,
+    /// Which screens the snip freezes: "all" (every monitor at once, the
+    /// default), "cursor" (the one under the mouse) or "monitor:<index>".
+    #[serde(default = "default_snip_scope")]
+    pub snip_scope: String,
     /// Extra folders whose videos show up in Clips too (edit, share, star),
     /// e.g. another recorder's folder. Lastshot only saves to `output_dir`,
     /// and auto-cleanup / "Delete all" never touch these.
@@ -217,6 +221,10 @@ pub struct WindowPlace {
 
 fn default_share_mb() -> f32 {
     10.0
+}
+
+fn default_snip_scope() -> String {
+    "all".into()
 }
 
 fn default_snip_hotkey() -> String {
@@ -338,6 +346,7 @@ impl Default for Settings {
             share_size_mb: default_share_mb(),
             hotkey_snip: default_snip_hotkey(),
             snip_save_to_folder: true,
+            snip_scope: default_snip_scope(),
             library_folders: Vec::new(),
             hotkey_record: default_record_hotkey(),
             control_bar: default_control_bar(),

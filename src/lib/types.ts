@@ -151,7 +151,13 @@ export interface SnipCapture {
   windows: SnipWindowRect[];
   /** Tab the snip bar opens on: "shot" (screenshot) or "rec" (record an area). */
   start_mode?: "shot" | "rec";
+  /** The monitors in the picture (physical px, relative to it); black between them. */
+  monitors?: SnipWindowRectNoTitle[];
+  /** The monitor the cursor was on: the bar opens there. */
+  home?: number;
 }
+
+export type SnipWindowRectNoTitle = Omit<SnipWindowRect, "title">;
 
 export interface SnipDone {
   path: string | null;
@@ -299,6 +305,8 @@ export interface AppSettings {
   hotkeySnip: string;
   /** Also save every snip as a PNG in <clips folder>\Screenshots. */
   snipSaveToFolder: boolean;
+  /** Which screens a snip freezes: "all" (default), "cursor", or "monitor:<index>". */
+  snipScope: string;
   /**
    * Extra folders whose videos show up in Clips too. Lastshot only saves to
    * outputDir; auto-cleanup and "Delete all" never touch these.

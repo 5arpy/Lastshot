@@ -246,6 +246,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   shareSizeMb: 10,
   hotkeySnip: "Alt+S",
   snipSaveToFolder: true,
+  snipScope: "all",
   libraryFolders: [],
   hotkeyRecord: "Alt+R",
   controlBar: "recording",

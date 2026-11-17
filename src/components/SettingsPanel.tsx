@@ -779,6 +779,33 @@ export default function SettingsPanel({
             <HotkeyBadge status={hotkeyStatus} action="snip" onRetry={retryHotkeys} />
           </div>
         </Row>
+        {monitors.length > 1 && (
+        <Row
+          label="Screens"
+          hint={
+            (settings.snipScope ?? "all") === "all"
+              ? "Every monitor at once: a box can cross screens. F takes the screen under the mouse, Shift+F all of them."
+              : (settings.snipScope ?? "") === "cursor"
+                ? "Only the screen under the mouse."
+                : "Always the same screen."
+          }
+        >
+          <select
+            className="max-w-[260px] rounded border border-line bg-app px-2.5 py-1.5 text-[11px] text-ink outline-none focus:border-accent"
+            value={settings.snipScope ?? "all"}
+            onChange={(e) => onChange({ snipScope: e.target.value })}
+            aria-label="Screens a snip covers"
+          >
+            <option value="all">All screens at once</option>
+            <option value="cursor">The screen under the mouse</option>
+            {monitors.map((m) => (
+              <option key={m.index} value={`monitor:${m.index}`} className="bg-app">
+                {`${m.name} (${m.width}×${m.height})${m.primary ? " — primary" : ""}`}
+              </option>
+            ))}
+          </select>
+        </Row>
+        )}
         <Row label="Copy to the clipboard" hint="Ready to paste with Ctrl+V.">
           <Toggle
             on={settings.screenshotCopy}

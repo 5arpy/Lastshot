@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { lastshot, isTauri, showCurrentWindow } from "../lib/bridge";
 import type { SnipCapture, SnipWindowRect } from "../lib/types";
 import { cn } from "../utils/cn";
+import { monitorAt, monitorsOf } from "./snipGeo";
 import Viewer from "../viewer/Viewer";
 import { Btn, Icon } from "../viewer/ui";
 import { popOutCanvas } from "../popout/frames";
@@ -18,10 +19,12 @@ import { setShortcutOverrides } from "../lib/shortcuts";
 
 /**
  * Full-screen snipping overlay. It runs in its own borderless window that
- * covers one monitor and shows a frozen picture of it. The bar at the top
+ * covers the snipped screens (by default every monitor at once) and shows a
+ * frozen picture of them. The bar at the top of the screen the mouse was on
  * switches between Screenshot and Record.
  *
- * 1. Pick: drag a box, click a window, or press F for the whole screen.
+ * 1. Pick: drag a box (it may cross screens), click a window, click the
+ *    desktop or press F for the screen under the mouse, Shift+F for all.
  * 2. Screenshot: mark up with the shared annotation objects (text, boxes,
  *    arrows, pen, highlighter, steps, blur, pixelate, black box). Every
  *    object can be selected, moved, sized, turned and restyled; Ctrl+Z /
@@ -145,6 +148,11 @@ export default function SnipOverlay() {
 
   // Physical pixels per CSS pixel.
   const scale = capture ? capture.width / view.w : window.devicePixelRatio || 1;
+  // The monitors in the picture (one when the snip covers one screen), the
+  // one the mouse was on, and where the mouse is now (picture px).
+  const mons = useMemo(() => monitorsOf(capture), [capture]);
+  const home = Math.max(0, Math.min(mons.length - 1, capture?.home ?? 0));
+  const pointer = useRef<[number, number] | null>(null);
 
   const setStyle = (p: Partial<Style>) =>
     setStyleState((st) => {
@@ -285,9 +293,19 @@ export default function SnipOverlay() {
     setHover(null);
   }, []);
 
+  /** Every screen in the picture (Shift+F). */
   const selectAll = useCallback(() => {
     if (capture) select({ x: 0, y: 0, w: capture.width, h: capture.height });
   }, [capture, select]);
+  /** The screen under the mouse (F, a click on the desktop). */
+  const selectScreen = useCallback(
+    (at?: [number, number] | null) => {
+      const p = at ?? pointer.current;
+      const m = mons[p ? monitorAt(mons, p[0], p[1]) : home];
+      if (m) select(m);
+    },
+    [mons, home, select],
+  );
 
   // ------------------------------------------------------------ finish
   /** Pins the snip (with its markup) where it was taken, as a pop-out frame. */
@@ -385,7 +403,10 @@ export default function SnipOverlay() {
         return;
       }
       if (!sel) {
-        if (e.key === "f" || e.key === "F") selectAll();
+        if ((e.key === "f" || e.key === "F") && !e.ctrlKey && !e.altKey) {
+          if (e.shiftKey) selectAll();
+          else selectScreen();
+        }
         if (e.key === "Enter" && hover) select(hover);
         return;
       }
@@ -443,7 +464,7 @@ export default function SnipOverlay() {
       window.removeEventListener("keydown", onKey, true);
       window.removeEventListener("keyup", onUp, true);
     };
-  }, [sel, hover, mode, cancel, finish, popOut, startRecording, select, selectAll, editing, picked, tool, undo, redo, commitShapes, editPicked, duplicatePicked, scale]);
+  }, [sel, hover, mode, cancel, finish, popOut, startRecording, select, selectAll, selectScreen, editing, picked, tool, undo, redo, commitShapes, editPicked, duplicatePicked, scale]);
 
   // ------------------------------------------------------------ picking pointer
   const onPickDown = (e: React.PointerEvent) => {
@@ -454,6 +475,7 @@ export default function SnipOverlay() {
   };
   const onPickMove = (e: React.PointerEvent) => {
     const [x, y] = toImage(e);
+    pointer.current = [x, y];
     if (drag) setDrag({ ...drag, x2: x, y2: y });
     else setHover(windowAt(x, y));
   };
@@ -462,10 +484,10 @@ export default function SnipOverlay() {
     const [x, y] = toImage(e);
     const r = normalize(drag.x1, drag.y1, x, y);
     if (r.w < 6 * scale && r.h < 6 * scale) {
-      // A click: take the window under the cursor, or the whole screen.
+      // A click: take the window under the cursor, or that screen.
       const w = windowAt(x, y);
       if (w) select(w);
-      else selectAll();
+      else selectScreen([x, y]);
     } else {
       select(r);
     }
@@ -501,16 +523,24 @@ export default function SnipOverlay() {
     onPickDown(e);
   };
 
+  // The screen the work is on: the selection's (by its middle), else the
+  // one the mouse was on. Bars stay on it (never in the black between
+  // monitors of different sizes).
+  const work = useMemo(() => {
+    const m = mons[sel ? monitorAt(mons, sel.x + sel.w / 2, sel.y + sel.h / 2) : home] ?? { x: 0, y: 0, w: view.w * scale, h: view.h * scale };
+    return { x: m.x / scale, y: m.y / scale, w: m.w / scale, h: m.h / scale };
+  }, [mons, sel, home, scale, view]);
   const toolbarStyle = useMemo(() => {
     if (!sel) return undefined;
     const r = css(sel);
+    const B = work;
     const barH = 44;
     const below = r.top + r.height + 10;
-    const top = below + barH < view.h ? below : r.top - barH - 10 > 0 ? r.top - barH - 10 : r.top + r.height - barH - 10;
-    const left = Math.max(8, Math.min(r.left, view.w - 960));
-    return { top, left };
+    const top = below + barH < B.y + B.h ? below : r.top - barH - 10 > B.y ? r.top - barH - 10 : Math.min(r.top + r.height, B.y + B.h) - barH - 10;
+    const left = Math.max(B.x + 8, Math.min(r.left, B.x + B.w - 960));
+    return { top, left, maxWidth: B.w - 16 };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sel, scale, view]);
+  }, [sel, scale, work]);
 
   if (error) {
     return (
@@ -576,7 +606,9 @@ export default function SnipOverlay() {
 
       {!drag && (
         <div
-          className="absolute left-1/2 top-4 z-20 flex max-w-[calc(100vw-16px)] -translate-x-1/2 items-center gap-1 rounded-xl border border-white/10 bg-[#1c1e25]/95 p-1.5 text-[12px] text-white shadow-2xl"
+          className="absolute z-20 flex -translate-x-1/2 items-center gap-1 rounded-xl border border-white/10 bg-[#1c1e25]/95 p-1.5 text-[12px] text-white shadow-2xl"
+          style={{ left: work.x + work.w / 2, top: work.y + 16, maxWidth: work.w - 16 }}
+          data-testid="snip-bar"
           onPointerDown={(e) => e.stopPropagation()}
         >
           <div className="flex rounded-lg bg-black/30 p-0.5">
@@ -623,13 +655,26 @@ export default function SnipOverlay() {
           </span>
           <button
             type="button"
-            title="The whole screen (F)"
+            title={mons.length > 1 ? "This whole screen (F)" : "The whole screen (F)"}
             disabled={!!busy}
-            onClick={selectAll}
+            onClick={() => selectScreen(null)}
             className="whitespace-nowrap rounded-lg px-2 py-1.5 text-white/85 hover:bg-white/10"
+            data-testid="snip-screen"
           >
             Full screen <span className="text-white/45">F</span>
           </button>
+          {mons.length > 1 && (
+            <button
+              type="button"
+              title="Every screen at once (Shift+F)"
+              disabled={!!busy}
+              onClick={selectAll}
+              className="whitespace-nowrap rounded-lg px-2 py-1.5 text-white/85 hover:bg-white/10"
+              data-testid="snip-all"
+            >
+              All screens <span className="text-white/45">⇧F</span>
+            </button>
+          )}
           <button
             type="button"
             title="Cancel (Esc)"
@@ -658,6 +703,7 @@ export default function SnipOverlay() {
             barPlace="bottom"
             // The picture lies exactly over the screen here, so the bar floats.
             barLayout="overlay"
+            barBox={work}
             exportKeys={false}
             homeView={(c) => viewForRect(c, cssRect(sel))}
             onViewChange={(v, _st, c) => {
@@ -747,7 +793,7 @@ export default function SnipOverlay() {
             </div>
           ) : (
           <div
-            className="absolute z-10 flex max-w-[calc(100vw-16px)] flex-wrap items-center gap-1 rounded-xl border border-white/10 bg-[#1c1e25]/95 p-1.5 text-white shadow-2xl"
+            className="absolute z-10 flex flex-wrap items-center gap-1 rounded-xl border border-white/10 bg-[#1c1e25]/95 p-1.5 text-white shadow-2xl"
             style={toolbarStyle}
             onPointerDown={(e) => e.stopPropagation()}
           >

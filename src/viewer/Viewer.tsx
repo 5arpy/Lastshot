@@ -171,6 +171,9 @@ export interface ViewerProps {
   barLayout?: "outside" | "overlay";
   /** Renders the bar (as a row) into this element instead, e.g. a frame's tools strip. */
   barTarget?: HTMLElement | null;
+  /** "overlay" only: the part of the viewer (CSS px) the floating bar keeps to,
+   *  e.g. one monitor of a snip that covers several. Default: all of it. */
+  barBox?: { x: number; y: number; w: number; h: number } | null;
   /** Space (tapped, not held for panning) plays / pauses the video. */
   spacePlays?: boolean;
   /** Ctrl+Z / Ctrl+Y undo turns, flips, crop and colour (default true). */
@@ -1077,11 +1080,18 @@ export default function Viewer(props: ViewerProps) {
           className={cn(
             rowBar
               ? cn("relative z-20 flex shrink-0 flex-col gap-1 bg-[#101217] px-1.5 py-1", barPlace === "top" ? "border-b border-white/10" : "border-t border-white/10")
-              : cn("absolute left-2 right-2 z-20 flex flex-col gap-1 transition-opacity duration-150", barPlace === "top" ? "top-2" : "bottom-2"),
+              : cn("absolute z-20 flex flex-col gap-1 transition-opacity duration-150", props.barBox ? "" : cn("left-2 right-2", barPlace === "top" ? "top-2" : "bottom-2")),
             // Menus open upwards from a bar at the bottom.
             barPlace === "bottom" && "[&_.viewer-pop]:bottom-full [&_.viewer-pop]:mb-1 [&_.viewer-pop]:mt-0",
             showBar ? "opacity-100" : "pointer-events-none opacity-0",
           )}
+          style={
+            !rowBar && props.barBox
+              ? barPlace === "top"
+                ? { left: props.barBox.x + 8, width: props.barBox.w - 16, top: props.barBox.y + 8 }
+                : { left: props.barBox.x + 8, width: props.barBox.w - 16, top: props.barBox.y + props.barBox.h - 8, transform: "translateY(-100%)" }
+              : undefined
+          }
         >
           <div className="relative flex w-fit max-w-full flex-wrap items-center gap-0.5 rounded-lg border border-white/10 bg-[#14161c]/85 p-0.5 text-white shadow-lg backdrop-blur">
             <div className="relative">

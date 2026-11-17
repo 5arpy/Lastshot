@@ -37,6 +37,7 @@ pub mod settings;
 pub mod shell;
 pub mod share;
 pub mod snip;
+pub mod snip_geo;
 pub mod startup;
 pub mod studio;
 
@@ -481,6 +482,8 @@ pub fn run() {
             frames::frame_layout,
             frames::frame_get_hotkey,
             frames::frame_set_hotkey,
+            frames::frame_default_look,
+            frames::frame_set_default_look,
             frames::frame_from_clipboard,
             frames::frame_show_panel,
             #[cfg(feature = "pro-board")]

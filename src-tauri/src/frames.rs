@@ -110,6 +110,51 @@ pub struct Frame {
     /// "grid", "flipH", …), set by the frame's page. The view itself is not
     /// sent to every window.
     pub badges: Vec<String>,
+    /// How the frame stands out from the screen behind it.
+    pub look: FrameLook,
+}
+
+/// Background, outline and edge shadow of a frame, so a picture does not
+/// blend into the screen behind it (ShareX's pin has the same three).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FrameLook {
+    /// Behind the picture (letterbox, see-through pixels): "none", "dark",
+    /// "light", "checker" or "custom" (then `color`).
+    pub bg: String,
+    /// "#rrggbb" for a custom background.
+    pub color: String,
+    /// Outline width in px; 0 = none.
+    pub border: u32,
+    /// "" = automatic (a light and a dark line, seen on any background),
+    /// else "#rrggbb".
+    pub border_color: String,
+    /// A soft shade along the edges.
+    pub shadow: bool,
+}
+
+impl Default for FrameLook {
+    fn default() -> Self {
+        Self { bg: "none".into(), color: "#1e1f24".into(), border: 1, border_color: String::new(), shadow: false }
+    }
+}
+
+fn hex_colour(c: &str) -> bool {
+    c.len() == 7 && c.starts_with('#') && c[1..].chars().all(|x| x.is_ascii_hexdigit())
+}
+
+impl FrameLook {
+    /// Unknown values fall back to the defaults; the outline is 0-12 px.
+    pub fn sane(&self) -> FrameLook {
+        let d = FrameLook::default();
+        FrameLook {
+            bg: if ["none", "dark", "light", "checker", "custom"].contains(&self.bg.as_str()) { self.bg.clone() } else { d.bg },
+            color: if hex_colour(&self.color) { self.color.to_ascii_lowercase() } else { d.color },
+            border: self.border.min(12),
+            border_color: if hex_colour(&self.border_color) { self.border_color.to_ascii_lowercase() } else { String::new() },
+            shadow: self.shadow,
+        }
+    }
 }
 
 impl Default for Frame {
@@ -133,6 +178,7 @@ impl Default for Frame {
             created_ms: 0,
             items: None,
             badges: Vec::new(),
+            look: FrameLook::default(),
         }
     }
 }
@@ -142,11 +188,13 @@ impl Default for Frame {
 pub struct FramesFile {
     pub hotkey: String,
     pub frames: Vec<Frame>,
+    /// What new frames start with ("Use for new pop-outs" in a frame's menu).
+    pub look: FrameLook,
 }
 
 impl Default for FramesFile {
     fn default() -> Self {
-        Self { hotkey: DEFAULT_HOTKEY.into(), frames: Vec::new() }
+        Self { hotkey: DEFAULT_HOTKEY.into(), frames: Vec::new(), look: FrameLook::default() }
     }
 }
 
@@ -163,6 +211,7 @@ pub struct FramePatch {
     pub show_over: Option<Vec<String>>,
     pub items: Option<u32>,
     pub badges: Option<Vec<String>>,
+    pub look: Option<FrameLook>,
 }
 
 impl Frame {
@@ -187,6 +236,7 @@ impl Frame {
             created_ms: self.created_ms,
             items: self.items,
             badges: self.badges.clone(),
+            look: self.look.clone(),
         }
     }
 
@@ -203,6 +253,7 @@ impl Frame {
             && self.owned == o.owned
             && self.items == o.items
             && self.badges == o.badges
+            && self.look == o.look
     }
 
     /// Applies a patch; returns which window-level things changed.
@@ -241,6 +292,9 @@ impl Frame {
         }
         if let Some(b) = &p.badges {
             self.badges = b.iter().take(8).map(|s| s.chars().take(16).collect()).collect();
+        }
+        if let Some(l) = &p.look {
+            self.look = l.sane();
         }
         (top, through, shown)
     }
@@ -905,6 +959,7 @@ pub async fn frame_open(app: AppHandle, req: OpenFrame) -> Result<Frame, String>
         view: req.view.clone().unwrap_or(serde_json::Value::Null),
         owned,
         created_ms: chrono::Utc::now().timestamp_millis(),
+        look: store().lock().file.look.sane(),
         ..Default::default()
     };
     store().lock().file.frames.push(f.clone());
@@ -1448,6 +1503,21 @@ pub fn frame_layout(app: AppHandle, id: String) -> Layout {
     let me = get(&id).map(|f| (f.x, f.y, f.w, f.h));
     let cursor = app.cursor_position().ok().map(|p| (p.x, p.y));
     Layout { screens: screens(&app), frames, me, scale, cursor }
+}
+
+/// The look new frames start with.
+#[tauri::command]
+pub fn frame_default_look() -> FrameLook {
+    store().lock().file.look.sane()
+}
+
+/// Makes `look` the one new frames start with.
+#[tauri::command]
+pub fn frame_set_default_look(look: FrameLook) -> FrameLook {
+    let l = look.sane();
+    store().lock().file.look = l.clone();
+    save_soon();
+    l
 }
 
 #[tauri::command]
@@ -2358,6 +2428,26 @@ mod tests {
     }
 
     #[test]
+    fn the_look_is_kept_sane_and_old_files_get_the_default() {
+        // A frames file from before the look: every frame gets the default (a thin outline).
+        let old: FramesFile = serde_json::from_str(r#"{"hotkey":"Ctrl+Alt+T","frames":[{"id":"a","kind":"image"}]}"#).unwrap();
+        assert_eq!(old.frames[0].look, FrameLook::default());
+        assert_eq!(old.frames[0].look.border, 1);
+        assert_eq!(old.look, FrameLook::default());
+        let mut f = Frame::default();
+        let bad = FrameLook { bg: "neon".into(), color: "red".into(), border: 99, border_color: "#ABCDEF".into(), shadow: true };
+        f.apply(&FramePatch { look: Some(bad), ..Default::default() });
+        assert_eq!(f.look, FrameLook { bg: "none".into(), color: "#1e1f24".into(), border: 12, border_color: "#abcdef".into(), shadow: true });
+        let custom = FrameLook { bg: "custom".into(), color: "#102030".into(), border: 0, border_color: String::new(), shadow: false };
+        f.apply(&FramePatch { look: Some(custom.clone()), ..Default::default() });
+        assert_eq!(f.look, custom);
+        // Every window hears about a new look (it is outside the view).
+        let g = Frame { look: FrameLook::default(), ..f.clone() };
+        assert!(!f.same_outside_view(&g));
+        assert_eq!(f.clone_without_view().look, custom);
+    }
+
+    #[test]
     fn tools_grow_outside_the_content_and_flip_near_the_bottom() {
         let area = Some((0, 0, 1920, 1040));
         // Room below: tools below.
@@ -2705,7 +2795,7 @@ mod tests {
 
     #[test]
     fn frames_file_survives_round_trip_and_old_versions() {
-        let f = FramesFile { hotkey: "Alt+X".into(), frames: vec![Frame { id: "a".into(), view: serde_json::json!({"z": 2}), ..Default::default() }] };
+        let f = FramesFile { hotkey: "Alt+X".into(), frames: vec![Frame { id: "a".into(), view: serde_json::json!({"z": 2}), ..Default::default() }], look: FrameLook::default() };
         let s = serde_json::to_string(&f).unwrap();
         let back: FramesFile = serde_json::from_str(&s).unwrap();
         assert_eq!(back.frames[0], f.frames[0]);

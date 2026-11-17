@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS } from "../viewer/Viewer";
-import { badgesOf, ECHO_MS, MANY_FRAMES, pickEcho, popOutMany, viewFlags, type Frame } from "./frames";
+import { badgesOf, DEFAULT_LOOK, ECHO_MS, lookCss, MANY_FRAMES, pickEcho, popOutMany, viewFlags, type Frame } from "./frames";
 import { ago } from "./FramesPanel";
 
 const frame = (p: Partial<Frame>): Frame => ({
@@ -85,5 +85,25 @@ describe("recently closed times", () => {
     expect(ago(now - 3 * 3600_000, now)).toBe("3 h ago");
     expect(ago(now - 26 * 3600_000, now)).toBe("yesterday");
     expect(ago(now - 4 * 24 * 3600_000, now)).toBe("4 days ago");
+  });
+});
+
+describe("frame look", () => {
+  it("a thin automatic outline by default, nothing behind", () => {
+    const c = lookCss(undefined);
+    expect(c.background).toBeUndefined();
+    expect(c.boxShadow).toContain("inset 0 0 0 1px rgba(255,255,255");
+    expect(c.boxShadow).toContain("inset 0 0 0 2px rgba(0,0,0");
+  });
+  it("backgrounds, a custom outline colour, the edge shade, and none at all", () => {
+    expect(lookCss({ bg: "dark" }).background).toBe("#121318");
+    expect(lookCss({ bg: "light" }).background).toBe("#f3f3f5");
+    expect(lookCss({ bg: "checker" }).background).toContain("conic-gradient");
+    expect(lookCss({ bg: "custom", color: "#336699" }).background).toBe("#336699");
+    expect(lookCss({ bg: "custom", color: "red" }).background).toBeUndefined();
+    expect(lookCss({ border: 3, borderColor: "#ff0000" }).boxShadow).toBe("inset 0 0 0 3px #ff0000");
+    expect(lookCss({ border: 0, shadow: true }).boxShadow).toBe("inset 0 0 18px 2px rgba(0,0,0,0.55)");
+    expect(lookCss({ ...DEFAULT_LOOK, border: 0 })).toEqual({ background: undefined, boxShadow: undefined });
+    expect(lookCss({ border: 40, borderColor: "#000000" }).boxShadow).toBe("inset 0 0 0 12px #000000");
   });
 });

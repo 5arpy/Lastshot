@@ -35,6 +35,42 @@ export interface Frame {
   items?: number | null;
   /** Short view flags for the Pop-outs panel ("gray", "grid", "flipH", "flipV"). */
   badges?: string[];
+  /** Background, outline and edge shadow (older builds send none: the default). */
+  look?: FrameLook;
+}
+
+/** How a frame stands out from the screen behind it. */
+export interface FrameLook {
+  /** Behind the picture (letterbox, see-through pixels). */
+  bg: "none" | "dark" | "light" | "checker" | "custom";
+  /** "#rrggbb" for `bg: "custom"`. */
+  color: string;
+  /** Outline width in px; 0 = none. */
+  border: number;
+  /** "" = automatic (a light and a dark line, seen on any background). */
+  borderColor: string;
+  /** A soft shade along the edges. */
+  shadow: boolean;
+}
+
+export const DEFAULT_LOOK: FrameLook = { bg: "none", color: "#1e1f24", border: 1, borderColor: "", shadow: false };
+
+const CHECKER = "repeating-conic-gradient(#8a8a8a 0% 25%, #b9b9b9 0% 50%) 50% / 16px 16px";
+
+/** The CSS for a look: the background behind the content, and the outline and shade drawn over its edges. */
+export function lookCss(l?: Partial<FrameLook> | null): { background?: string; boxShadow?: string } {
+  const k = { ...DEFAULT_LOOK, ...(l ?? {}) };
+  const background =
+    k.bg === "dark" ? "#121318" : k.bg === "light" ? "#f3f3f5" : k.bg === "checker" ? CHECKER : k.bg === "custom" && /^#[0-9a-f]{6}$/i.test(k.color) ? k.color : undefined;
+  const sh: string[] = [];
+  const b = Math.max(0, Math.min(12, Math.round(k.border || 0)));
+  if (b > 0) {
+    if (/^#[0-9a-f]{6}$/i.test(k.borderColor)) sh.push(`inset 0 0 0 ${b}px ${k.borderColor}`);
+    // Automatic: a light line outside a dark one, so it shows on any screen.
+    else sh.push(`inset 0 0 0 ${b}px rgba(255,255,255,0.6)`, `inset 0 0 0 ${b * 2}px rgba(0,0,0,0.55)`);
+  }
+  if (k.shadow) sh.push("inset 0 0 18px 2px rgba(0,0,0,0.55)");
+  return { background, boxShadow: sh.length ? sh.join(", ") : undefined };
 }
 
 /** A recently closed frame that owned files (kept 7 days). */
@@ -57,6 +93,7 @@ export interface FramePatch {
   showOver?: string[];
   items?: number;
   badges?: string[];
+  look?: FrameLook;
 }
 
 export interface OpenFrame {
@@ -147,6 +184,9 @@ export const frames = {
   hideAll: (hidden?: boolean) => invoke<boolean>("frame_hide_all", { hidden }),
   layout: (id: string) => invoke<Layout>("frame_layout", { id }),
   getHotkey: () => invoke<string>("frame_get_hotkey"),
+  /** The look new frames start with, and making a look that default. */
+  defaultLook: () => (inApp() ? invoke<FrameLook>("frame_default_look") : Promise.resolve(DEFAULT_LOOK)),
+  setDefaultLook: (look: FrameLook) => invoke<FrameLook>("frame_set_default_look", { look }),
   setHotkey: (hotkey: string) => invoke<string>("frame_set_hotkey", { hotkey }),
   fromClipboard: () => invoke<Frame>("frame_from_clipboard"),
   showPanel: () => invoke<void>("frame_show_panel"),

@@ -28,8 +28,10 @@ import { cn } from "../utils/cn";
 import {
   badgesOf,
   closeFrame,
+  DEFAULT_LOOK,
   frames,
   isPictureType,
+  lookCss,
   MANY_FRAMES,
   onFlush,
   pickEcho,
@@ -38,6 +40,7 @@ import {
   type ContentInfo,
   type Frame,
   type FrameCmd,
+  type FrameLook,
   type FrameViewState,
   type Layout,
 } from "./frames";
@@ -231,7 +234,7 @@ interface MediaHandle {
   run: (cmd: FrameCmd) => void;
 }
 
-type FramePatch = Partial<Pick<Frame, "opacity" | "onTop" | "clickThrough" | "hidden">>;
+type FramePatch = Partial<Pick<Frame, "opacity" | "onTop" | "clickThrough" | "hidden" | "look">>;
 
 function FrameChrome({
   frame,
@@ -607,6 +610,8 @@ function FrameChrome({
       <div className="absolute inset-x-0" style={contentStyle} data-testid="frame-content">
         {/* Opacity applies to the content only, so the strip stays readable. */}
         <div className="absolute inset-0" style={{ opacity: frame.opacity }}>
+          {/* The chosen background (letterbox, see-through pixels). */}
+          {lookCss(frame.look).background && <div className="absolute inset-0" style={{ background: lookCss(frame.look).background }} data-testid="frame-bg" />}
           {media ? (
             <MediaBody
               frame={frame}
@@ -623,6 +628,10 @@ function FrameChrome({
             </Suspense>
           ) : (
             <div className="grid h-full place-items-center bg-black/70 p-4 text-center text-[12px] text-white/75">This frame needs Lastshot Pro.</div>
+          )}
+          {/* Outline and edge shade, so the picture does not blend into the screen behind it. */}
+          {!full && lookCss(frame.look).boxShadow && (
+            <div className="pointer-events-none absolute inset-0 z-20" style={{ boxShadow: lookCss(frame.look).boxShadow }} data-testid="frame-edge" />
           )}
         </div>
 
@@ -999,6 +1008,10 @@ function FrameMenu({
           </button>
         ))}
       </div>
+      <LookRows look={{ ...DEFAULT_LOOK, ...(frame.look ?? {}) }} set={(l) => patch({ look: l })} />
+      {item("Edge shadow", () => patch({ look: { ...DEFAULT_LOOK, ...(frame.look ?? {}), shadow: !frame.look?.shadow } }), { on: !!frame.look?.shadow, testid: "frame-menu-shadow" })}
+      {item("Use this look for new pop-outs", () => void frames.setDefaultLook({ ...DEFAULT_LOOK, ...(frame.look ?? {}) }).catch(() => undefined), { testid: "frame-menu-look-default" })}
+      {sep("look")}
       {item("Always on top", () => patch({ onTop: !frame.onTop }), { on: frame.onTop })}
       {!frame.clickThrough && item("Click-through", () => patch({ clickThrough: true }), { hint: hotkey || undefined, testid: "frame-menu-through" })}
       {item(full ? "Leave full screen" : "Full screen", toggleFull, { on: full, hint: "double-click" })}
@@ -1007,6 +1020,64 @@ function FrameMenu({
       {item("Pop-outs panel in Lastshot", () => void frames.showPanel())}
       {item("Hide", () => patch({ hidden: true }))}
       {item("Close", close, { danger: true })}
+    </div>
+  );
+}
+
+const SWATCHES = ["#1e1f24", "#000000", "#ffffff", "#808080", "#5d72db", "#e5484d"];
+
+/** The menu's background and outline rows: presets, swatches and a typed colour. */
+function LookRows({ look, set }: { look: FrameLook; set: (l: FrameLook) => void }) {
+  const chip = (label: string, on: boolean, run: () => void, testid?: string, swatch?: string) => (
+    <button
+      key={label}
+      type="button"
+      title={label}
+      data-testid={testid}
+      onClick={run}
+      className={cn("rounded px-1.5 py-0.5 font-mono text-[10px]", on ? "bg-[#5d72db] text-white" : "bg-white/10 text-white/80 hover:bg-white/20")}
+    >
+      {swatch ? <span className="block h-2.5 w-2.5 rounded-sm border border-white/40" style={{ background: swatch }} /> : label}
+    </button>
+  );
+  const hex = (v: string) => (/^#?[0-9a-f]{6}$/i.test(v.trim()) ? "#" + v.trim().replace("#", "").toLowerCase() : null);
+  const typed = (cur: string, apply: (c: string) => void, label: string) => (
+    <input
+      key={label}
+      defaultValue={cur}
+      aria-label={label}
+      title={`${label}: type #rrggbb, Enter`}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") {
+          const c = hex((e.target as HTMLInputElement).value);
+          if (c) apply(c);
+        }
+      }}
+      className="w-[58px] rounded border border-white/15 bg-black/30 px-1 font-mono text-[10px] text-white/85 focus:border-white/40 focus:outline-none"
+    />
+  );
+  return (
+    <div className="px-2 py-1 text-[11px] text-white/60" data-testid="frame-menu-look">
+      <div className="mb-1 flex flex-wrap items-center gap-1">
+        <span className="w-[62px]">Background</span>
+        {(["none", "dark", "light", "checker"] as const).map((b) => chip(b === "none" ? "None" : b[0].toUpperCase() + b.slice(1), look.bg === b, () => set({ ...look, bg: b }), `frame-bg-${b}`))}
+      </div>
+      <div className="mb-1 flex flex-wrap items-center gap-1 pl-[66px]">
+        {SWATCHES.map((c) => chip(c, look.bg === "custom" && look.color === c, () => set({ ...look, bg: "custom", color: c }), undefined, c))}
+        {typed(look.bg === "custom" ? look.color : "", (c) => set({ ...look, bg: "custom", color: c }), "Background colour")}
+      </div>
+      <div className="mb-1 flex flex-wrap items-center gap-1">
+        <span className="w-[62px]">Outline</span>
+        {[0, 1, 2, 4].map((w) => chip(w === 0 ? "Off" : `${w}px`, look.border === w, () => set({ ...look, border: w }), `frame-border-${w}`))}
+      </div>
+      {look.border > 0 && (
+        <div className="flex flex-wrap items-center gap-1 pl-[66px]">
+          {chip("Auto", !look.borderColor, () => set({ ...look, borderColor: "" }), "frame-border-auto")}
+          {SWATCHES.slice(1).map((c) => chip(c, look.borderColor === c, () => set({ ...look, borderColor: c }), undefined, c))}
+          {typed(look.borderColor, (c) => set({ ...look, borderColor: c }), "Outline colour")}
+        </div>
+      )}
     </div>
   );
 }

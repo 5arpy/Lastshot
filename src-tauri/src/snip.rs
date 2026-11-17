@@ -1,10 +1,17 @@
 //! Snipping tool.
 //!
-//! The hotkey freezes the monitor under the cursor (a GDI screen grab, so it
-//! is instant and needs no capture session), then opens a borderless overlay
-//! window on that monitor showing the frozen image. The overlay (the same web
-//! UI, window label "snip") lets the user pick a region or a window, mark it
-//! up, and hands the finished PNG back here to be copied and/or saved.
+//! The hotkey freezes the screens (by default every monitor at once; or the
+//! one under the cursor, or a chosen one: Settings › Screenshots) with a GDI
+//! screen grab, so it is instant and needs no capture session, then opens
+//! one borderless overlay window over that area showing the frozen image
+//! (like ShareX: a box can cross monitors, and the picture stays 1:1 in
+//! physical pixels on monitors with different scaling). The overlay (the
+//! same web UI, window label "snip") lets the user pick a region or a
+//! window, mark it up, and hands the finished PNG back here to be copied
+//! and/or saved.
+//!
+//! Test copies never grab the real screen: they snip a made-up desktop
+//! (`LASTSHOT_TEST_SCREEN`, see `snip_geo::TestScreen`).
 
 use std::time::Duration;
 
@@ -13,6 +20,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::commands::{AppState, EVT_ERROR};
+use crate::snip_geo::{record_crop, snip_area, test_pixel, MonRect, SnipArea, TestScreen};
 
 pub const EVT_SNIP_DONE: &str = "lastshot://snip-done";
 pub use imp::snapshot;
@@ -42,6 +50,12 @@ pub struct SnipCapture {
     /// "shot" (screenshot) or "rec" (record an area): which tab the snip bar
     /// opens on.
     pub start_mode: String,
+    /// The monitors in the picture, relative to its corner (one when the
+    /// snip covers one screen). Between them (monitors of different sizes)
+    /// the picture is black.
+    pub monitors: Vec<MonRect>,
+    /// The monitor the cursor was on: the bar opens there.
+    pub home: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -54,8 +68,10 @@ struct Pending {
     capture: SnipCapture,
     restore_main: bool,
     opened: std::time::Instant,
-    /// The snipped monitor on the desktop (x, y, w, h), physical pixels.
+    /// The snipped area on the desktop (x, y, w, h), physical pixels.
     rect: (i32, i32, u32, u32),
+    /// The monitors in it, desktop pixels.
+    monitors: Vec<MonRect>,
 }
 
 static PENDING: Mutex<Option<Pending>> = Mutex::new(None);
@@ -104,18 +120,30 @@ pub fn begin_with(app: AppHandle, hide_main: bool, mode: &'static str) {
             tokio::time::sleep(Duration::from_millis(220)).await;
         }
 
-        let grabbed = tauri::async_runtime::spawn_blocking(imp::capture_under_cursor).await;
+        let scope = app.state::<AppState>().settings.read().snip_scope.clone();
+        // Test copies snip a made-up desktop, never the user's screen.
+        let test_screen = crate::startup::test_offscreen() || std::env::var_os("LASTSHOT_TEST_SCREEN").is_some();
+        let grabbed = tauri::async_runtime::spawn_blocking(move || {
+            if test_screen {
+                test_capture(&scope)
+            } else {
+                imp::capture(&scope)
+            }
+        })
+        .await;
         let (mut capture, rect) = match grabbed {
             Ok(Ok(v)) => v,
             Ok(Err(e)) => return fail(&app, restore_main, format!("Snip failed: {e}")),
             Err(e) => return fail(&app, restore_main, format!("Snip failed: {e}")),
         };
         capture.start_mode = mode.to_string();
+        let monitors = capture.monitors.iter().map(|m| m.moved(rect.0, rect.1)).collect();
         *PENDING.lock() = Some(Pending {
             capture,
             restore_main,
             opened: std::time::Instant::now(),
             rect,
+            monitors,
         });
         if let Err(e) = open_overlay(&app, rect) {
             PENDING.lock().take();
@@ -150,10 +178,72 @@ fn open_overlay(app: &AppHandle, rect: (i32, i32, u32, u32)) -> tauri::Result<()
         .background_color(tauri::window::Color(0, 0, 0, 255))
         .build()?;
     crate::recording::hide_from_alt_tab(&win);
-    win.set_position(tauri::PhysicalPosition::new(x, y))?;
-    win.set_size(tauri::PhysicalSize::new(w, h))?;
+    // Over monitors with different scaling, Windows may resize the window
+    // when it lands on another monitor's scale (WM_DPICHANGED): set the
+    // place again until it holds.
+    for _ in 0..4 {
+        win.set_position(tauri::PhysicalPosition::new(x, y))?;
+        win.set_size(tauri::PhysicalSize::new(w, h))?;
+        let pos = win.outer_position()?;
+        let size = win.outer_size()?;
+        if (pos.x, pos.y, size.width, size.height) == (x, y, w, h) {
+            break;
+        }
+        log::info!("[snip] overlay landed at {pos:?} {size:?}, setting it again");
+    }
     // The page shows the window once the frozen image has painted.
     Ok(())
+}
+
+/// The scope's monitor for "monitor:<index>" (Settings › Instant replay's
+/// screen numbers), on the desktop.
+fn chosen_monitor(scope: &str) -> Option<MonRect> {
+    let n: u32 = scope.strip_prefix("monitor:")?.parse().ok()?;
+    crate::media::recorder::enumerate_monitors()
+        .into_iter()
+        .find(|m| m.index == n)
+        .map(|m| MonRect::new(m.x, m.y, m.width as i32, m.height as i32))
+}
+
+/// A snip of the made-up test desktop (`LASTSHOT_TEST_SCREEN`): one colour
+/// per monitor in 100-px squares, black between monitors.
+fn test_capture(scope: &str) -> Result<(SnipCapture, (i32, i32, u32, u32)), String> {
+    let t = TestScreen::parse(std::env::var("LASTSHOT_TEST_SCREEN").ok().as_deref());
+    let mons = t.rects();
+    let chosen = scope.strip_prefix("monitor:").and_then(|n| n.parse::<usize>().ok()).and_then(|i| mons.get(i).copied());
+    let SnipArea { area, monitors, home } = snip_area(&mons, scope, (t.cursor[0], t.cursor[1]), chosen).ok_or("no monitors")?;
+    let mut rgb = Vec::with_capacity((area.w * area.h * 3) as usize);
+    for y in 0..area.h {
+        for x in 0..area.w {
+            rgb.extend_from_slice(&test_pixel(&mons, (area.x + x, area.y + y)));
+        }
+    }
+    let windows = t
+        .windows
+        .iter()
+        .filter_map(|w| {
+            let r = MonRect::new(w.x, w.y, w.w, w.h).intersect(&area)?;
+            Some(WinRect { x: r.x - area.x, y: r.y - area.y, w: r.w, h: r.h, title: w.title.clone() })
+        })
+        .collect();
+    let image = png_data_url(&rgb, area.w as u32, area.h as u32)?;
+    Ok((
+        SnipCapture { image, width: area.w as u32, height: area.h as u32, windows, start_mode: "shot".into(), monitors, home },
+        (area.x, area.y, area.w as u32, area.h as u32),
+    ))
+}
+
+/// RGB pixels as a `data:image/png;base64,...` URL (fast compression).
+fn png_data_url(rgb: &[u8], w: u32, h: u32) -> Result<String, String> {
+    let mut png = Vec::new();
+    let enc = image::codecs::png::PngEncoder::new_with_quality(
+        &mut png,
+        image::codecs::png::CompressionType::Fast,
+        image::codecs::png::FilterType::Sub,
+    );
+    image::ImageEncoder::write_image(enc, rgb, w, h, image::ExtendedColorType::Rgb8).map_err(|e| format!("png encode: {e}"))?;
+    use base64::Engine;
+    Ok(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(&png)))
 }
 
 fn close_overlay(app: &AppHandle) {
@@ -202,10 +292,10 @@ pub async fn snip_record(
     state: State<'_, AppState>,
     region: SnipRegion,
 ) -> Result<crate::media::recorder::RecordingStatus, String> {
-    let (cap_w, cap_h, mon, restore_main) = {
+    let (cap_w, cap_h, area, restore_main, snipped) = {
         let p = PENDING.lock();
         let p = p.as_ref().ok_or("nothing to record")?;
-        (p.capture.width as f32, p.capture.height as f32, p.rect, p.restore_main)
+        (p.capture.width as i32, p.capture.height as i32, p.rect, p.restore_main, p.monitors.clone())
     };
     // The engine records one monitor (Settings › Screen): it must be this one.
     let wanted = state.settings.read().monitor_index;
@@ -215,28 +305,28 @@ pub async fn snip_record(
         .find(|m| m.index == wanted)
         .or_else(|| monitors.iter().find(|m| m.primary))
         .or(monitors.first());
-    if let Some(m) = recorded {
-        if m.x != mon.0 || m.y != mon.1 {
-            return Err(format!(
+    let recorded = recorded.ok_or("no screen to record")?;
+    let rec = MonRect::new(recorded.x, recorded.y, recorded.width as i32, recorded.height as i32);
+    // The box on the desktop.
+    let x = region.x.clamp(0, cap_w);
+    let y = region.y.clamp(0, cap_h);
+    let w = region.w.clamp(1, (cap_w - x).max(1));
+    let h = region.h.clamp(1, (cap_h - y).max(1));
+    let boxed = MonRect::new(area.0 + x, area.1 + y, w, h);
+    let crop = record_crop(boxed, rec).map_err(|_| {
+        if snipped.iter().any(|m| boxed.inside(m, 2)) {
+            format!(
                 "Lastshot records the screen {} ({}×{}). To record on this one, choose it in Settings › Instant replay › Screen.",
-                m.name.trim_start_matches("\\\\.\\"),
-                m.width,
-                m.height
-            ));
+                recorded.name.trim_start_matches("\\\\.\\"),
+                recorded.width,
+                recorded.height
+            )
+        } else {
+            "A recording covers one screen: draw the box inside one screen.".to_string()
         }
-    }
-    let x = region.x.clamp(0, cap_w as i32);
-    let y = region.y.clamp(0, cap_h as i32);
-    let w = region.w.clamp(1, cap_w as i32 - x);
-    let h = region.h.clamp(1, cap_h as i32 - y);
-    let whole = w as f32 >= cap_w - 2.0 && h as f32 >= cap_h - 2.0;
-    let area = (!whole).then(|| crate::recording::Area {
-        crop: crate::media::shrink::Crop {
-            x: x as f32 / cap_w,
-            y: y as f32 / cap_h,
-            w: w as f32 / cap_w,
-            h: h as f32 / cap_h,
-        },
+    })?;
+    let area = crop.map(|c| crate::recording::Area {
+        crop: crate::media::shrink::Crop { x: c[0], y: c[1], w: c[2], h: c[3] },
         label: format!("{w}×{h}"),
     });
     // Close the overlay without bringing Lastshot's window back.
@@ -292,7 +382,8 @@ pub async fn snip_finish(
         Some(f) => dir.join(f),
         None => dir,
     };
-    let copy = copy && copy_setting;
+    // Test copies off screen never touch the user's clipboard.
+    let copy = copy && copy_setting && !crate::startup::test_offscreen();
     // Not copying and not saving would lose the picture: save it then.
     let save = save || save_setting || !copy;
     let result = tauri::async_runtime::spawn_blocking(move || -> Result<SnipDone, String> {
@@ -368,47 +459,45 @@ mod imp {
 
     type Rect = (i32, i32, u32, u32);
 
-    pub fn capture_under_cursor() -> Result<(SnipCapture, Rect), String> {
+    unsafe extern "system" fn add_monitor(_m: HMONITOR, _dc: HDC, r: *mut RECT, lparam: LPARAM) -> BOOL {
+        let list = &mut *(lparam.0 as *mut Vec<MonRect>);
+        let r = &*r;
+        list.push(MonRect::new(r.left, r.top, r.right - r.left, r.bottom - r.top));
+        TRUE
+    }
+
+    /// Every monitor on the desktop, physical pixels.
+    pub fn monitors() -> Vec<MonRect> {
+        let mut out: Vec<MonRect> = Vec::new();
+        unsafe {
+            let _ = EnumDisplayMonitors(None, None, Some(add_monitor), LPARAM(&mut out as *mut _ as isize));
+        }
+        out
+    }
+
+    /// Freezes the scope's screens (see `snip_geo::snip_area`).
+    pub fn capture(scope: &str) -> Result<(SnipCapture, Rect), String> {
         unsafe {
             let mut pt = POINT::default();
             GetCursorPos(&mut pt).map_err(|e| e.to_string())?;
-            let mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-            let mut mi = MONITORINFO {
-                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-                ..Default::default()
-            };
-            if !GetMonitorInfoW(mon, &mut mi).as_bool() {
-                return Err("could not read the monitor size".into());
-            }
-            let r = mi.rcMonitor;
-            let (x, y, w, h) = (r.left, r.top, r.right - r.left, r.bottom - r.top);
+            let SnipArea { area, monitors: mons, home } =
+                snip_area(&monitors(), scope, (pt.x, pt.y), chosen_monitor(scope)).ok_or("could not read the monitors")?;
+            let (x, y, w, h) = (area.x, area.y, area.w, area.h);
             if w <= 0 || h <= 0 {
                 return Err("empty monitor".into());
             }
 
             let bgra = grab(x, y, w, h)?;
-            let windows = list_windows(r);
+            let windows = list_windows(RECT { left: x, top: y, right: x + w, bottom: y + h });
 
             // BGRA -> RGB for a compact PNG.
             let mut rgb = Vec::with_capacity((w * h * 3) as usize);
             for px in bgra.chunks_exact(4) {
                 rgb.extend_from_slice(&[px[2], px[1], px[0]]);
             }
-            let mut png = Vec::new();
-            let enc = image::codecs::png::PngEncoder::new_with_quality(
-                &mut png,
-                image::codecs::png::CompressionType::Fast,
-                image::codecs::png::FilterType::Sub,
-            );
-            image::ImageEncoder::write_image(enc, &rgb, w as u32, h as u32, image::ExtendedColorType::Rgb8)
-                .map_err(|e| format!("png encode: {e}"))?;
-            use base64::Engine;
-            let image = format!(
-                "data:image/png;base64,{}",
-                base64::engine::general_purpose::STANDARD.encode(&png)
-            );
+            let image = png_data_url(&rgb, w as u32, h as u32)?;
             Ok((
-                SnipCapture { image, width: w as u32, height: h as u32, windows, start_mode: "shot".into() },
+                SnipCapture { image, width: w as u32, height: h as u32, windows, start_mode: "shot".into(), monitors: mons, home },
                 (x, y, w as u32, h as u32),
             ))
         }
@@ -489,8 +578,9 @@ mod imp {
         TRUE
     }
 
-    /// Visible, titled, uncloaked top-level windows on this monitor,
-    /// front-most first, clipped to the monitor.
+    /// Visible, titled, uncloaked top-level windows in the area, front-most
+    /// first, clipped to it. The desktop itself (Progman / WorkerW, which
+    /// spans every monitor) is left out: a click there takes that monitor.
     unsafe fn list_windows(mon: RECT) -> Vec<WinRect> {
         let mut hwnds: Vec<HWND> = Vec::new();
         let _ = EnumWindows(Some(collect), LPARAM(&mut hwnds as *mut _ as isize));
@@ -501,6 +591,12 @@ mod imp {
             }
             let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
             if ex & WS_EX_TOOLWINDOW.0 != 0 {
+                continue;
+            }
+            let mut class = [0u16; 32];
+            let n = GetClassNameW(hwnd, &mut class);
+            let class = String::from_utf16_lossy(&class[..n.max(0) as usize]);
+            if class == "Progman" || class == "WorkerW" {
                 continue;
             }
             let mut cloaked: u32 = 0;
@@ -625,7 +721,7 @@ mod imp {
 #[cfg(any(not(windows), feature = "headless-sim"))]
 mod imp {
     use super::*;
-    pub fn capture_under_cursor() -> Result<(SnipCapture, (i32, i32, u32, u32)), String> {
+    pub fn capture(_scope: &str) -> Result<(SnipCapture, (i32, i32, u32, u32)), String> {
         Err("snipping requires Windows".into())
     }
     pub fn snapshot(_x: i32, _y: i32, _w: u32, _h: u32, _max_w: u32) -> Result<String, String> {

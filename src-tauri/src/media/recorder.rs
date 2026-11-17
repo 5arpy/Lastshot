@@ -4019,7 +4019,8 @@ pub fn free_space(dir: &Path) -> Option<u64> {
     }
 }
 
-fn gb(bytes: u64) -> String {
+/// "6.4 GB", "458 GB".
+pub fn gb(bytes: u64) -> String {
     let g = bytes as f64 / 1e9;
     if g >= 10.0 {
         format!("{g:.0} GB")
@@ -4170,8 +4171,9 @@ fn record_loop(
             if let Some(free) = free_space(&dir) {
                 if free <= opts.reserve_bytes {
                     ended = Some(format!(
-                        "The disk is almost full ({} left), so the recording stopped. Everything up to then is saved.",
-                        gb(free)
+                        "The drive is down to {} free (Lastshot keeps {} free), so the recording stopped. Everything up to then is saved.",
+                        gb(free),
+                        gb(opts.reserve_bytes)
                     ));
                     break;
                 }

@@ -212,6 +212,24 @@ async fn start_inner(app: &AppHandle, area: Option<Area>) -> Result<RecordingSta
     if state.engine.recording_status().is_some() {
         return Err("Already recording".into());
     }
+    // No room on the drive: say so now, not after a countdown and a
+    // recording that stops at once.
+    {
+        let (reserve, dir) = {
+            let s = state.settings.read();
+            let rec = s.recording_dir.trim().to_string();
+            (s.record_options().reserve_bytes, if rec.is_empty() { state.output_dir() } else { PathBuf::from(rec) })
+        };
+        let _ = std::fs::create_dir_all(&dir);
+        if let Some(free) = crate::media::recorder::free_space(&dir).filter(|&f| reserve > 0 && f <= reserve) {
+            use crate::media::recorder::gb;
+            return Err(format!(
+                "Not enough free space: the drive has {} free and Lastshot keeps {} free. Free some space, or keep less free in Settings > Screen recording.",
+                gb(free),
+                gb(reserve)
+            ));
+        }
+    }
     let countdown = state.settings.read().record_countdown.min(60);
     if countdown > 0 {
         run_countdown(app, countdown).await?;
